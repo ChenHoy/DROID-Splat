@@ -5,7 +5,7 @@
 
 This repository borrows from the following work  
 - "**GO-SLAM: Global Optimization for Consistent 3D Instant Reconstruction, Zhang et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
-- "**DROID-Calib: DROID-SLAM with camera calibration, Hagemann et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
+- "**Deep geometry-aware camera self-calibration from video, Hagemann et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
 
 
 ## :clapper: Introduction
