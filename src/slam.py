@@ -222,7 +222,7 @@ class SLAM:
         while self.all_trigered < self.num_running_thread:
             pass
         for timestamp, image, depth, intrinsic, gt_pose in tqdm(stream):
-            if self.mode != "rgbd":
+            if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
             input_queue.put(image)
@@ -309,17 +309,22 @@ class SLAM:
         self.all_trigered += 1
         while self.tracking_finished < 1 or self.optimizing_finished < 1:
             if not input_queue.empty():
-                rgb = input_queue.get()
-                depth = input_queue.get()
+                try:
+                    rgb = input_queue.get()
+                    depth = input_queue.get()
 
-                rgb_image = rgb[0, [2, 1, 0], ...].permute(1, 2, 0).clone().cpu()
-                cv2.imshow("RGB", rgb_image.numpy())
-                if self.mode == "rgbd" and depth is not None:
-                    # Create normalized depth map with intensity plot
-                    depth_image = depth2rgb(depth.clone().cpu())[0]
-                    # Convert to BGR for cv2
-                    cv2.imshow("depth", depth_image[..., ::-1])
-                cv2.waitKey(1)
+                    rgb_image = rgb[0, [2, 1, 0], ...].permute(1, 2, 0).clone().cpu()
+                    cv2.imshow("RGB", rgb_image.numpy())
+                    if self.mode in ["rgbd", "prgbd"] and depth is not None:
+                        # Create normalized depth map with intensity plot
+                        depth_image = depth2rgb(depth.clone().cpu())[0]
+                        # Convert to BGR for cv2
+                        cv2.imshow("depth", depth_image[..., ::-1])
+                    cv2.waitKey(1)
+                except Exception as e:
+                    print(e)
+                    print("Continuing...")
+                    pass
 
     def terminate(self, rank, stream=None):
         """fill poses for non-keyframe images and evaluate"""

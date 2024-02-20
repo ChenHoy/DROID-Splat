@@ -89,12 +89,15 @@ class BaseDataset(Dataset):
             return None
         depth_path = self.depth_paths[index]
         if ".png" in depth_path:
-            depth_data = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+            depth_data = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32)
+            depth_data /= self.png_depth_scale
         elif ".exr" in depth_path:
-            depth_data = readEXR_onlydepth(depth_path)
+            depth_data = readEXR_onlydepth(depth_path).astype(np.float32)
+            depth_data /= self.png_depth_scale
+        elif ".npy" in depth_path:
+            depth_data = np.load(depth_path).astype(np.float32)
         else:
             raise TypeError(depth_path)
-        depth_data = depth_data.astype(np.float32) / self.png_depth_scale
 
         return depth_data
 
@@ -183,9 +186,18 @@ class Replica(BaseDataset):
         )
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
-        self.depth_paths = sorted(
-            glob.glob(os.path.join(self.input_folder, "results/depth*.png"))
-        )
+        # For Pseudo RGBD, we use monocular depth predictions in another folder
+        if cfg["mode"] == "prgbd":
+            self.depth_paths = sorted(
+                glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
+            )
+            assert (
+                len(self.depth_paths) == self.n_img
+            ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
+        else:
+            self.depth_paths = sorted(
+                glob.glob(os.path.join(self.input_folder, "results/depth*.png"))
+            )
 
         self.color_paths = self.color_paths[::stride]
         self.depth_paths = self.depth_paths[::stride]
