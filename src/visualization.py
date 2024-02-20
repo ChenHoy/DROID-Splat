@@ -1,7 +1,7 @@
 import time
 import argparse
 import numpy as np
-from typing import Dict
+from typing import Dict, Optional
 import ipdb
 from pathlib import Path
 from tqdm import tqdm
@@ -13,6 +13,10 @@ import droid_backends
 from lietorch import SE3
 import cv2
 import open3d as o3d
+
+from matplotlib.pyplot import get_cmap
+import matplotlib.pyplot as plt
+import matplotlib as mpl
 
 # Ignore warnings [DANGEROUS] (activate this when debugging!)
 # o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
@@ -34,6 +38,104 @@ CAM_POINTS = np.array(
 CAM_LINES = np.array(
     [[1, 2], [2, 3], [3, 4], [4, 1], [1, 0], [0, 2], [3, 0], [0, 4], [5, 7], [7, 6]]
 )
+
+
+def depth2rgb(depths: torch.Tensor) -> np.ndarray:
+    """Convert a depth array to a color representation.
+
+    args:
+    ---
+    depths [torch.Tensor]: Depth tensor of shape (N, H, W) or (H, W)
+    """
+    if depths.ndim == 2:
+        depths = depths.unsqueeze(0)
+
+    depths = depths.cpu().numpy()
+    rgb = []
+    for depth in depths:
+        rgb.append(get_clipped_depth_visualization(depth))
+    return np.asarray(rgb)[..., :3]
+
+
+def get_clipped_depth_visualization(
+    depth: np.ndarray,
+    min_depth: float = 0.0,
+    max_depth: float = 5.0,
+    cmap: str = "Spectral",
+) -> np.ndarray:
+    """
+    Get a color image of a depth/disparity array. This normalizes the values
+    and cuts off extreme outliers, so that we get a good picture of the scene geometry.
+    Color map can be choosen to be any matplotlib colormap, common choices for depth are
+    "magma", "gray", "spectral", "plasma" or "turbo".
+    """
+    vinds = depth > 0
+    depth_rgb = array2rgb(depth, cmap=cmap, vmin=min_depth, vmax=max_depth)
+    # Just mark invalid pixels black
+    depth_rgb[~vinds] = np.array([0.0, 0.0, 0.0])
+    return depth_rgb
+
+
+def get_normalized_depth_visualization(
+    depth: np.ndarray,
+    pc: int = 98,
+    crop_percent: float = 0,
+    cmap: str = "magma",
+    eps: float = 1e-8,
+) -> np.ndarray:
+    """
+    Get a color image of a depth/disparity array. This normalizes the values
+    and cuts off extreme outliers, so that we get a good picture of the scene geometry.
+    Color map can be choosen to be any matplotlib colormap, common choices for depth are
+    "magma", "gray" or "turbo".
+
+    NOTE If the depth map is a constant 0.0 aka your model produced garbage, this simply
+    returns the input array.
+    """
+
+    vinds = depth > 0
+    # convert to disparity
+    depth = 1.0 / (depth + 1)
+
+    z1 = np.percentile(depth[vinds], pc)
+    z2 = np.percentile(depth[vinds], 100 - pc)
+
+    depth = (depth - z2) / ((z1 - z2) + eps)
+    depth = np.clip(depth, 0, 1)
+
+    depth_rgb = array2rgb(depth, cmap=cmap)
+    # NOTE when we use this function for smoothness maps, we sometimes have an all False array
+    if np.all(vinds):
+        keep_H = int(depth_rgb.shape[0] * (1 - crop_percent))
+    else:
+        # Just mark invalid pixels black
+        depth_rgb[~vinds] = np.array([0.0, 0.0, 0.0])
+        keep_H = int(depth_rgb.shape[0] * (1 - crop_percent))
+    return depth_rgb[:keep_H]
+
+
+def array2rgb(
+    im: np.ndarray,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    cmap: str = "gray",
+) -> np.ndarray:
+    """
+    Convert array to color map, if given limits [vmin, vmax], the values are normalized.
+
+    args:
+    ---
+    im: Numpy array of shape [H x W], [H x W x 1] or [B x H x W x 1]
+
+    returns:
+    ---
+    rgb_img: RGB array of shape [H x W x 3] or [B x H x W x 3]
+    """
+    cmap = get_cmap(cmap)
+    norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+    rgba_img = cmap(norm(im).astype(np.float32))
+    rgb_img = np.delete(rgba_img, 3, -1)
+    return rgb_img
 
 
 def white_balance(img):
@@ -111,11 +213,11 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
     droid_visualization.cameras = {}
     droid_visualization.points = {}
     droid_visualization.warmup = 8
-    droid_visualization.scale = 1.0  # 1.0
+    droid_visualization.scale = 10.0  # 1.0
     droid_visualization.camera_scale = 0.05
     droid_visualization.ix = 0
 
-    droid_visualization.filter_thresh = 0.01
+    droid_visualization.filter_thresh = 0.005
     droid_visualization.do_reset = True
 
     def increase_filter(vis):

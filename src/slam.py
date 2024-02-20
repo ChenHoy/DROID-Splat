@@ -18,7 +18,7 @@ from .backend import Backend
 from .depth_video import DepthVideo
 from .motion_filter import MotionFilter
 from .multiview_filter import MultiviewFilter
-from .visualization import droid_visualization
+from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .mapping import Mapper
 from .render import Renderer
@@ -224,7 +224,10 @@ class SLAM:
         for timestamp, image, depth, intrinsic, gt_pose in tqdm(stream):
             if self.mode != "rgbd":
                 depth = None
-            input_queue.put(image)  # Transmit image into other thread for visualization
+            # Transmit the incoming stream to another visualization thread
+            input_queue.put(image)
+            input_queue.put(depth)
+
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
             # predict mesh every 50 frames for video making
@@ -306,9 +309,16 @@ class SLAM:
         self.all_trigered += 1
         while self.tracking_finished < 1 or self.optimizing_finished < 1:
             if not input_queue.empty():
-                frame = input_queue.get()
-                image = frame[0, [2, 1, 0], ...].permute(1, 2, 0).clone().cpu().numpy()
-                cv2.imshow("image", image)
+                rgb = input_queue.get()
+                depth = input_queue.get()
+
+                rgb_image = rgb[0, [2, 1, 0], ...].permute(1, 2, 0).clone().cpu()
+                cv2.imshow("RGB", rgb_image.numpy())
+                if self.mode == "rgbd" and depth is not None:
+                    # Create normalized depth map with intensity plot
+                    depth_image = depth2rgb(depth.clone().cpu())[0]
+                    # Convert to BGR for cv2
+                    cv2.imshow("depth", depth_image[..., ::-1])
                 cv2.waitKey(1)
 
     def terminate(self, rank, stream=None):
@@ -411,10 +421,11 @@ class SLAM:
 
     def run(self, stream):
         processes = [
+            # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
             mp.Process(target=self.optimizing, args=(2, False)),
-            mp.Process(target=self.multiview_filtering, args=(3, False)),
+            mp.Process(target=self.multiview_filtering, args=(3, True)),
             mp.Process(target=self.visualizing, args=(4, False)),
             #### These are for visual quality only and generating a map of indoor rooms afterwards
             mp.Process(target=self.mapping, args=(5, True)),
