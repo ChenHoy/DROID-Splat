@@ -142,7 +142,6 @@ class Backend:
             + 1,  # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
             t1=t_end,
             iters=2,
-            use_inactive=False,
             steps=steps,
             max_t=t_end,
             ba_type="dense",

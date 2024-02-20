@@ -310,7 +310,7 @@ class DepthVideo:
                 ii,
                 jj,
                 beta,
-                # self.model_id,
+                self.model_id,
             )
 
             d2 = droid_backends.frame_distance(
@@ -320,7 +320,7 @@ class DepthVideo:
                 jj,
                 ii,
                 beta,
-                # self.model_id,
+                self.model_id,
             )
 
             d = 0.5 * (d1 + d2)
@@ -333,7 +333,7 @@ class DepthVideo:
                 ii,
                 jj,
                 beta,
-                # self.model_id,
+                self.model_id,
             )
 
         if return_matrix:
@@ -377,11 +377,11 @@ class DepthVideo:
                 t0,
                 t1,
                 iters,
-                # self.model_id,
+                self.model_id,
                 lm,
                 ep,
                 motion_only,
-                # self.opt_intr,
+                self.opt_intr,
             )
 
             self.disps.clamp_(min=0.001)

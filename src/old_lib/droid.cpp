@@ -1,12 +1,3 @@
-// Copyright (c) 2022 Copyright holder of the paper "DroidCalib: deep geometry-aware camera 
-// self-calibration from video" submitted to "IEEE/CVF Conference on Computer Vision and 
-// Pattern Recognition 2023" for review.
-// All rights reserved.
-//
-// This source code is derived from DROID-SLAM (https://github.com/princeton-vl/DROID-SLAM)
-// Copyright (c) 2021, Princeton Vision & Learning Lab, licensed under the BSD 3-Clause License,
-// cf. 3rd-party-licenses.txt file in the root directory of this source tree.
-
 #include <torch/extension.h>
 #include <vector>
 
@@ -17,6 +8,7 @@ std::vector<torch::Tensor> projective_transform_cuda(
   torch::Tensor intrinsics,
   torch::Tensor ii,
   torch::Tensor jj);
+
 
 
 torch::Tensor depth_filter_cuda(
@@ -33,8 +25,7 @@ torch::Tensor frame_distance_cuda(
   torch::Tensor intrinsics,
   torch::Tensor ii,
   torch::Tensor jj,
-  const float beta,
-  const int model_id);
+  const float beta);
 
 std::vector<torch::Tensor> projmap_cuda(
   torch::Tensor poses,
@@ -61,11 +52,9 @@ std::vector<torch::Tensor> ba_cuda(
     const int t0,
     const int t1,
     const int iterations,
-    const int model_id,
     const float lm,
     const float ep,
-    const bool motion_only,
-    const bool optimize_intrinsics);
+    const bool motion_only);
 
 std::vector<torch::Tensor> corr_index_cuda_forward(
   torch::Tensor volume,
@@ -109,11 +98,9 @@ std::vector<torch::Tensor> ba(
     const int t0,
     const int t1,
     const int iterations,
-    const int model_id,
     const float lm,
     const float ep,
-    const bool motion_only,
-    const bool optimize_intrinsics) {
+    const bool motion_only) {
 
   CHECK_INPUT(targets);
   CHECK_INPUT(weights);
@@ -125,7 +112,7 @@ std::vector<torch::Tensor> ba(
   CHECK_INPUT(jj);
 
   return ba_cuda(poses, disps, intrinsics, disps_sens, targets, weights,
-                 eta, ii, jj, t0, t1, iterations, model_id, lm, ep, motion_only, optimize_intrinsics);
+                 eta, ii, jj, t0, t1, iterations, lm, ep, motion_only);
 
 }
 
@@ -136,8 +123,7 @@ torch::Tensor frame_distance(
     torch::Tensor intrinsics,
     torch::Tensor ii,
     torch::Tensor jj,
-    const float beta,
-    const int model_id) {
+    const float beta) {
 
   CHECK_INPUT(poses);
   CHECK_INPUT(disps);
@@ -145,7 +131,7 @@ torch::Tensor frame_distance(
   CHECK_INPUT(ii);
   CHECK_INPUT(jj);
 
-  return frame_distance_cuda(poses, disps, intrinsics, ii, jj, beta, model_id);
+  return frame_distance_cuda(poses, disps, intrinsics, ii, jj, beta);
 
 }
 
