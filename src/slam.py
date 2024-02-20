@@ -420,6 +420,7 @@ class SLAM:
         print("Terminate: Done!")
 
     def run(self, stream):
+        # TODO why exactly does our open3d visualization look so unclean compared to the droidcalib one?
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
