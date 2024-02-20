@@ -1,13 +1,13 @@
 sync_method: strict
 verbose: True
 dataset: "folder"
-mode: "mono"  # 'mono', 'stereo', 'rgbd'
+mode: "mono"  
 stride: 2
 only_tracking: False
 
 mapping:
   device: "cuda:0"
-  bound: [[-10.0, 10.0], [-10.0, 10.0], [-10.0, 10.0]]
+  bound: [[-20.0, 20.0], [-20.0, 20.0], [-20.0, 20.0]]
   BA: True
   BA_cam_lr: 0.001
   net_lr: 0.001
@@ -17,7 +17,7 @@ mapping:
   w_sdf_loss: 2.0
   w_eikonal_loss: 0.1
   uncertainty_weight_loss: True
-  mapping_window_size: 22
+  mapping_window_size: 30
   pixels: 4400
   iters: 2
   post_processing_iters: 10
@@ -47,49 +47,47 @@ tracking:
   pretrained: ./pretrained/droid.pth
   # pretrained: ./../droidcalib/droid.pth # Sanity check
   buffer: 1024
-  # TODO this is in stark contrast to demo where beta is 0.3
-  beta: 0.75  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
+  beta: 0.75  # beta * Distance(R|t) + (1-beta) * Distance(I|t), default vanilla DROID-SLAM: 0.3
   warmup: 8
   upsample: True
   motion_filter:
     thresh: 5.0  # add as keyframe if avg flow >= 4.0 pixels
   multiview_filter:
-    thresh: 0.01  # depth error < 0.01m
+    thresh: 0.005  # depth error < 0.01m
     visible_num: 2  # points viewed by at least 2 cameras
     kernel_size: inf
     bound_enlarge_scale: 1.20
   frontend:
     enable_loop: True
     keyframe_thresh: 6.0  # remove keyframe if avg flow < 4.0 pixels
-    thresh: 16.0  # only consider edge with avg flow < 16.0 pixels
+    thresh: 10.0  # only consider edge with avg flow < 16.0 pixels
     window: 25  # local ba window size
     radius: 2
     nms: 1
     max_factors: 100  # num of edges within local ba
   backend:
-    thresh: 25.0  # only consider edge with avg flow < 25.0 pixels
-    radius: 1
+    thresh: 20.0  # only consider edge with avg flow < 25.0 pixels
+    radius: 2
     nms: 5
     # used for loop detection
-    loop_window: 25
-    loop_thresh: 50.0  # only consider edge with avg flow < 50.0 pixels
-    loop_radius: 1
+    loop_window: 100
+    loop_thresh: 20.0  # only consider edge with avg flow < 50.0 pixels
+    loop_radius: 3
     loop_nms: 12
 
 cam:
   ### original camera parameters
-  H: 540
-  W: 960
+  H: 1920
+  W: 1080
   ### target/output camera settings, camera_size -> resize -> crop -> target_size
   H_out: 540
   W_out: 960
-  H_edge: 0 # NOTE i think this is just padding
+  H_edge: 0 # NOTE I think this is just padding
   W_edge: 0
-  fx: 577.590698
-  fy: 578.729797
-  cx: 318.905426
-  cy: 242.683609
-  png_depth_scale: 1000.0 #for depth image in png format
+  fx: 1296.0
+  fy: 1296.0
+  cx: 540
+  cy: 960
   calibration_txt: ''
 
 rendering:

@@ -34,29 +34,35 @@ class Mesher(object):
         self.reload_map = slam.reload_map
         self.scale = 1.0
 
-        self.resolution = cfg['meshing']['resolution']  # 256
-        self.level_set = cfg['meshing']['level_set']  # 0.0
-        self.remove_small_geometry_threshold = cfg['meshing']['remove_small_geometry_threshold']  # 0.2
-        self.get_largest_components = cfg['meshing']['get_largest_components']  # False
-        self.eval_rec = cfg['meshing']['eval_rec']
-        self.n_points_to_eval = cfg['meshing']['n_points_to_eval']
-        self.mesh_threshold_to_eval = cfg['meshing']['mesh_threshold_to_eval']
-        self.gt_mesh_path = cfg['meshing']['gt_mesh_path']
-        self.forecast_radius = cfg['meshing']['forecast_radius']
+        self.resolution = cfg["meshing"]["resolution"]  # 256
+        self.level_set = cfg["meshing"]["level_set"]  # 0.0
+        self.remove_small_geometry_threshold = cfg["meshing"][
+            "remove_small_geometry_threshold"
+        ]  # 0.2
+        self.get_largest_components = cfg["meshing"]["get_largest_components"]  # False
+        self.eval_rec = cfg["meshing"]["eval_rec"]
+        self.n_points_to_eval = cfg["meshing"]["n_points_to_eval"]
+        self.mesh_threshold_to_eval = cfg["meshing"]["mesh_threshold_to_eval"]
+        self.gt_mesh_path = cfg["meshing"]["gt_mesh_path"]
+        self.forecast_radius = cfg["meshing"]["forecast_radius"]
 
         assert self.forecast_radius >= 0, self.forecast_radius
 
         self.verbose = slam.verbose
-        self.device = cfg['mapping']['device']
+        self.device = cfg["mapping"]["device"]
 
-        os.makedirs(f'{self.output}/mesh/', exist_ok=True)
+        os.makedirs(f"{self.output}/mesh/", exist_ok=True)
 
-        self.H, self.W, self.fx, self.fy, self.cx, self.cy = slam.H, slam.W, slam.fx, slam.fy, slam.cx, slam.cy
+        self.H, self.W, self.fx, self.fy, self.cx, self.cy = (
+            slam.H,
+            slam.W,
+            slam.fx,
+            slam.fy,
+            slam.cx,
+            slam.cy,
+        )
 
-    def point_masks(self,
-                    input_points,
-                    depth_list,
-                    estimate_c2w_list):
+    def point_masks(self, input_points, depth_list, estimate_c2w_list):
         """
         Split the input points into seen, unseen, and forecast,
         according to the estimated camera pose and depth image.
@@ -75,14 +81,16 @@ class Mesher(object):
 
         """
         H, W, fx, fy, cx, cy = self.H, self.W, self.fx, self.fy, self.cx, self.cy
-        device =self.device
+        device = self.device
         if not isinstance(input_points, torch.Tensor):
             input_points = torch.from_numpy(input_points)
         input_points = input_points.clone().detach().float()
         mask = []
         forecast_mask = []
         eps = 0.05
-        for _, pnts in enumerate(torch.split(input_points, self.points_batch_size, dim=0)):
+        for _, pnts in enumerate(
+            torch.split(input_points, self.points_batch_size, dim=0)
+        ):
             n_pts, _ = pnts.shape
             valid = torch.zeros(n_pts).to(device).bool()
             valid_forecast = torch.zeros(n_pts).to(device).bool()
@@ -93,7 +101,12 @@ class Mesher(object):
                 depth = depth_list[i].to(device)
                 w2c = torch.inverse(c2w).to(device).float()
                 ones = torch.ones_like(points[:, 0]).reshape(-1, 1).to(device)
-                homo_points = torch.cat([points, ones], dim=1).reshape(-1, 4, 1).to(device).float()
+                homo_points = (
+                    torch.cat([points, ones], dim=1)
+                    .reshape(-1, 4, 1)
+                    .to(device)
+                    .float()
+                )
                 cam_cord_homo = w2c @ homo_points
                 cam_cord = cam_cord_homo[:, :3, :]  # [N, 3, 1]
                 K = np.eye(3)
@@ -106,19 +119,35 @@ class Mesher(object):
                 u, v = uv[:, 0, 0].float(), uv[:, 1, 0].float()
                 z = z[:, 0, 0].float()
 
-                in_frustum = (u >= 0) & (u <= W-1) & (v >= 0) & (v <= H-1) & (z > 0)
-                forecast_frustum = (u >= -r) & (u <= W-1+r) & (v >= -r) & (v <= H-1+r) & (z > 0)
+                in_frustum = (u >= 0) & (u <= W - 1) & (v >= 0) & (v <= H - 1) & (z > 0)
+                forecast_frustum = (
+                    (u >= -r)
+                    & (u <= W - 1 + r)
+                    & (v >= -r)
+                    & (v <= H - 1 + r)
+                    & (z > 0)
+                )
 
                 depth = depth.reshape(1, 1, H, W)
                 vgrid = uv.reshape(1, 1, -1, 2)
                 # normalized to [-1, 1]
-                vgrid[..., 0] = (vgrid[..., 0] / (W - 1) * 2.0 - 1.0)
-                vgrid[..., 1] = (vgrid[..., 1] / (H - 1) * 2.0 - 1.0)
+                vgrid[..., 0] = vgrid[..., 0] / (W - 1) * 2.0 - 1.0
+                vgrid[..., 1] = vgrid[..., 1] / (H - 1) * 2.0 - 1.0
 
-                depth_sample = F.grid_sample(depth, vgrid, padding_mode='border', align_corners=True)
+                depth_sample = F.grid_sample(
+                    depth, vgrid, padding_mode="border", align_corners=True
+                )
                 depth_sample = depth_sample.reshape(-1)
-                is_front_face = torch.where((depth_sample > 0.0), (z < (depth_sample + eps)), torch.ones_like(z).bool())
-                is_forecast_face = torch.where((depth_sample > 0.0), (z < (depth_sample + eps)), torch.ones_like(z).bool())
+                is_front_face = torch.where(
+                    (depth_sample > 0.0),
+                    (z < (depth_sample + eps)),
+                    torch.ones_like(z).bool(),
+                )
+                is_forecast_face = torch.where(
+                    (depth_sample > 0.0),
+                    (z < (depth_sample + eps)),
+                    torch.ones_like(z).bool(),
+                )
                 in_frustum = in_frustum & is_front_face
 
                 valid = valid | in_frustum.bool()
@@ -134,7 +163,6 @@ class Mesher(object):
         forecast_mask = np.concatenate(forecast_mask, axis=0)
 
         return mask, forecast_mask
-
 
     @torch.no_grad()
     def get_connected_mesh(self, mesh, get_largest_components=False):
@@ -153,11 +181,7 @@ class Mesher(object):
         return mesh
 
     @torch.no_grad()
-    def cull_mesh(self,
-                  mesh,
-                  estimate_c2w_list,
-                  bound,
-                  mesh_out_file):
+    def cull_mesh(self, mesh, estimate_c2w_list, bound, mesh_out_file):
         """
         Extract mesh from scene representation and save mesh to file.
         Args:
@@ -171,24 +195,33 @@ class Mesher(object):
 
             if bound is not None:
                 # cull with bound
-                print(f'Start Mesh Culling:  {step}(Bound)', end='')
+                print(f"Start Mesh Culling:  {step}(Bound)", end="")
                 vertices = mesh.vertices[:, :3]
                 if isinstance(bound, np.ndarray):
                     eps = 0.001
-                    bound_mask = np.all(vertices >= (bound[:, 0] - eps), axis=1) & \
-                                 np.all(vertices <= (bound[:, 1] + eps), axis=1)
+                    bound_mask = np.all(
+                        vertices >= (bound[:, 0] - eps), axis=1
+                    ) & np.all(vertices <= (bound[:, 1] + eps), axis=1)
                 else:
-                    bound_mask = bound.in_bound(np.array(vertices)) # N'
+                    bound_mask = bound.in_bound(np.array(vertices))  # N'
                 face_mask = bound_mask[mesh.faces].all(axis=1)
                 mesh.update_faces(face_mask)
                 mesh.remove_unreferenced_vertices()
-                mesh.export(f'{self.output}/mesh/bound_mesh.ply')
+                mesh.export(f"{self.output}/mesh/bound_mesh.ply")
                 step += 1
 
             # cull with 3d projection
-            print(f' --->> {step}(Projection)', end='')
+            print(f" --->> {step}(Projection)", end="")
             depth_list = extract_depth_from_mesh(
-                mesh, estimate_c2w_list, H=self.H, W=self.W, fx=self.fx, fy=self.fy, cx=self.cx, cy=self.cy, far=20.0
+                mesh,
+                estimate_c2w_list,
+                H=self.H,
+                W=self.W,
+                fx=self.fx,
+                fy=self.fy,
+                cx=self.cx,
+                cy=self.cy,
+                far=20.0,
             )
 
             vertices = mesh.vertices[:, :3]
@@ -199,17 +232,19 @@ class Mesher(object):
             mesh_with_hole = deepcopy(mesh)
             mesh_with_hole.update_faces(face_mask)
             mesh_with_hole.remove_unreferenced_vertices()
-            mesh_with_hole.export(f'{self.output}/mesh/mesh_with_hole.ply')
+            mesh_with_hole.export(f"{self.output}/mesh/mesh_with_hole.ply")
             step += 1
 
             # cull by computing connected components
-            print(f' --->> {step}(Component)', end='')
-            cull_mesh = self.get_connected_mesh(mesh_with_hole, self.get_largest_components)
+            print(f" --->> {step}(Component)", end="")
+            cull_mesh = self.get_connected_mesh(
+                mesh_with_hole, self.get_largest_components
+            )
             step += 1
 
             if abs(self.forecast_radius) > 0:
                 # for forecasting
-                print(f' --->> {step}(Forecast:{self.forecast_radius})', end='')
+                print(f" --->> {step}(Forecast:{self.forecast_radius})", end="")
                 forecast_face_mask = forecast_mask[mesh.faces].all(axis=1)
                 forecast_mesh = deepcopy(mesh)
                 forecast_mesh.update_faces(forecast_face_mask)
@@ -228,14 +263,16 @@ class Mesher(object):
                 forecast_face_mask = bound_mask[forecast_mesh.faces].all(axis=1)
                 forecast_mesh.update_faces(forecast_face_mask)
                 forecast_mesh.remove_unreferenced_vertices()
-                forecast_mesh = self.get_connected_mesh(forecast_mesh, self.get_largest_components)
+                forecast_mesh = self.get_connected_mesh(
+                    forecast_mesh, self.get_largest_components
+                )
                 step += 1
             else:
                 forecast_mesh = deepcopy(cull_mesh)
 
             cull_mesh.export(mesh_out_file)
-            forecast_mesh.export(mesh_out_file.replace('.ply', '_forecast.ply'))
-            print(' --->> Done!')
+            forecast_mesh.export(mesh_out_file.replace(".ply", "_forecast.ply"))
+            print(" --->> Done!")
 
             return cull_mesh, forecast_mesh
 
@@ -246,24 +283,38 @@ class Mesher(object):
         """
         net = copy.deepcopy(self.shared_mapping_net).to(self.device)
         cur_idx = self.video.counter.value
-        timestamp = self.video.timestamp[cur_idx-1]
+        timestamp = self.video.timestamp[cur_idx - 1]
         aabb = None
         kf_c2w_list = SE3(self.video.poses.detach()[:cur_idx]).inv().matrix().data.cpu()
 
         if the_end:
             import droid_backends
             import open3d as o3d
+
             filter_thresh = 0.01
             filter_visible_num = 3
 
             dirty_index = torch.arange(0, cur_idx).long().to(self.device)
-            poses = torch.index_select(self.video.poses.detach(), dim=0, index=dirty_index)
-            disps = torch.index_select(self.video.disps_up.detach(), dim=0, index=dirty_index)
-            common_intrinsic_id = 0  # we assume the intrinsics are the same within one scene
-            intrinsic = self.video.intrinsics[common_intrinsic_id].detach() * self.video.scale_factor
-            w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(self.device)
+            poses = torch.index_select(
+                self.video.poses.detach(), dim=0, index=dirty_index
+            )
+            disps = torch.index_select(
+                self.video.disps_up.detach(), dim=0, index=dirty_index
+            )
+            common_intrinsic_id = (
+                0  # we assume the intrinsics are the same within one scene
+            )
+            intrinsic = (
+                self.video.intrinsics[common_intrinsic_id].detach()
+                * self.video.scale_factor
+            )
+            w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(
+                self.device
+            )
 
-            points = droid_backends.iproj((w2w * SE3(poses).inv()).data, disps, intrinsic).cpu() # [b, h, w 3]
+            points = droid_backends.iproj(
+                (w2w * SE3(poses).inv()).data, disps, intrinsic
+            ).cpu()  # [b, h, w 3]
             thresh = filter_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
             count = droid_backends.depth_filter(
                 poses, disps, intrinsic, dirty_index, thresh
@@ -271,35 +322,43 @@ class Mesher(object):
 
             count = count.cpu()
             disps = disps.cpu()
-            masks = (count >= filter_visible_num)
-            masks = masks & (disps > 0.01 * disps.mean(dim=[1, 2], keepdim=True))  # filter out far points, [b, h, w]
+            masks = count >= filter_visible_num
+            masks = masks & (
+                disps > 0.01 * disps.mean(dim=[1, 2], keepdim=True)
+            )  # filter out far points, [b, h, w]
             sel_points = points.reshape(-1, 3)[masks.reshape(-1)]
 
             aabb = OrientedBoundingBox()
             aabb.compute_from_pointcloud(sel_points.detach().cpu().numpy(), extend=0.1)
 
-        return timestamp, cur_idx-1, net, aabb, kf_c2w_list
+        return timestamp, cur_idx - 1, net, aabb, kf_c2w_list
 
-
-    def __call__(self, the_end=False, estimate_c2w_list=None, gt_c2w_list=None, trans_init=None):
+    def __call__(
+        self, the_end=False, estimate_c2w_list=None, gt_c2w_list=None, trans_init=None
+    ):
         if self.reload_map > 0 or the_end:
 
-            timestamp, cur_idx, net, bound, kf_c2w_list = self.update_param_from_mapping(the_end=True)
-            prefix = f'final_raw' if the_end else f'{int(timestamp):05d}'
-            mesh_out_file = f'{self.output}/mesh/{prefix}_mesh.ply'
+            timestamp, cur_idx, net, bound, kf_c2w_list = (
+                self.update_param_from_mapping(the_end=True)
+            )
+            prefix = f"final_raw" if the_end else f"{int(timestamp):05d}"
+            mesh_out_file = os.path.join(self.output, "mesh", f"{prefix}_mesh.ply")
 
             mesh = net.extract_geometry(
                 resolution=self.resolution,
                 threshold=self.level_set,
                 c2w_ref=None,
                 save_path=None,
-                color=True)
+                color=True,
+            )
             mesh.export(mesh_out_file)
 
             if len(mesh.vertices) < 500:
                 return
 
-            c2w_list = estimate_c2w_list if estimate_c2w_list is not None else kf_c2w_list
+            c2w_list = (
+                estimate_c2w_list if estimate_c2w_list is not None else kf_c2w_list
+            )
             cull_mesh, forecast_mesh = self.cull_mesh(
                 mesh=mesh,
                 bound=bound,
@@ -308,22 +367,37 @@ class Mesher(object):
             )
 
             if the_end:
-                if os.path.exists(self.gt_mesh_path) and self.gt_mesh_path.find('.ply') > -1:
+                if (
+                    os.path.exists(self.gt_mesh_path)
+                    and self.gt_mesh_path.find(".ply") > -1
+                ):
                     gt_mesh = trimesh.load_mesh(self.gt_mesh_path, process=False)
 
-                    aligned_mesh, transformation = align_mesh(cull_mesh, gt_mesh, threshold=0.1, trans_init=trans_init, return_transformation=True)
-                    aligned_mesh.export(f'{self.output}/mesh/aligned_mesh.ply')
+                    aligned_mesh, transformation = align_mesh(
+                        cull_mesh,
+                        gt_mesh,
+                        threshold=0.1,
+                        trans_init=trans_init,
+                        return_transformation=True,
+                    )
+
+                    aligned_mesh.export(
+                        os.path.join(self.output, "mesh", "mesh_aligned.ply")
+                    )
 
                     forecast_mesh.apply_transform(transformation)
-                    forecast_mesh.export(f'{self.output}/mesh/forecast_aligned_mesh.ply')
+                    forecast_mesh.export(
+                        os.path.join(self.output, "mesh", "forecast_aligned_mesh.ply")
+                    )
 
                     if self.eval_rec:
 
                         eval_mesh(
-                            forecast_mesh, gt_mesh,
+                            forecast_mesh,
+                            gt_mesh,
                             N3d=self.n_points_to_eval,
                             dist_th=self.mesh_threshold_to_eval,
-                            out_path=f'{self.output}/metrics_mesh.txt',
+                            out_path=os.path.join(self.output, "metrics_mesh.txt"),
                         )
 
             if self.verbose:
@@ -336,17 +410,27 @@ class Mesher(object):
             self.reload_map -= 1
 
 
-def align_mesh(est_mesh, gt_mesh, threshold=0.1, trans_init=None, return_transformation=False):
+def align_mesh(
+    est_mesh, gt_mesh, threshold=0.1, trans_init=None, return_transformation=False
+):
     """
     Get the transformation matrix to align the reconstructed mesh to the ground truth mesh.
     """
-    o3d_rec_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(est_mesh.vertices)))
-    o3d_gt_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(gt_mesh.vertices)))
+    o3d_rec_pc = o3d.geometry.PointCloud(
+        o3d.utility.Vector3dVector(np.array(est_mesh.vertices))
+    )
+    o3d_gt_pc = o3d.geometry.PointCloud(
+        o3d.utility.Vector3dVector(np.array(gt_mesh.vertices))
+    )
     if trans_init is None:
         trans_init = np.eye(4)
     reg_p2p = o3d.pipelines.registration.registration_icp(
-        o3d_rec_pc, o3d_gt_pc, threshold, trans_init,
-        o3d.pipelines.registration.TransformationEstimationPointToPoint())
+        o3d_rec_pc,
+        o3d_gt_pc,
+        threshold,
+        trans_init,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+    )
     transformation = reg_p2p.transformation
 
     aligned_mesh = est_mesh.apply_transform(transformation)
@@ -357,13 +441,23 @@ def align_mesh(est_mesh, gt_mesh, threshold=0.1, trans_init=None, return_transfo
         return aligned_mesh
 
 
-def draw_mesh_error(est_mesh, gt_mesh, out_path=None, cmap='jet', display=False, error_type='accuracy'):
-    if error_type == 'accuracy':
-        src_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(est_mesh.vertices)))
-        target_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(gt_mesh.vertices)))
-    else: #  'completion'
-        src_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(gt_mesh.vertices)))
-        target_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(est_mesh.vertices)))
+def draw_mesh_error(
+    est_mesh, gt_mesh, out_path=None, cmap="jet", display=False, error_type="accuracy"
+):
+    if error_type == "accuracy":
+        src_pc = o3d.geometry.PointCloud(
+            o3d.utility.Vector3dVector(np.array(est_mesh.vertices))
+        )
+        target_pc = o3d.geometry.PointCloud(
+            o3d.utility.Vector3dVector(np.array(gt_mesh.vertices))
+        )
+    else:  #  'completion'
+        src_pc = o3d.geometry.PointCloud(
+            o3d.utility.Vector3dVector(np.array(gt_mesh.vertices))
+        )
+        target_pc = o3d.geometry.PointCloud(
+            o3d.utility.Vector3dVector(np.array(est_mesh.vertices))
+        )
 
     # For each point in the source point cloud, compute the distance to the target point cloud.
     dists = src_pc.compute_point_cloud_distance(target_pc)
@@ -371,12 +465,14 @@ def draw_mesh_error(est_mesh, gt_mesh, out_path=None, cmap='jet', display=False,
 
     color = np.zeros_like(dists)
     breakpoints = np.array([0.0, 0.02, 0.05, 0.10, 0.20, np.max(dists)])
-    bins =        np.array([0.0, 0.25, 0.38, 0.66, 0.83, 1.00])
+    bins = np.array([0.0, 0.25, 0.38, 0.66, 0.83, 1.00])
     for i in range(1, len(breakpoints)):
-        mask = (dists > breakpoints[i-1]) & (dists <= breakpoints[i])
+        mask = (dists > breakpoints[i - 1]) & (dists <= breakpoints[i])
         if np.sum(mask) >= 1.0:
-            scale = bins[i] - bins[i-1]
-            color[mask] = (dists[mask] - breakpoints[i-1]) / (breakpoints[i] - breakpoints[i-1] + 1e-7) * scale + bins[i-1]
+            scale = bins[i] - bins[i - 1]
+            color[mask] = (dists[mask] - breakpoints[i - 1]) / (
+                breakpoints[i] - breakpoints[i - 1] + 1e-7
+            ) * scale + bins[i - 1]
     error_color = plt.cm.get_cmap(cmap)(color)[..., :3]
     src_pc.colors = o3d.utility.Vector3dVector(error_color)
 
@@ -390,8 +486,12 @@ def draw_mesh_error(est_mesh, gt_mesh, out_path=None, cmap='jet', display=False,
 def eval_mesh(est_mesh, gt_mesh, N3d=2e5, dist_th=0.05, out_path=None, metric_2d=False):
     N3d = int(N3d)
 
-    est_pc = trimesh.PointCloud(vertices=trimesh.sample.sample_surface(est_mesh, N3d)[0]).vertices
-    gt_pc = trimesh.PointCloud(vertices=trimesh.sample.sample_surface(gt_mesh, N3d)[0]).vertices
+    est_pc = trimesh.PointCloud(
+        vertices=trimesh.sample.sample_surface(est_mesh, N3d)[0]
+    ).vertices
+    gt_pc = trimesh.PointCloud(
+        vertices=trimesh.sample.sample_surface(gt_mesh, N3d)[0]
+    ).vertices
 
     est_tree = KDTree(est_pc)
     gt_tree = KDTree(gt_pc)
@@ -404,25 +504,31 @@ def eval_mesh(est_mesh, gt_mesh, N3d=2e5, dist_th=0.05, out_path=None, metric_2d
     # accuracy
     dist, _ = gt_tree.query(est_pc)
     accuracy = np.mean(dist) * 100  # cm
-    accuracy_ratio = np.mean((dist < dist_th).astype(np.float32)) * 100 # %
+    accuracy_ratio = np.mean((dist < dist_th).astype(np.float32)) * 100  # %
 
-    f_score = (2.0 * accuracy_ratio * completion_ratio) / (accuracy_ratio + completion_ratio)
+    f_score = (2.0 * accuracy_ratio * completion_ratio) / (
+        accuracy_ratio + completion_ratio
+    )
 
-    msg = f'\n\nMetrics of reconstructed mesh are:\n' \
-          f'\tAccuracy: {accuracy:.2f}cm\n' \
-          f'\tCompletion: {completion:.2f}cm\n' \
-          f'\tAccuracy Ratio: {accuracy_ratio:.2f}%\n' \
-          f'\tCompletion Ratio: {completion_ratio:.2f}%\n' \
-          f'\tF-score: {f_score:.2f}%\n\n'
+    msg = (
+        f"\n\nMetrics of reconstructed mesh are:\n"
+        f"\tAccuracy: {accuracy:.2f}cm\n"
+        f"\tCompletion: {completion:.2f}cm\n"
+        f"\tAccuracy Ratio: {accuracy_ratio:.2f}%\n"
+        f"\tCompletion Ratio: {completion_ratio:.2f}%\n"
+        f"\tF-score: {f_score:.2f}%\n\n"
+    )
 
     if out_path is not None:
-        with open(out_path, 'w') as fp:
+        with open(out_path, "w") as fp:
             fp.write(msg)
     print(msg)
 
 
 def convex_hull(mesh, mesh_with_hole):
-    o3d_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(mesh_with_hole.vertices)))
+    o3d_pc = o3d.geometry.PointCloud(
+        o3d.utility.Vector3dVector(np.array(mesh_with_hole.vertices))
+    )
     mesh_hull, _ = o3d_pc.compute_convex_hull()
     mesh_hull.compute_vertex_normals()
     # mesh_hull = mesh_hull.scale(1.02, mesh_hull.get_center())
@@ -441,22 +547,35 @@ def convex_hull(mesh, mesh_with_hole):
     return mesh
 
 
-def extract_depth_from_mesh(mesh,
-                            c2w_list,
-                            H, W, fx, fy, cx, cy,
-                            far=20.0, ):
+def extract_depth_from_mesh(
+    mesh,
+    c2w_list,
+    H,
+    W,
+    fx,
+    fy,
+    cx,
+    cy,
+    far=20.0,
+):
     """Adapted from Go-Surf: https://github.com/JingwenWang95/go-surf"""
-    os.environ['PYOPENGL_PLATFORM'] = 'egl'  # allows for GPU-accelerated rendering
+    os.environ["PYOPENGL_PLATFORM"] = "egl"  # allows for GPU-accelerated rendering
 
     mesh = pyrender.Mesh.from_trimesh(mesh)
     scene = pyrender.Scene()
     scene.add(mesh)
     # pyrender.Viewer(scene, use_raymond_lighting=True, show_world_axis=True)
-    camera = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy, znear=0.001, zfar=far)
+    camera = pyrender.IntrinsicsCamera(
+        fx=fx, fy=fy, cx=cx, cy=cy, znear=0.001, zfar=far
+    )
     camera_node = pyrender.Node(camera=camera, matrix=np.eye(4))
     scene.add_node(camera_node)
     renderer = pyrender.OffscreenRenderer(W, H)
-    flags = pyrender.RenderFlags.OFFSCREEN | pyrender.RenderFlags.DEPTH_ONLY | pyrender.RenderFlags.SKIP_CULL_FACES
+    flags = (
+        pyrender.RenderFlags.OFFSCREEN
+        | pyrender.RenderFlags.DEPTH_ONLY
+        | pyrender.RenderFlags.SKIP_CULL_FACES
+    )
 
     depths = []
     for i, c2w in enumerate(c2w_list):
@@ -477,4 +596,3 @@ def extract_depth_from_mesh(mesh,
     renderer.delete()
 
     return depths
-

@@ -395,7 +395,7 @@ class FactorGraph:
 
         d = self.video.distance(ii, jj, beta=beta)
         d[ii - rad < jj] = np.inf
-        d[d > 100] = np.inf
+        d[d > 100] = np.inf # TODO what is this 100?!
         d = d.reshape(ilen, jlen)
 
         # filter out these edges which had been built before

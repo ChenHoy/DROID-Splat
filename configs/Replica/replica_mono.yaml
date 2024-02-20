@@ -8,11 +8,13 @@ mapping:
   device: "cuda:0"
   BA: False
   BA_cam_lr: 0.001
+  bound: [[-2.0, 2.0], [-2.0, 2.0], [-2.0, 2.0]] # Office 0
 
 tracking:
   device: "cuda:0"
+  pretrained: ./pretrained/droid.pth
   buffer: 256
-  beta: 0.75
+  beta: 0.75 # TODO this is in stark contrast to demo where beta is 0.3
   warmup: 8
   upsample: True
   motion_filter:
@@ -39,16 +41,16 @@ cam:
   ### original camera parameters
   H: 680
   W: 1200
+  ### target/output camera settings, camera_size -> resize -> crop -> target_size
+  H_out: 320
+  W_out: 640
+  H_edge: 0
+  W_edge: 0
   fx: 600.0
   fy: 600.0
   cx: 599.5
   cy: 339.5
   png_depth_scale: 6553.5 #for depth image in png format
-  ### target/output camera settings, camera_size -> resize -> crop -> target_size
-  H_edge: 0
-  W_edge: 0
-  H_out: 320
-  W_out: 640
 
 rendering:
   N_samples: 48
