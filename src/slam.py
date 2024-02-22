@@ -431,7 +431,7 @@ class SLAM:
             mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
             mp.Process(target=self.optimizing, args=(2, False)),
-            mp.Process(target=self.multiview_filtering, args=(3, True)),
+            mp.Process(target=self.multiview_filtering, args=(3, False)),
             mp.Process(target=self.visualizing, args=(4, False)),
             #### These are for visual quality only and generating a map of indoor rooms afterwards
             mp.Process(target=self.mapping, args=(5, True)),

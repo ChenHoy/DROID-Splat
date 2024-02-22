@@ -189,7 +189,10 @@ class Replica(BaseDataset):
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg["mode"] == "prgbd":
             self.depth_paths = sorted(
-                glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
+                # glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
+                glob.glob(
+                    os.path.join(self.input_folder, "depthany-vitl-indoor/frame*.npy")
+                )
             )
             assert (
                 len(self.depth_paths) == self.n_img

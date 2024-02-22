@@ -26,7 +26,7 @@ class Backend:
         t_start: int = 0,
         t_end: Optional[int] = None,
         steps: int = 6,
-        iter: int = 2,
+        iter: int = 4,
         motion_only: bool = False,
     ):
         """Dense Bundle Adjustment over the whole map. Used for global optimization in the Backend."""
