@@ -353,15 +353,15 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
     vis.register_key_callback(ord("R"), start_stop_view_resetting)
 
     vis.create_window(height=540, width=960)
-    vis.get_render_option().load_from_json("misc/renderoption.json")
+    vis.get_render_option().load_from_json("src/renderoption.json")
 
     vis.run()  # user changes the view and press "q" to terminate
     param = vis.get_view_control().convert_to_pinhole_camera_parameters()
-    o3d.io.write_pinhole_camera_parameters("final_viewpoint.json", param)
 
     ### Store the geometry and trajectory visualizaton for later inspection when done
     print("Saving the visualization for later usage ...")
     try:
+        o3d.io.write_pinhole_camera_parameters("final_viewpoint.json", param)
         pcl_path = str(Path(save_root) / "pointclouds")
         cam_path = str(Path(save_root) / "cameras")
         write_pointclouds(droid_visualization.points, pcl_path, ext="xyzrgb")
