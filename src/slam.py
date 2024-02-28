@@ -239,6 +239,12 @@ class SLAM:
         self.tracking_finished += 1
         print("Tracking Done!")
 
+    # We need some signal that the rendering works
+    # i) Use mp.Queue from rendering/mapping to visualization/show_stream
+    # ii) Render the key frame image from the Gaussians and send this into the queue
+    # iii) In visu thread: Take renderings and output them
+    # Nerfstudio has like a 3D volume with the colors that you can fly through
+
     def optimizing(self, rank, dont_run=False):
         print("Full Bundle Adjustment Triggered!")
         self.all_trigered += 1
@@ -442,5 +448,6 @@ class SLAM:
         for p in processes:
             p.start()
 
+        # This will not be hit until all threads are finished
         for p in processes:
             p.join()
