@@ -34,6 +34,9 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# compiled CPython files
+.pyc
+
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
@@ -134,3 +137,16 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Large checkpoint files
+.pth
+.pt
+.bin
+.safetensors
+
+# Images and Media
+.mp4
+.png
+.jpg
+.pdf
+.jpeg
