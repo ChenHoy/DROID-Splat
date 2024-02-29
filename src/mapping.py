@@ -35,9 +35,8 @@ class Mapper(object):
         self.w_eikonal_loss = cfg["mapping"]["w_eikonal_loss"]
         self.uncertainty_based = cfg["mapping"]["uncertainty_weight_loss"]
 
-        self.BA = cfg["mapping"][
-            "BA"
-        ]  # Even if BA is enabled, it starts only when there are at least 4 keyframes
+        # Even if BA is enabled, it starts only when there are at least 4 keyframes
+        self.BA = cfg["mapping"]["BA"]
         self.BA_cam_lr = cfg["mapping"]["BA_cam_lr"]
         self.mapping_pixels = cfg["mapping"]["pixels"]
         self.mapping_window_size = cfg["mapping"]["mapping_window_size"]
@@ -374,6 +373,14 @@ class Mapper(object):
                     optimizer=optimizer,
                     num_joint_iters=1,
                 )
+
+            """
+            Situation: 
+                voxel_volume: Encompasses the whole map inside cube
+                backend/frontend visit only part of this volume and give initial poses / depths
+
+            Idea: 
+            """
 
             # 3d mesh has been updated, info the mesher to regenerate mesh
             self.reload_map += 1

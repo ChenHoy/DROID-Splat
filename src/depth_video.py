@@ -239,6 +239,7 @@ class DepthVideo:
 
             return image, depth, c2w, gt_c2w, mask
 
+    # TODO why is this empty?
     def set_item_from_mapping(self, index, pose=None, depth=None):
         with self.get_lock():
             pass
