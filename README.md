@@ -177,7 +177,7 @@ mkdir $DATA_ROOT
 We adapted some codes from some awesome repositories including [NICE-SLAM](https://github.com/cvg/nice-slam), [NeuS](https://github.com/Totoro97/NeuS), [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM) and [DROID-Calib](https://github.com/boschresearch/droidcalib)
 
   # TODO
-- [ ] Fix bug in main branch that distorts the reconstruction
+- [x] Fix bug in main branch that distorts the reconstruction
 - [ ] Exchange NeRF mapping from [GO-SLAM](https://arxiv.org/pdf/2309.02436.pdf) with Gaussian Splatting from [Splatam](https://arxiv.org/pdf/2312.02126.pdf)
   - [ ] Create mapping thread that uses the add_gaussians(), prune_gaussians() functions
   - [ ] Test these functions in the frontend by creating and optimizing Gaussians from new keyframes
