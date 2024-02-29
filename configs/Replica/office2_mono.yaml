@@ -3,7 +3,7 @@ mode: mono
 mapping:
   bound: [[-2.0, 2.0], [-2.0, 2.0], [-2.0, 2.0]]
 meshing:
-  gt_mesh_path: /home/yzhang/data/Replica/cull_replica_meshv2/office2.ply
+  gt_mesh_path: /media/data/Replica/cull_replica_meshv2/office2.ply
 data:
-  input_folder: /home/yzhang/data/Replica/office2
-  output: /home/yzhang/exps/goslam/Replica/office2/mono
+  input_folder: /media/data/Replica/office2
+  output: ""
