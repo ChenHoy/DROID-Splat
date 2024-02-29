@@ -5,8 +5,8 @@ mapping:
   bound: [[-5, 4], [-5, 6], [-6, 4]]
 
 meshing:
-  gt_mesh_path: '/home/yzhang/data/ScanNet/scans/scene0465_00/scene0465_00_vh_clean.ply'
+  gt_mesh_path: '/media/data/ScanNet/scans/scene0465_00/scene0465_00_vh_clean.ply'
 
 data:
-  input_folder: /home/yzhang/data/ScanNet/scans/scene0465_00
-  output: /home/yzhang/exps/goslam/scannet/0465/mono
+  input_folder: /media/data/ScanNet/scans/scene0465_00
+  output: ""

@@ -4,7 +4,7 @@ mapping:
   device: "cuda:0"
   bound: [[-5.0, 14.0],[-4.0,5.0],[-6.0, 4.0]]
 meshing:
-  gt_mesh_path: '/home/yzhang/data/ScanNet/scans/scene0181_00/scene0181_00_vh_clean.ply'
+  gt_mesh_path: '/media/data/ScanNet/scans/scene0181_00/scene0181_00_vh_clean.ply'
 data:
-  input_folder: /home/yzhang/data/ScanNet/scans/scene0181_00
-  output: /home/yzhang/exps/goslam/scannet/0181/rgbd
+  input_folder: /media/data/ScanNet/scans/scene0181_00
+  output: ""
