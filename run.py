@@ -12,48 +12,7 @@ from src.datasets import get_dataset
 import random
 
 
-def setup_seed(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-
-
-def backup_source_code(backup_directory):
-    ignore_hidden = shutil.ignore_patterns(
-        ".",
-        "..",
-        ".git*",
-        "*pycache*",
-        "*build",
-        "*.fuse*",
-        "*_drive_*",
-        "*pretrained*",
-        "*output*",
-        "*media*",
-        "*.so",
-        "*.pyc",
-        "*.Python",
-        "*.eggs*",
-        "*.DS_Store*",
-        "*.idea*",
-        "*.pth",
-        "*__pycache__*",
-        "*.ply",
-        "*exps*",
-    )
-
-    if os.path.exists(backup_directory):
-        shutil.rmtree(backup_directory)
-
-    shutil.copytree(".", backup_directory, ignore=ignore_hidden)
-    os.system("chmod -R g+w {}".format(backup_directory))
-
-
-if __name__ == "__main__":
-    setup_seed(43)
-
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=str, help="Path to config file.")
     parser.add_argument("--device", type=str, default="cuda:0")
@@ -106,44 +65,106 @@ if __name__ == "__main__":
         choices=["pinhole", "mei"],
         help="camera model used for projection",
     )
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
-    torch.multiprocessing.set_start_method("spawn")
+def setup_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
 
-    cfg = config.load_config(args.config, "./configs/go_slam.yaml")
 
+def backup_source_code(backup_directory):
+    ignore_hidden = shutil.ignore_patterns(
+        ".",
+        "..",
+        ".git*",
+        "*pycache*",
+        "*build",
+        "*.fuse*",
+        "*_drive_*",
+        "*pretrained*",
+        "*output*",
+        "*media*",
+        "*.so",
+        "*.pyc",
+        "*.Python",
+        "*.eggs*",
+        "*.DS_Store*",
+        "*.idea*",
+        "*.pth",
+        "*__pycache__*",
+        "*.ply",
+        "*exps*",
+    )
+
+    if os.path.exists(backup_directory):
+        shutil.rmtree(backup_directory)
+
+    shutil.copytree(".", backup_directory, ignore=ignore_hidden)
+    os.system("chmod -R g+w {}".format(backup_directory))
+
+
+def set_args(args, cfg):
     if args.mode is not None:
         cfg["mode"] = args.mode
     if args.only_tracking:
         cfg["only_tracking"] = True
     if args.image_size is not None:
-        cfg["cam"]["H"], cfg["cam"]["W"] = args.image_size
+        cfg["cam"]["H_out"], cfg["cam"]["W_out"] = args.image_size
     if args.calibration_txt is not None:
         cfg["cam"]["fx"], cfg["cam"]["fy"], cfg["cam"]["cx"], cfg["cam"]["cy"] = (
             np.loadtxt(args.calibration_txt).tolist()
         )
 
     assert cfg["mode"] in ["rgbd", "mono", "stereo"], cfg["mode"]
-    print(
-        f"\n\n** Running {cfg['data']['input_folder']} in {cfg['mode']} mode!!! **\n\n"
-    )
-
-    print(args)
-
     if args.output is None:
         output_dir = cfg["data"]["output"]
     else:
         output_dir = args.output
+    return output_dir, cfg
 
+
+def typecheck_cfg(cfg):
+    floats = ["fx", "fy", "cx", "cy", "png_depth_scale"]
+    ints = ["H", "W", "H_out", "W_out", "H_edge", "W_edge"]
+    for k, v in cfg["cam"].items():
+        if k == "calibration_txt":
+            continue
+        if k in floats:
+            cfg["cam"][k] = float(v)
+        elif k in ints:
+            cfg["cam"][k] = int(v)
+        else:
+            raise ValueError(
+                f"Unknown type {type(k)} for '{k}'. This should be either float or int"
+            )
+    return cfg
+
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    setup_seed(43)
+    torch.multiprocessing.set_start_method("spawn")
+
+    cfg = config.load_config(args.config, "./configs/go_slam.yaml")
+    print(args)
+    output_dir, cfg = set_args(args, cfg)
+    cfg = typecheck_cfg(cfg)
     backup_source_code(os.path.join(output_dir, "code"))
     config.save_config(cfg, f"{output_dir}/cfg.yaml")
 
+    ### Running SLAM
     dataset = get_dataset(cfg, args, device=args.device)
 
+    print(
+        f"\n\n** Running {cfg['data']['input_folder']} in {cfg['mode']} mode!!! **\n\n"
+    )
     slam = SLAM(args, cfg)
     slam.run(dataset)
-
     slam.terminate(rank=-1, stream=dataset)
 
     print("Done!")
