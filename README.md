@@ -192,7 +192,9 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
 
 # Potential Future Features
 - [ ] Change the Gaussian Splatting formulation to a variant like [Dynamic Gaussian Splatting](https://github.com/JonathonLuiten/Dynamic3DGaussians)
-  - This is done for every Gaussian, we can instead factorize more efficiently into static and dynamic based on i) semantics ii) uncertainty from the SLAM network
+  - This is done for every Gaussian, we can instead factorize more efficiently into static and dynamic based on  
+    i) semantics  
+    ii) uncertainty from the SLAM network
 - [ ] Do tracking from synthesis or synthesis from tracking
   - We can detect objects and track their odometry either based on appearance or by separating the motion of the rendered Gaussians
   - We optimize the objects appearance and motion parameters in a factorized per-instance way, since we have the masks/silhouettes over time
