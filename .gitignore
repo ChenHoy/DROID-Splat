@@ -134,3 +134,16 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Large checkpoint files
+.pth
+.pt
+.bin
+.safetensors
+
+# Images and Media
+.mp4
+.png
+.jpg
+.pdf
+.jpeg
