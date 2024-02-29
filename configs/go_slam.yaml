@@ -48,7 +48,7 @@ tracking:
   # pretrained: ./../droidcalib/droid.pth # Sanity check
   buffer: 1024
   # TODO this is in stark contrast to demo where beta is 0.3
-  beta: 0.75  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
+  beta: 0.3  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
   warmup: 8
   upsample: True
   motion_filter:

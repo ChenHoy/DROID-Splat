@@ -4,8 +4,8 @@ only_tracking: False
 mapping:
   bound: [[-5,5],[-5, 5],[-5,5]]
 data:
-  input_folder: /home/yzhang/data/ETH3D/test/helmet/
-  output: /home/yzhang/exps/goslam/eth3d/test/helmet/
+  input_folder: /media/data/ETH3D/test/helmet/
+  output: ""
 cam:  #intrinsic is different per scene in TUM
   fx: 726.28741455078
   fy: 726.28741455078

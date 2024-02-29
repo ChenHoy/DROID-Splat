@@ -4,8 +4,8 @@ only_tracking: False
 mapping:
   bound: [[-10, 10], [-10, 10], [-10, 20]]
 data:
-  input_folder: /home/yzhang/data/EuRoC/V1_02_medium
-  output: /home/yzhang/exps/goslam/euroc/V1_02_medium
+  input_folder: /media/data/EuRoC/V1_02_medium
+  output: ""
 cam:
   H_out: 320
   W_out: 480
