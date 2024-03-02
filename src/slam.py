@@ -21,6 +21,7 @@ from .multiview_filter import MultiviewFilter
 from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .mapping import Mapper
+from .gaussian_mapping import GaussianMapper
 from .render import Renderer
 from .mesher import Mesher
 from .InstantNeuS import InstantNeuS
@@ -136,6 +137,8 @@ class SLAM:
         self.tracking_finished.share_memory_()
         self.mapping_finished = torch.zeros((1)).int()
         self.mapping_finished.share_memory_()
+        self.gaussian_mapping_finished = torch.zeros((1)).int()
+        self.gaussian_mapping_finished.share_memory_()
         self.meshing_finished = torch.zeros((1)).int()
         self.meshing_finished.share_memory_()
         self.optimizing_finished = torch.zeros((1)).int()
@@ -168,6 +171,10 @@ class SLAM:
 
         self.mapper = Mapper(cfg, args, self)
         self.mesher = Mesher(cfg, args, self)
+
+        self.mapping_queue = mp.Queue()
+        self.gaussian_mapper = GaussianMapper(cfg, args, self, self.mapping_queue)
+
 
     def update_cam(self, cfg):
         """
@@ -215,26 +222,33 @@ class SLAM:
 
         self.net.load_state_dict(state_dict)
 
-    def tracking(self, rank, stream, input_queue=mp.Queue):
+    def tracking(self, rank, stream, input_queue=mp.Queue, mapping_queue=None):
         print("Tracking Triggered!")
         self.all_trigered += 1
         # Wait up for other threads to start
         while self.all_trigered < self.num_running_thread:
             pass
-        for timestamp, image, depth, intrinsic, gt_pose in tqdm(stream):
+        for frame in tqdm(stream):
+            timestamp, image, depth, intrinsic, gt_pose = frame
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
-            input_queue.put(image)
-            input_queue.put(depth)
+            #input_queue.put(image)
+            #input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
+
+            if mapping_queue is not None:
+                mapping_queue.put(frame)
+
 
             # predict mesh every 50 frames for video making
             if timestamp % 50 == 0 and timestamp > 0 and self.make_video:
                 self.hang_on[:] = 1
             while self.hang_on > 0:
                 sleep(1.0)
+        while not mapping_queue.empty():
+            sleep(1.0)
 
         self.tracking_finished += 1
         print("Tracking Done!")
@@ -286,6 +300,21 @@ class SLAM:
                 self.mapper(the_end=True)
         self.mapping_finished += 1
         print("Dense Mapping Done!")
+
+    def gaussian_mapping(self, rank, dont_run=False):
+        print("Gaussian Mapping Triggered!")
+        self.all_trigered += 1
+        while self.tracking_finished < 1 and not dont_run:
+            while self.hang_on > 0 and self.make_video:
+                sleep(1.0)
+            self.gaussian_mapper()
+
+        if not dont_run:
+            print("Start post-processing on gaussian mapping...")
+            for i in tqdm(range(self.post_processing_iters)):
+                self.gaussian_mapper(the_end=True)
+        self.gaussian_mapping_finished += 1
+        print("Gaussian Mapping Done!")
 
     def meshing(self, rank, dont_run=False):
         print("Meshing Triggered!")
@@ -435,13 +464,14 @@ class SLAM:
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
-            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
+            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe, self.mapping_queue)),
             mp.Process(target=self.optimizing, args=(2, False)),
             mp.Process(target=self.multiview_filtering, args=(3, False)),
-            mp.Process(target=self.visualizing, args=(4, False)),
+            mp.Process(target=self.visualizing, args=(4, True)),
             #### These are for visual quality only and generating a map of indoor rooms afterwards
             mp.Process(target=self.mapping, args=(5, True)),
             mp.Process(target=self.meshing, args=(6, True)),
+            mp.Process(target=self.gaussian_mapping, args=(7, False)),
         ]
 
         self.num_running_thread[0] += len(processes)
