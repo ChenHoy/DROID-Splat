@@ -5,6 +5,7 @@ import time
 import matplotlib.pyplot as plt
 import cv2
 from tqdm import tqdm
+import open3d as o3d
 import torch.nn.functional as F
 
 from utils.slam_helpers import (
@@ -112,16 +113,10 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
     return params, variables
 
 
-def initialize_optimizer(params, lrs_dict, tracking):
+def initialize_optimizer(params, lrs_dict):
     lrs = lrs_dict
     param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items()]
-    if tracking:
-        return torch.optim.Adam(param_groups)
-    else:
-        # TODO: why dont they optimize in mapping?
-        #return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
-        
-        return torch.optim.Adam(param_groups)
+    return torch.optim.Adam(param_groups)
 
 
 def initialize_first_timestep(first_frame, num_frames, scene_radius_depth_ratio, 
@@ -246,53 +241,6 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     else:
         losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
 
-    # Visualize the Diff Images
-    if tracking and visualize_tracking_loss:
-        fig, ax = plt.subplots(2, 4, figsize=(12, 6))
-        weighted_render_im = im * color_mask
-        weighted_im = curr_data['im'] * color_mask
-        weighted_render_depth = depth * mask
-        weighted_depth = curr_data['depth'] * mask
-        diff_rgb = torch.abs(weighted_render_im - weighted_im).mean(dim=0).detach().cpu()
-        diff_depth = torch.abs(weighted_render_depth - weighted_depth).mean(dim=0).detach().cpu()
-        viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
-        ax[0, 0].imshow(viz_img)
-        ax[0, 0].set_title("Weighted GT RGB")
-        viz_render_img = torch.clip(weighted_render_im.permute(1, 2, 0).detach().cpu(), 0, 1)
-        ax[1, 0].imshow(viz_render_img)
-        ax[1, 0].set_title("Weighted Rendered RGB")
-        ax[0, 1].imshow(weighted_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6)
-        ax[0, 1].set_title("Weighted GT Depth")
-        ax[1, 1].imshow(weighted_render_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6)
-        ax[1, 1].set_title("Weighted Rendered Depth")
-        ax[0, 2].imshow(diff_rgb, cmap="jet", vmin=0, vmax=0.8)
-        ax[0, 2].set_title(f"Diff RGB, Loss: {torch.round(losses['im'])}")
-        ax[1, 2].imshow(diff_depth, cmap="jet", vmin=0, vmax=0.8)
-        ax[1, 2].set_title(f"Diff Depth, Loss: {torch.round(losses['depth'])}")
-        ax[0, 3].imshow(presence_sil_mask.detach().cpu(), cmap="gray")
-        ax[0, 3].set_title("Silhouette Mask")
-        ax[1, 3].imshow(mask[0].detach().cpu(), cmap="gray")
-        ax[1, 3].set_title("Loss Mask")
-        # Turn off axis
-        for i in range(2):
-            for j in range(4):
-                ax[i, j].axis('off')
-        # Set Title
-        fig.suptitle(f"Tracking Iteration: {tracking_iteration}", fontsize=16)
-        # Figure Tight Layout
-        fig.tight_layout()
-        os.makedirs(plot_dir, exist_ok=True)
-        plt.savefig(os.path.join(plot_dir, f"tmp.png"), bbox_inches='tight')
-        plt.close()
-        plot_img = cv2.imread(os.path.join(plot_dir, f"tmp.png"))
-        cv2.imshow('Diff Images', plot_img)
-        cv2.waitKey(1)
-        ## Save Tracking Loss Viz
-        # save_plot_dir = os.path.join(plot_dir, f"tracking_%04d" % iter_time_idx)
-        # os.makedirs(save_plot_dir, exist_ok=True)
-        # plt.savefig(os.path.join(save_plot_dir, f"%04d.png" % tracking_iteration), bbox_inches='tight')
-        # plt.close()
-
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(weighted_losses.values())
 
@@ -410,7 +358,7 @@ def convert_params_to_store(params):
 
 def process_frame(frame,device):
     idx, color, depth, intrinsics, pose = frame
-    color = color.squeeze(0).to(device)/255
+    color = color.squeeze(0).to(device)
     depth = depth.unsqueeze(0).to(device)
     intrinsics = intrinsics.to(device)
     pose = pose.to(device)
@@ -421,11 +369,64 @@ def render_view(params, iter_time_idx, cam):
 
     transformed_gaussians = transform_to_frame(params, iter_time_idx, 
                                                 gaussians_grad=False,
-                                                camera_grad=True)
+                                                camera_grad=False)
     
     rendervar = transformed_params2rendervar(params, transformed_gaussians)
     im, _, _, = Renderer(raster_settings=cam)(**rendervar)
+    im = im.squeeze(0).permute(1,2,0).cpu().detach().numpy()
+    im = (im - im.min()) / (im.max() - im.min()) * 255
+    im = im.astype(np.uint8)
     return im
+
+def plot_3d(rgb: np.ndarray, depth: np.ndarray):
+    """Use Open3d to plot the 3D point cloud from the monocular depth and input image."""
+    def get_calib_heuristic(ht: int, wd: int) -> np.ndarray:
+        """On in-the-wild data we dont have any calibration file.
+        Since we optimize this calibration as well, we can start with an initial guess
+        using the heuristic from DeepV2D and other papers"""
+        cx, cy = wd // 2, ht // 2
+        fx, fy = wd * 1.2, wd * 1.2
+        return fx, fy, cx, cy
+    rgb = np.asarray(rgb.cpu())
+    depth = np.asarray(depth.cpu())
+    invalid = (depth < 0.001).flatten()
+    # Get 3D point cloud from depth map
+    depth = depth.squeeze()
+    h, w = depth.shape
+    x, y = np.meshgrid(np.arange(w), np.arange(h))
+    x = x.flatten()
+    y = y.flatten()
+    depth = depth.flatten()
+    # Convert to 3D points
+    fx, fy, cx, cy = get_calib_heuristic(h, w)
+    # Unproject
+    x3 = (x - cx) * depth / fx
+    y3 = (y - cy) * depth / fy
+    z3 = depth
+    # Convert to Open3D format
+    xyz = np.stack([x3, y3, z3], axis=1)
+    rgb = np.stack(
+        [rgb[0, :, :].flatten(), rgb[1, :, :].flatten(), rgb[2, :, :].flatten()], axis=1
+    )
+    depth = depth[~invalid]
+    xyz = xyz[~invalid]
+    rgb = rgb[~invalid]
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(xyz)
+    pcd.colors = o3d.utility.Vector3dVector(rgb)
+    # Plot the point cloud
+    o3d.visualization.draw_geometries([pcd])
+
+def plot_centers(params):
+    means3D = params['means3D'].detach().cpu().numpy()
+    rgb_colors = params['rgb_colors'].detach().cpu().numpy()
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(means3D)
+    pcd.colors = o3d.utility.Vector3dVector(rgb_colors)
+    o3d.visualization.draw_geometries([pcd])
+
+
 
 class GaussianMapper(object):
     """
@@ -477,10 +478,8 @@ class GaussianMapper(object):
 
             else:
                 #TODO
-                color, depth, c2w, gt_c2w, mask = self.video.get_mapping_item(
-                                                time_idx, self.device, decay=self.decay
-                                                )
-                first_frame = (color, depth, intrinsics, gt_c2w)
+                color, depth, c2w, gt_c2w, mask = self.video.get_mapping_item(time_idx, self.device, decay=self.decay)
+                self.first_frame = (color, depth, intrinsics, gt_c2w)
 
             self.params, self.variables, intrinsics, self.first_frame_w2c, self.cam = initialize_first_timestep(self.first_frame, self.n_frames, 
                                                                                         self.cfg["mapping"]['scene_radius_depth_ratio'],
@@ -490,14 +489,13 @@ class GaussianMapper(object):
             print("Gaussians initialized successfully")
             self.last_visit = 0
 
+
         cur_idx = int(self.video.filtered_id.item()) 
 
-        #if self.last_visit < cur_idx :
-        #print(self.mapping_queue.qsize(), self.last_visit)
-        while not self.mapping_queue.empty():
+        if self.last_visit < cur_idx :
+        #if not self.mapping_queue.empty():
             time_idx = self.last_visit
             self.last_visit += 1
-            #print(time_idx,self.mapping_queue.qsize())
         
             if self.use_gt_stream:
                 if time_idx == 0:
@@ -511,19 +509,27 @@ class GaussianMapper(object):
                         print(e)
                         print("Continuing...")
                         pass
+                    
+                    with torch.no_grad():
+                        rel_w2c = torch.inverse(gt_c2w)
+                        rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
+                        rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
+                        rel_w2c_tran = rel_w2c[:3, 3].detach()
+                        # Update the camera parameters
+                        self.params['cam_unnorm_rots'][..., time_idx] = rel_w2c_rot_quat
+                        self.params['cam_trans'][..., time_idx] = rel_w2c_tran
+
             else:
                 color, depth, c2w, gt_c2w, mask = self.video.get_mapping_item(
-                            time_idx, device, decay=self.decay
+                            time_idx, self.device, decay=self.decay
                         )
+
 
             gt_w2c = torch.inverse(gt_c2w)
             self.gt_w2c_all_frames.append(gt_w2c)
 
-
-
-
             curr_data = {'cam': self.cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 
-                        'w2c': self.first_frame_w2c, 'iter_gt_w2c_list': gt_w2c}
+                        'w2c': self.first_frame_w2c, 'iter_gt_w2c_list': self.gt_w2c_all_frames}
 
             # Densification & KeyFrame-based Mapping
             if time_idx == 0 or (time_idx+1) % self.cfg["mapping"]['map_every'] == 0:
@@ -561,11 +567,9 @@ class GaussianMapper(object):
                     print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
                 # Reset Optimizer & Learning Rates for Full Map Optimization
-                optimizer = initialize_optimizer(self.params, self.cfg["mapping"]['lrs'], tracking=False) 
+                optimizer = initialize_optimizer(self.params, self.cfg["mapping"]['lrs']) 
 
                 # Mapping
-                mapping_start_time = time.time()
-
 
                 for iter in range(self.num_iters_mapping):
                     iter_start_time = time.time()
@@ -624,17 +628,15 @@ class GaussianMapper(object):
 
 
 
-            if time_idx % 20 == 0:
+            if time_idx % 10 == 0:
                 print("Number of Gaussians: ", self.params['means3D'].shape[0])
-        
-            if time_idx % 50 == 0:
                 im = render_view(self.params, time_idx, self.cam)
-                # save image
-                im = im.squeeze(0).permute(1,2,0).cpu().detach().numpy()
-                # Normalize to 0-255
-                im = (im - im.min()) / (im.max() - im.min()) * 255
-                im = im.astype(np.uint8)
-
                 cv2.imwrite(f"/home/leon/go-slam-tests/renders/{time_idx}.png", im)
+
+            if time_idx % 100 == 0:
+                #plot_3d(color, depth)
+                plot_centers(self.params)
+
+            
                 
 

@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-
+from kornia.geometry.linalg import compose_transformations
 
 def readEXR_onlydepth(filename):
     """
@@ -206,6 +206,13 @@ class Replica(BaseDataset):
         self.depth_paths = self.depth_paths[::stride]
         self.load_poses(os.path.join(self.input_folder, "traj.txt"))
         self.poses = self.poses[::stride]
+        relative_poses = True
+        if relative_poses:
+            self.poses = torch.tensor(self.poses, requires_grad=False)
+            trans_10 = torch.inverse(self.poses[0].unsqueeze(0).repeat(self.poses.shape[0], 1, 1))
+            self.poses = compose_transformations(trans_10, self.poses).cpu().numpy()
+        
+        
         # Adjust number of images according to strides
         self.n_img = len(self.color_paths)
 
@@ -217,6 +224,7 @@ class Replica(BaseDataset):
             line = lines[i]
             c2w = np.array(list(map(float, line.split()))).reshape(4, 4)
             self.poses.append(c2w)
+
 
 
 class Azure(BaseDataset):
