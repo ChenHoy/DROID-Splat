@@ -95,11 +95,7 @@ def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixe
         # Select the keyframes with percentage of points inside the image > 0
         selected_keyframe_list = [keyframe_dict['id']
                                   for keyframe_dict in list_keyframe if keyframe_dict['percent_inside'] > 0.0]
-        # TODO why dont they just use the top k keyframes?                  
-        selected_keyframe_list = list(np.random.permutation(np.array(selected_keyframe_list))[:k])
 
-
-        
         selected_keyframe_list = list(np.random.permutation(np.array(selected_keyframe_list)[:k]))
 
         return selected_keyframe_list

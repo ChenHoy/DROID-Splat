@@ -69,12 +69,12 @@ mapping:
     cam_trans: 0.0000
 
         
-  prune_gaussians: True, # Prune Gaussians during Mapping
+  prune_gaussians: True # Prune Gaussians during Mapping
   pruning_dict: # Needs to be updated based on the number of mapping iterations
     start_after: 0
     remove_big_after: 0
-    stop_after: 2000
-    prune_every: 20
+    stop_after: 100
+    prune_every: 5
     removal_opacity_threshold: 0.005
     final_removal_opacity_threshold: 0.005
     reset_opacities: False

@@ -218,7 +218,6 @@ class DepthVideo:
             )  # [h, w, 3]
             mask = self.mask_filtered[index].clone().to(device)
             est_disp = self.disps_filtered[index].clone().to(device)  # [h, w]
-            # gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
             est_depth = 1.0 / (est_disp + 1e-7)
 
             # origin alignment
@@ -233,6 +232,8 @@ class DepthVideo:
             gt_c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
 
             depth = est_depth
+            #gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
+            #depth = gt_depth
 
             # if updated by mapping, the priority is decreased to lowest level, i.e., 0
             self.update_priority[index] *= decay

@@ -238,7 +238,7 @@ class SLAM:
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
-            if mapping_queue is not None:
+            if mapping_queue is not None and (timestamp == 0 or (timestamp+1) % 10 == 0):
                 mapping_queue.put(frame)
 
 
