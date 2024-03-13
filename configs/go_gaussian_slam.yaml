@@ -65,8 +65,8 @@ mapping:
     unnorm_rotations: 0.001
     logit_opacities: 0.05
     log_scales: 0.001
-    cam_unnorm_rots: 0.0000
-    cam_trans: 0.0000
+    cam_unnorm_rots: 0.0004
+    cam_trans: 0.002
 
         
   prune_gaussians: True # Prune Gaussians during Mapping

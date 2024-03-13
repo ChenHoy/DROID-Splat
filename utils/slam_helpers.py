@@ -269,6 +269,7 @@ def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
     else:
         cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
         cam_tran = params['cam_trans'][..., time_idx].detach()
+        
     rel_w2c = torch.eye(4).cuda().float()
     rel_w2c[:3, :3] = build_rotation(cam_rot)
     rel_w2c[:3, 3] = cam_tran

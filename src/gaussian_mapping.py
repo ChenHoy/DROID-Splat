@@ -23,8 +23,13 @@ import droid_backends
 
 
 
-def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, 
-                   mask=None, compute_mean_sq_dist=False, mean_sq_dist_method="projective"):
+def get_pointcloud(color: torch.Tensor, depth: torch.Tensor, intrinsics: torch.Tensor, w2c: torch.Tensor, 
+                   transform_pts: bool = True, mask: torch.Tensor = None, compute_mean_sq_dist: bool = False,
+                mean_sq_dist_method: str = "projective"):
+    """
+    Computes the point cloud from the color and depth images using the camera intrinsics and the camera pose.
+    """
+
     width, height = color.shape[2], color.shape[1]
 
     FX, FY, CX, CY = intrinsics
@@ -74,7 +79,10 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
         return point_cld
 
 
-def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution):
+def initialize_params(init_pt_cld: torch.Tensor, num_frames: int, mean3_sq_dist: torch.Tensor, gaussian_distribution: str):
+    """
+    Generates parameters for the first gaussians based on the initial point cloud.
+    """
     num_pts = init_pt_cld.shape[0]
     means3D = init_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 4]
@@ -114,25 +122,21 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
     return params, variables
 
 
-def initialize_optimizer(params, lrs_dict):
+def initialize_optimizer(params: dict, lrs_dict: dict):
     lrs = lrs_dict
     param_groups = [{"params": [v], "name": k, "lr": lrs[k]} for k, v in params.items()]
     return torch.optim.Adam(param_groups)
 
 
-def initialize_first_timestep(first_frame, num_frames, scene_radius_depth_ratio, 
-                              mean_sq_dist_method, gaussian_distribution=None,
+def initialize_first_timestep(first_frame: tuple, num_frames: int, scene_radius_depth_ratio: float, 
+                              mean_sq_dist_method: str, gaussian_distribution:str = None,
                               ):
+    """
+    Creates the initial parameters based on the first frame.
+    """
+
     # Get RGB-D Data & Camera Parameters
-
     _, color, depth, intrinsics, pose = first_frame
-
-    # Process RGB-D Data
-    #color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
-    #depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
-    
-    # Process Camera Parameters
-    #intrinsics = intrinsics[:3, :3]
     w2c = torch.linalg.inv(pose)
 
     # Setup Camera
@@ -156,33 +160,26 @@ def initialize_first_timestep(first_frame, num_frames, scene_radius_depth_ratio,
     return params, variables, intrinsics, w2c, cam
 
 
-def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
-             sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None):
+def get_loss(params: dict, curr_data: dict, variables: dict, iter_time_idx: int, loss_weights: dict, use_sil_for_loss: bool,
+             sil_thres: int, use_l1: bool, ignore_outlier_depth_loss: bool, tracking: bool = False, do_ba: bool = False):
+    """
+    Computes losses for a given frame index. This works by rendering that spefic view using the current parameters.
+    """
+
     # Initialize Loss Dictionary
     losses = {}
 
-    if tracking:
-        # Get current frame Gaussians, where only the camera pose gets gradient
-        transformed_gaussians = transform_to_frame(params, iter_time_idx, 
-                                             gaussians_grad=False,
-                                             camera_grad=True)
-    elif mapping:
-        if do_ba:
-            # Get current frame Gaussians, where both camera pose and Gaussians get gradient
-            transformed_gaussians = transform_to_frame(params, iter_time_idx,
-                                                 gaussians_grad=True,
-                                                 camera_grad=True)
-        else:
-            # Get current frame Gaussians, where only the Gaussians get gradient
-            transformed_gaussians = transform_to_frame(params, iter_time_idx,
-                                                 gaussians_grad=True,
-                                                 camera_grad=False)
+    if do_ba:
+        # Get current frame Gaussians, where both camera pose and Gaussians get gradient
+        transformed_gaussians = transform_to_frame(params, iter_time_idx,
+                                                gaussians_grad=True,
+                                                camera_grad=True)
     else:
         # Get current frame Gaussians, where only the Gaussians get gradient
         transformed_gaussians = transform_to_frame(params, iter_time_idx,
-                                             gaussians_grad=True,
-                                             camera_grad=False)
+                                                 gaussians_grad=True,
+                                                 camera_grad=False)
+
 
     # Initialize Render Variables
     rendervar = transformed_params2rendervar(params, transformed_gaussians)
@@ -245,7 +242,10 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     return loss, variables, weighted_losses
 
 
-def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
+def initialize_new_params(new_pt_cld: torch.Tensor, mean3_sq_dist: torch.Tensor, gaussian_distribution: str):
+    """
+    Generates parameters for the new Gaussians based on a point cloud.
+    """
     num_pts = new_pt_cld.shape[0]
     means3D = new_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 4]
@@ -273,8 +273,15 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
     return params
 
 
-def add_new_gaussians(params, variables, curr_data, sil_thres, 
-                      time_idx, mean_sq_dist_method, gaussian_distribution):
+def add_new_gaussians(params: dict, variables: dict, curr_data: dict, sil_thres: int, 
+                      time_idx: int, mean_sq_dist_method: str, gaussian_distribution: str):
+    """
+    Adds new Gaussians to the scene based on the current frame. Two criteria:
+    1) Locations where the silhouette is below a threshold
+    2) Locations where rendered depth is bigger than gt depth and depth error is too large.
+    """
+    
+
     # Silhouette Rendering
     transformed_gaussians = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
     depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data["w2c"],
@@ -318,7 +325,12 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
     return params, variables
 
 
-def initialize_camera_pose(params, curr_time_idx, forward_prop):
+def initialize_camera_pose(params: dict, curr_time_idx: int, forward_prop: bool):
+    """"
+    Initialize pose for the new frame based on the previous frame's pose. If forward_prop is True,
+    the pose is initialized based on a constant velocity model, otherwise the pose is initialized
+    as the previous frame's pose.
+    """
     with torch.no_grad():
         if curr_time_idx > 1 and forward_prop:
             # Initialize the camera pose for the current frame based on a constant velocity model
@@ -340,7 +352,7 @@ def initialize_camera_pose(params, curr_time_idx, forward_prop):
     return params
 
 
-def convert_params_to_store(params):
+def convert_params_to_store(params: dict):
     params_to_store = {}
     for k, v in params.items():
         if isinstance(v, torch.Tensor):
@@ -349,7 +361,8 @@ def convert_params_to_store(params):
             params_to_store[k] = v
     return params_to_store
 
-def process_gt_frame(frame,device):
+
+def process_gt_frame(frame: int,device: str):
     """
     Preprocesses the frame from the ground truth stream.
     """
@@ -361,17 +374,39 @@ def process_gt_frame(frame,device):
 
     return idx, color, depth, intrinsics, pose
 
+
 def get_frame_from_video(video, idx: int, filter_depth: bool = True):
-    device = video.device
-    color, depth, c2w, _, _ = video.get_mapping_item(idx, device)
+    color, depth, c2w, _, _ = video.get_mapping_item(idx, video.device)
     color = color.permute(2, 0, 1)
     depth = depth.unsqueeze(0)
     intrinsics = video.intrinsics[0]*video.scale_factor
 
     if filter_depth:
-        color, depth = depth_filter(idx, video)
+        depth = depth_filter(idx, video)
     
     return idx, color, depth, intrinsics, c2w
+
+
+def update_selected_frames(params: dict, frame_list: list, frame_idx: list, video):
+    """
+    Updates the poses and depth of the previous frames using the newest guess from the video.
+    """
+    with torch.no_grad():
+        for idx in frame_idx:
+            _, depth, c2w, _, _ = video.get_mapping_item(idx, video.device)
+            depth = depth_filter(idx, video)
+            rel_w2c = torch.inverse(c2w)
+            rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
+            rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
+            rel_w2c_tran = rel_w2c[:3, 3].detach()
+            params["cam_unnorm_rots"][..., idx] = rel_w2c_rot_quat
+            params["cam_trans"][..., idx] = rel_w2c_tran
+            frame_list[idx]["est_w2c"] = rel_w2c
+            frame_list[idx]["depth"] = depth
+ 
+
+    return params, frame_list
+    
 
 def render_view(params: dict, iter_time_idx: int, cam, opaque: bool = False):
     """
@@ -393,6 +428,7 @@ def render_view(params: dict, iter_time_idx: int, cam, opaque: bool = False):
     im = (im - im.min()) / (im.max() - im.min()) * 255
     im = im.astype(np.uint8)
     return im
+
 
 def plot_3d(rgb: torch.Tensor, depth: torch.Tensor):
     """Use Open3d to plot the 3D point cloud from the monocular depth and input image."""
@@ -433,6 +469,7 @@ def plot_3d(rgb: torch.Tensor, depth: torch.Tensor):
     # Plot the point cloud
     o3d.visualization.draw_geometries([pcd])
 
+
 def plot_centers(params: dict):
     """
     Gets the parameter dicctionary and plots 3D point cloud of the centers of the gaussians using Open3D.
@@ -445,6 +482,7 @@ def plot_centers(params: dict):
     pcd.colors = o3d.utility.Vector3dVector(rgb_colors)
     o3d.visualization.draw_geometries([pcd])
 
+
 def depth_filter(time_idx: int, video):
     """
     Gets the video and the time idex and returns the filtered depth and color.
@@ -455,28 +493,30 @@ def depth_filter(time_idx: int, video):
         dirty_index = dirty_index
 
     device = video.device
-    #dirty_index = torch.tensor([time_idx,time_idx+1]).to(device)
     poses = torch.index_select(video.poses, 0, dirty_index)
-    color = torch.index_select(video.images, 0, dirty_index).squeeze()
     disps = torch.index_select(video.disps_up, 0, dirty_index)
     thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
     intrinsics = video.intrinsics[0]*video.scale_factor
     count = droid_backends.depth_filter(poses, disps, intrinsics, dirty_index, thresh)
 
-    mask1 = (count >= 1)[time_idx]
-    mask2 = (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))[time_idx]
-    mask = mask1 & mask2
+    mask1 = (count >= 1)
+    mask2 = (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
+    mask = mask1 & mask2        
+
 
     if len(dirty_index) > 1:
-        #mask = mask[time_idx]
-        color = color[time_idx]
+        mask1 = mask1[time_idx]
+        mask2 = mask2[time_idx]
+        mask = mask1 & mask2        
         disps = disps[time_idx]
-    print(f"Valid points:{mask.sum()}/{mask.numel()}")
+    #print(f"Valid points:{mask.sum()}/{mask.numel()}")
 
-    depth = 1.0 / (disps + 1e-7)
+    depth = 1.0 / (disps.squeeze() + 1e-7)
 
     vis_rejected = False
     if vis_rejected:
+        color = video.images[time_idx]
+
         disc1 = ~mask1
         disc2 = ~mask2
         r,g,b = color[0],color[1],color[2]
@@ -486,10 +526,9 @@ def depth_filter(time_idx: int, video):
         b = b*mask + 0*disc1 + 0*disc2
         plot_3d((torch.stack([r,g,b], axis=0)), depth)
 
-    color = color*mask
     depth = (depth*mask).unsqueeze(0)    
 
-    return color, depth
+    return depth
 
 
 
@@ -518,10 +557,17 @@ class GaussianMapper(object):
 
         self.num_iters_mapping = self.cfg["mapping"]["num_iters"]
         self.last_idx = -1
-        self.warmup = 30
+
+        self.warmup = 10
+
+        # Filter estimated depth
         self.filter_depth = True
 
-        self.gt_w2c_all_frames = []
+        #Allow grad on poses (there must be lr>0 on the config file)
+        self.optimize_poses = False
+        self.get_updates = False
+        
+        self.w2c_all_frames = []
         self.keyframe_list = []
         self.keyframe_time_indices = []
 
@@ -531,13 +577,13 @@ class GaussianMapper(object):
             self.use_gt_stream = True
         else:
             self.use_gt_stream = False
-
         self.use_gt_stream = False
 
-        # seperate dataloader for densification logic ?
 
         if "gaussian_distribution" not in self.cfg:
             self.cfg["mapping"]["gaussian_distribution"] = "isotropic"
+
+        
 
 
 
@@ -561,7 +607,8 @@ class GaussianMapper(object):
                                                                                             self.cfg["mapping"]["mean_sq_dist_method"],
                                                                                             gaussian_distribution=self.cfg["mapping"]["gaussian_distribution"],
                                                                                             )
-                time_idx, color, depth, intrinsics, gt_c2w = self.first_frame
+                self.n_gaussians = self.params["means3D"].shape[0]
+                time_idx, color, depth, intrinsics, c2w = self.first_frame
                 self.last_idx = 0
                 
                 print("Gaussians initialized successfully")
@@ -570,20 +617,19 @@ class GaussianMapper(object):
             elif self.use_gt_stream:
                 try:
                     frame = self.mapping_queue.get()
-                    time_idx, color, depth, intrinsics, gt_c2w = process_gt_frame(frame, self.device)
+                    time_idx, color, depth, intrinsics, c2w = process_gt_frame(frame, self.device)
                 except Exception as e:
                     print(e)
                     print("Continuing...")
                     pass
 
             else:
-                # Not actual gt pose 
-                time_idx, color, depth, intrinsics, gt_c2w = get_frame_from_video(self.video, time_idx, filter_depth=self.filter_depth) 
+                time_idx, color, depth, intrinsics, c2w = get_frame_from_video(self.video, time_idx, filter_depth=self.filter_depth)                     
 
             self.last_idx += 1       
 
             with torch.no_grad():
-                rel_w2c = torch.inverse(gt_c2w)
+                rel_w2c = torch.inverse(c2w)
                 rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
                 rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
                 rel_w2c_tran = rel_w2c[:3, 3].detach()
@@ -593,11 +639,11 @@ class GaussianMapper(object):
 
 
 
-            gt_w2c = torch.inverse(gt_c2w)
-            self.gt_w2c_all_frames.append(gt_w2c)
+            w2c = torch.inverse(c2w)
+            self.w2c_all_frames.append(w2c)
 
             curr_data = {"cam": self.cam, "im": color, "depth": depth, "id": time_idx, "intrinsics": intrinsics, 
-                        "w2c": self.first_frame_w2c, "iter_gt_w2c_list": self.gt_w2c_all_frames}
+                        "w2c": self.first_frame_w2c, "iter_gt_w2c_list": self.w2c_all_frames}
 
             # Densification & KeyFrame-based Mapping
             if time_idx == 0 or (time_idx+1) % self.cfg["mapping"]["map_every"] == 0:
@@ -612,6 +658,10 @@ class GaussianMapper(object):
                                                         self.cfg["mapping"]["sil_thres"], time_idx,
                                                         self.cfg["mapping"]["mean_sq_dist_method"], self.cfg["mapping"]["gaussian_distribution"])
 
+                pre = self.params["means3D"].shape[0]
+                print(f"Added {pre - self.n_gaussians} Gaussians ")
+                self.n_gaussians = pre
+            
                 with torch.no_grad():
                     # Get the current estimated rotation & translation
                     curr_cam_rot = F.normalize(self.params["cam_unnorm_rots"][..., time_idx].detach())
@@ -627,18 +677,23 @@ class GaussianMapper(object):
                         # Add last keyframe to the selected keyframes
                         selected_time_idx.append(self.keyframe_list[-1]["id"])
                         selected_keyframes.append(len(self.keyframe_list)-1)
+
+                    # Get newest poses and depth for all old keyframes
+                    if self.get_updates and time_idx > 0:
+                        self.params, self.keyframe_list = update_selected_frames(self.params, self.keyframe_list, selected_time_idx, self.video)
+
                     # Add current frame to the selected keyframes
                     selected_time_idx.append(time_idx)
                     selected_keyframes.append(-1)
-                    # Print the selected keyframes
 
+                    # Print the selected keyframes
                     print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
                 # Reset Optimizer & Learning Rates for Full Map Optimization
                 optimizer = initialize_optimizer(self.params, self.cfg["mapping"]["lrs"]) 
 
                 # Mapping
-
+                            
                 for iter in range(self.num_iters_mapping):
                     iter_start_time = time.time()
                     # Randomly select a frame until current time step amongst keyframes
@@ -655,22 +710,18 @@ class GaussianMapper(object):
                         iter_color = self.keyframe_list[selected_rand_keyframe_idx]["color"]
                         iter_depth = self.keyframe_list[selected_rand_keyframe_idx]["depth"]
 
-                    iter_gt_w2c = self.gt_w2c_all_frames[:iter_time_idx+1]
+                    iter_gt_w2c = self.w2c_all_frames[:iter_time_idx+1]
                     iter_data = {"cam": self.cam, "im": iter_color, "depth": iter_depth, "id": iter_time_idx, 
                                 "intrinsics": intrinsics, "w2c": self.first_frame_w2c, "iter_gt_w2c_list": iter_gt_w2c}
                     # Loss for current frame
                     loss, self.variables, losses = get_loss(self.params, iter_data, self.variables, iter_time_idx, self.cfg["mapping"]["loss_weights"],
                                                     self.cfg["mapping"]["use_sil_for_loss"], self.cfg["mapping"]["sil_thres"],
-                                                    self.cfg["mapping"]["use_l1"], self.cfg["mapping"]["ignore_outlier_depth_loss"], mapping=True)
+                                                    self.cfg["mapping"]["use_l1"], self.cfg["mapping"]["ignore_outlier_depth_loss"], do_ba=self.optimize_poses)
                     # Pruning and densification not really used
                     with torch.no_grad():
                         # Prune Gaussians
                         if self.cfg["mapping"]["prune_gaussians"]:
-                            pre = self.params["means3D"].shape[0]
                             self.params, self.variables = prune_gaussians(self.params, self.variables, optimizer, iter, self.cfg["mapping"]["pruning_dict"])
-                            post = self.params["means3D"].shape[0]
-                            # if post < pre:
-                            #     print(f"Pruned {pre-post}Gaussians ")
                         # Gaussian-Splatting"s Gradient-based Densification
                         if self.cfg["mapping"]["use_gaussian_splatting_densification"]:
                             self.params, self.variables = densify(self.params, self.variables, optimizer, iter, self.cfg["mapping"]["densify_dict"])
@@ -682,9 +733,13 @@ class GaussianMapper(object):
                         optimizer.step()
                         optimizer.zero_grad(set_to_none=True)
 
+                post = self.params["means3D"].shape[0]
+                print(f"Removed {self.n_gaussians - post} Gaussians ")
+                self.n_gaussians = post
+
             # Add frame to keyframe list
             if ((time_idx == 0) or ((time_idx+1) % self.cfg["mapping"]["keyframe_every"] == 0) or \
-                    (time_idx == self.n_frames-2)) and (not torch.isinf(gt_w2c[-1]).any()) and (not torch.isnan(gt_w2c[-1]).any()) or \
+                    (time_idx == self.n_frames-2)) and (not torch.isinf(w2c[-1]).any()) and (not torch.isnan(w2c[-1]).any()) or \
                     not self.use_gt_stream:
                 with torch.no_grad():
                     # Get the current estimated rotation & translation
@@ -702,14 +757,15 @@ class GaussianMapper(object):
 
 
 
-            if (time_idx+1) % 10 == 0:
-                print("Number of Gaussians: ", self.params["means3D"].shape[0])
+            if time_idx % 10 == 0:
+                print("Number of Gaussians: ", self.n_gaussians)
                 im = render_view(self.params, time_idx, self.cam, opaque = False)
-                cv2.imwrite(f"/home/leon/go-slam-tests/renders/{time_idx}.png", im)
+                #im = np.uint8(255*self.video.images[time_idx].cpu().numpy().transpose(1,2,0))
+                cv2.imwrite(f"/home/leon/go-slam-tests/renders/{time_idx}_f_hlr.png", im)
 
-            if len(self.keyframe_list) % 20 == 0 or time_idx == 0:
-                #plot_3d(color, depth)
-                plot_centers(self.params)
+            # if time_idx % 30 == 0:
+            #     #plot_3d(color, depth)
+            #     plot_centers(self.params)
 
 
 
@@ -721,12 +777,11 @@ class GaussianMapper(object):
 
         new keyframe selection: all frames that we get from video?
 
-        
+        optimize filter and frame update
 
         deterministic number of keyframes -> variable number depending on video
 
-
-        depth filter to remove outliers
+        elipsoid visualization
         regularization for elongated gaussians
         better pruning
         """
