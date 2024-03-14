@@ -173,7 +173,7 @@ class SLAM:
         self.mesher = Mesher(cfg, args, self)
 
         self.mapping_queue = mp.Queue()
-        self.gaussian_mapper = GaussianMapper(cfg, args, self, self.mapping_queue)
+        self.gaussian_mapper = GaussianMapper(cfg, args, self, mapping_queue=None)
 
 
     def update_cam(self, cfg):
@@ -233,13 +233,13 @@ class SLAM:
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
-            #input_queue.put(image)
-            #input_queue.put(depth)
+            input_queue.put(image)
+            input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
-            if mapping_queue is not None and (timestamp == 0 or (timestamp+1) % 10 == 0):
-                mapping_queue.put(frame)
+            # if mapping_queue is not None and (timestamp == 0 or (timestamp+1) % 10 == 0):
+            #     mapping_queue.put(frame)
 
 
             # predict mesh every 50 frames for video making
@@ -247,8 +247,6 @@ class SLAM:
                 self.hang_on[:] = 1
             while self.hang_on > 0:
                 sleep(1.0)
-        while not mapping_queue.empty():
-            sleep(1.0)
 
         self.tracking_finished += 1
         print("Tracking Done!")
@@ -308,11 +306,11 @@ class SLAM:
             while self.hang_on > 0 and self.make_video:
                 sleep(1.0)
             self.gaussian_mapper()
-
+        finished = False
         if not dont_run:
-            print("Start post-processing on gaussian mapping...")
-            for i in tqdm(range(self.post_processing_iters)):
-                self.gaussian_mapper(the_end=True)
+            while not finished:
+                finished = self.gaussian_mapper(the_end=True)
+        
         self.gaussian_mapping_finished += 1
         print("Gaussian Mapping Done!")
 

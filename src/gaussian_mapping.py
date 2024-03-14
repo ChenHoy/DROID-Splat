@@ -1,8 +1,6 @@
 import torch
 import numpy as np
-import os
 import time
-import matplotlib.pyplot as plt
 import cv2
 import open3d as o3d
 import torch.nn.functional as F
@@ -16,6 +14,7 @@ from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, dens
 from utils.keyframe_selection import keyframe_selection_overlap
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
+from .gaussian_mesh import save_ply
 
 import droid_backends
 
@@ -375,14 +374,21 @@ def process_gt_frame(frame: int,device: str):
     return idx, color, depth, intrinsics, pose
 
 
-def get_frame_from_video(video, idx: int, filter_depth: bool = True):
+def get_frame_from_video(video, idx: int, filter_depth: bool = True, show_filtered: bool = False):
     color, depth, c2w, _, _ = video.get_mapping_item(idx, video.device)
     color = color.permute(2, 0, 1)
     depth = depth.unsqueeze(0)
     intrinsics = video.intrinsics[0]*video.scale_factor
 
     if filter_depth:
-        depth = depth_filter(idx, video)
+        mask = depth_filter(idx, video)
+
+        if show_filtered:
+            filt_col = color*mask
+            filt_col[0, ~mask] = 255
+            plot_3d(filt_col, depth)
+        
+        depth = depth*mask
     
     return idx, color, depth, intrinsics, c2w
 
@@ -499,36 +505,11 @@ def depth_filter(time_idx: int, video):
     intrinsics = video.intrinsics[0]*video.scale_factor
     count = droid_backends.depth_filter(poses, disps, intrinsics, dirty_index, thresh)
 
-    mask1 = (count >= 1)
-    mask2 = (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
-    mask = mask1 & mask2        
+    mask = ((count >= 1) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True)))[time_idx]
 
-
-    if len(dirty_index) > 1:
-        mask1 = mask1[time_idx]
-        mask2 = mask2[time_idx]
-        mask = mask1 & mask2        
-        disps = disps[time_idx]
     #print(f"Valid points:{mask.sum()}/{mask.numel()}")
 
-    depth = 1.0 / (disps.squeeze() + 1e-7)
-
-    vis_rejected = False
-    if vis_rejected:
-        color = video.images[time_idx]
-
-        disc1 = ~mask1
-        disc2 = ~mask2
-        r,g,b = color[0],color[1],color[2]
-
-        r = r*mask + 255*disc1 + 0*disc2
-        g = g*mask + 0*disc1 + 255*disc2
-        b = b*mask + 0*disc1 + 0*disc2
-        plot_3d((torch.stack([r,g,b], axis=0)), depth)
-
-    depth = (depth*mask).unsqueeze(0)    
-
-    return depth
+    return mask
 
 
 
@@ -557,16 +538,17 @@ class GaussianMapper(object):
 
         self.num_iters_mapping = self.cfg["mapping"]["num_iters"]
         self.last_idx = -1
+        self.warmup = 0
 
-        self.warmup = 10
-
-        # Filter estimated depth
-        self.filter_depth = True
-
-        #Allow grad on poses (there must be lr>0 on the config file)
-        self.optimize_poses = False
-        self.get_updates = False
         
+        self.filter_depth = True # Filter estimated depth
+        self.show_filtered = True # Plot filtered points at each step
+        self.optimize_poses = False #Allow grad on poses (there must be lr>0 on the config file)
+        self.get_updates = False # Update selected keyframes before optimization
+        self.save_renders = True
+        self.save_ply = False
+        self.ply_path = "/home/leon/go-slam-tests/meshes/office0.ply"
+
         self.w2c_all_frames = []
         self.keyframe_list = []
         self.keyframe_time_indices = []
@@ -577,7 +559,6 @@ class GaussianMapper(object):
             self.use_gt_stream = True
         else:
             self.use_gt_stream = False
-        self.use_gt_stream = False
 
 
         if "gaussian_distribution" not in self.cfg:
@@ -599,7 +580,7 @@ class GaussianMapper(object):
                     self.first_frame = process_gt_frame(0, self.device)
 
                 else:
-                    self.first_frame = get_frame_from_video(self.video, 0, filter_depth=self.filter_depth)   
+                    self.first_frame = get_frame_from_video(self.video, 0, filter_depth=self.filter_depth, show_filtered=self.show_filtered)   
 
 
                 self.params, self.variables, intrinsics, self.first_frame_w2c, self.cam = initialize_first_timestep(self.first_frame, self.n_frames, 
@@ -624,7 +605,7 @@ class GaussianMapper(object):
                     pass
 
             else:
-                time_idx, color, depth, intrinsics, c2w = get_frame_from_video(self.video, time_idx, filter_depth=self.filter_depth)                     
+                time_idx, color, depth, intrinsics, c2w = get_frame_from_video(self.video, time_idx, filter_depth=self.filter_depth, show_filtered=self.show_filtered)                     
 
             self.last_idx += 1       
 
@@ -737,35 +718,40 @@ class GaussianMapper(object):
                 print(f"Removed {self.n_gaussians - post} Gaussians ")
                 self.n_gaussians = post
 
-            # Add frame to keyframe list
-            if ((time_idx == 0) or ((time_idx+1) % self.cfg["mapping"]["keyframe_every"] == 0) or \
-                    (time_idx == self.n_frames-2)) and (not torch.isinf(w2c[-1]).any()) and (not torch.isnan(w2c[-1]).any()) or \
-                    not self.use_gt_stream:
-                with torch.no_grad():
-                    # Get the current estimated rotation & translation
-                    curr_cam_rot = F.normalize(self.params["cam_unnorm_rots"][..., time_idx].detach())
-                    curr_cam_tran = self.params["cam_trans"][..., time_idx].detach()
-                    curr_w2c = torch.eye(4).cuda().float()
-                    curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-                    curr_w2c[:3, 3] = curr_cam_tran
-                    # Initialize Keyframe Info
-                    curr_keyframe = {"id": time_idx, "est_w2c": curr_w2c, "color": color, "depth": depth}
-                    # Add to keyframe list
-                    self.keyframe_list.append(curr_keyframe)
-                    self.keyframe_time_indices.append(time_idx)
-                    #print(f"\nAdded Keyframe at Frame {time_idx}. Total number of keyframes: {len(self.keyframe_list)}")
+                # Add frame to keyframe list
+                # Get the current estimated rotation & translation
+                curr_cam_rot = F.normalize(self.params["cam_unnorm_rots"][..., time_idx].detach())
+                curr_cam_tran = self.params["cam_trans"][..., time_idx].detach()
+                curr_w2c = torch.eye(4).cuda().float()
+                curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
+                curr_w2c[:3, 3] = curr_cam_tran
+                # Initialize Keyframe Info
+                curr_keyframe = {"id": time_idx, "est_w2c": curr_w2c, "color": color, "depth": depth}
+                # Add to keyframe list
+                self.keyframe_list.append(curr_keyframe)
+                self.keyframe_time_indices.append(time_idx)
+                #print(f"\nAdded Keyframe at Frame {time_idx}. Total number of keyframes: {len(self.keyframe_list)}")
 
 
 
-            if time_idx % 10 == 0:
+            if time_idx % 10 == 0 and self.save_renders:
                 print("Number of Gaussians: ", self.n_gaussians)
                 im = render_view(self.params, time_idx, self.cam, opaque = False)
-                #im = np.uint8(255*self.video.images[time_idx].cpu().numpy().transpose(1,2,0))
-                cv2.imwrite(f"/home/leon/go-slam-tests/renders/{time_idx}_f_hlr.png", im)
+                cv2.imwrite(f"/home/leon/go-slam-tests/renders/{time_idx}.png", im)
 
-            # if time_idx % 30 == 0:
-            #     #plot_3d(color, depth)
-            #     plot_centers(self.params)
+            if time_idx % 30 == 0:
+                plot_3d(self.video.images[time_idx], depth)
+                plot_centers(self.params)
+
+            
+        if the_end and self.last_idx == cur_idx:
+            print("Gaussian Mapping Ended")
+
+            if self.save_ply:
+                save_ply(self.params, self.ply_path)
+
+            return True
+
 
 
 
