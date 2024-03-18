@@ -73,8 +73,8 @@ mapping:
   pruning_dict: # Needs to be updated based on the number of mapping iterations
     start_after: 0
     remove_big_after: 0
-    stop_after: 100
-    prune_every: 5
+    stop_after: 40
+    prune_every: 20
     removal_opacity_threshold: 0.005
     final_removal_opacity_threshold: 0.005
     reset_opacities: False

@@ -6,6 +6,7 @@ from tqdm import tqdm
 from time import gmtime, strftime, time, sleep
 
 import cv2
+import open3d as o3d
 import numpy as np
 import torch
 import torch.nn as nn
@@ -145,6 +146,8 @@ class SLAM:
         self.optimizing_finished.share_memory_()
         self.visualizing_finished = torch.zeros((1)).int()
         self.visualizing_finished.share_memory_()
+        self.gaussian_visualizing_finished = torch.zeros((1)).int()
+        self.gaussian_visualizing_finished.share_memory_()
 
         self.hang_on = torch.zeros((1)).int()
         self.hang_on.share_memory_()
@@ -173,7 +176,10 @@ class SLAM:
         self.mesher = Mesher(cfg, args, self)
 
         self.mapping_queue = mp.Queue()
-        self.gaussian_mapper = GaussianMapper(cfg, args, self, mapping_queue=None)
+        self.visualization_queue = mp.Queue()
+
+        self.gaussian_mapper = GaussianMapper(cfg, args, self, mapping_queue=None, visualization_queue = self.visualization_queue)
+
 
 
     def update_cam(self, cfg):
@@ -233,8 +239,8 @@ class SLAM:
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
-            input_queue.put(image)
-            input_queue.put(depth)
+            # input_queue.put(image)
+            # input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
@@ -314,6 +320,42 @@ class SLAM:
         self.gaussian_mapping_finished += 1
         print("Gaussian Mapping Done!")
 
+
+
+    def gaussian_visualizing(self, rank, dont_run=False, visualization_queue=None):
+        print("Gaussian visualization Triggered!")
+        self.all_trigered += 1
+        if visualization_queue is None:
+            print("No queue for Gaussian visualization")
+            return
+        
+        vis = o3d.visualization.Visualizer()
+        vis.create_window()
+        point_cloud = o3d.geometry.PointCloud()
+        point_cloud.points = o3d.utility.Vector3dVector(np.random.rand(10, 3))
+        point_cloud.colors = o3d.utility.Vector3dVector(np.random.rand(10, 3))
+        vis.add_geometry(point_cloud)
+
+        while (self.gaussian_mapping_finished < 1) and (
+            not dont_run
+        ):
+            if not visualization_queue.empty():
+                print("Point cloud updated")
+                params = visualization_queue.get()
+                means3D = params["means3D"].detach().cpu().numpy()
+                rgb_colors = params["rgb_colors"].detach().cpu().numpy()  
+                n_gaussians = means3D.shape[0]
+                idxs = np.random.choice(np.arange(n_gaussians), n_gaussians//10, replace=False)
+                point_cloud.points = o3d.utility.Vector3dVector(means3D[idxs, :]) 
+                point_cloud.colors = o3d.utility.Vector3dVector(rgb_colors[idxs, :]) 
+                vis.update_geometry(point_cloud)
+                vis.poll_events()
+                vis.update_renderer()
+
+
+        self.gaussian_visualizing_finished += 1
+        print("Gaussian Visualization done!")
+
     def meshing(self, rank, dont_run=False):
         print("Meshing Triggered!")
         self.all_trigered += 1
@@ -325,9 +367,9 @@ class SLAM:
 
         self.meshing_finished += 1
         print("Meshing Done!")
-
+    
     def visualizing(self, rank, dont_run=False):
-        print("Visualization Triggered!")
+        print("Visualization triggered!")
         self.all_trigered += 1
         while (self.tracking_finished < 1 or self.optimizing_finished < 1) and (
             not dont_run
@@ -394,6 +436,8 @@ class SLAM:
             camera_trajectory = w2w * camera_trajectory.inv()
             traj_est = camera_trajectory.data.cpu().numpy()
             estimate_c2w_list = camera_trajectory.matrix().data.cpu()
+
+            
             out_path = os.path.join(self.output, "checkpoints/est_poses.npy")
             np.save(out_path, estimate_c2w_list.numpy())  # c2ws
 
@@ -470,6 +514,8 @@ class SLAM:
             mp.Process(target=self.mapping, args=(5, True)),
             mp.Process(target=self.meshing, args=(6, True)),
             mp.Process(target=self.gaussian_mapping, args=(7, False)),
+            mp.Process(target=self.gaussian_visualizing, args=(8, True, self.visualization_queue)),
+
         ]
 
         self.num_running_thread[0] += len(processes)

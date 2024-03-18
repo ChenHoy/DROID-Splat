@@ -14,7 +14,7 @@ from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, dens
 from utils.keyframe_selection import keyframe_selection_overlap
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
-from .gaussian_mesh import save_ply
+from utils.extract_ply import save_ply
 
 import droid_backends
 
@@ -160,7 +160,7 @@ def initialize_first_timestep(first_frame: tuple, num_frames: int, scene_radius_
 
 
 def get_loss(params: dict, curr_data: dict, variables: dict, iter_time_idx: int, loss_weights: dict, use_sil_for_loss: bool,
-             sil_thres: int, use_l1: bool, ignore_outlier_depth_loss: bool, tracking: bool = False, do_ba: bool = False):
+             sil_thres: int, use_l1: bool, ignore_outlier_depth_loss: bool, tracking: bool = False, optimize_poses: bool = False):
     """
     Computes losses for a given frame index. This works by rendering that spefic view using the current parameters.
     """
@@ -168,16 +168,11 @@ def get_loss(params: dict, curr_data: dict, variables: dict, iter_time_idx: int,
     # Initialize Loss Dictionary
     losses = {}
 
-    if do_ba:
-        # Get current frame Gaussians, where both camera pose and Gaussians get gradient
-        transformed_gaussians = transform_to_frame(params, iter_time_idx,
+    # Get current frame Gaussians, where camera pose gets gradient depending on optimize_poses
+    transformed_gaussians = transform_to_frame(params, iter_time_idx,
                                                 gaussians_grad=True,
-                                                camera_grad=True)
-    else:
-        # Get current frame Gaussians, where only the Gaussians get gradient
-        transformed_gaussians = transform_to_frame(params, iter_time_idx,
-                                                 gaussians_grad=True,
-                                                 camera_grad=False)
+                                                camera_grad=optimize_poses)
+
 
 
     # Initialize Render Variables
@@ -388,19 +383,21 @@ def get_frame_from_video(video, idx: int, filter_depth: bool = True, show_filter
             filt_col[0, ~mask] = 255
             plot_3d(filt_col, depth)
         
-        depth = depth*mask
+        depth = (depth*mask)
     
     return idx, color, depth, intrinsics, c2w
 
 
-def update_selected_frames(params: dict, frame_list: list, frame_idx: list, video):
+def update_selected_frames(params: dict, frame_list: list, frame_idx: list, video, filter_depth: bool = True):
     """
     Updates the poses and depth of the previous frames using the newest guess from the video.
     """
     with torch.no_grad():
         for idx in frame_idx:
             _, depth, c2w, _, _ = video.get_mapping_item(idx, video.device)
-            depth = depth_filter(idx, video)
+            if filter_depth:
+                mask = depth_filter(idx, video)
+                depth = (depth*mask)
             rel_w2c = torch.inverse(c2w)
             rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
             rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
@@ -491,7 +488,7 @@ def plot_centers(params: dict):
 
 def depth_filter(time_idx: int, video):
     """
-    Gets the video and the time idex and returns the filtered depth and color.
+    Gets the video and the time idex and returns the mask.
     """
     #TODO why doesnt it work only with one index?
     with video.get_lock():
@@ -521,7 +518,7 @@ class GaussianMapper(object):
     and optimizes gaussians at each keyframe.
     """
 
-    def __init__(self, cfg, args, slam, mapping_queue=None):
+    def __init__(self, cfg, args, slam, mapping_queue=None, visualization_queue=None):
         self.cfg = cfg
         self.args = args
         self.video = slam.video
@@ -530,6 +527,10 @@ class GaussianMapper(object):
         #self.device = cfg["mapping"]["device"]
         self.decay = float(cfg["mapping"]["decay"])
 
+
+        self.w2c_all_frames = []
+        self.keyframe_list = []
+        self.keyframe_time_indices = []
         # TODO: get real number of frames
         #self.n_frames = slam.n_frames
         self.n_frames = 2000
@@ -538,27 +539,37 @@ class GaussianMapper(object):
 
         self.num_iters_mapping = self.cfg["mapping"]["num_iters"]
         self.last_idx = -1
+
         self.warmup = 0
 
-        
         self.filter_depth = True # Filter estimated depth
-        self.show_filtered = True # Plot filtered points at each step
-        self.optimize_poses = False #Allow grad on poses (there must be lr>0 on the config file)
-        self.get_updates = False # Update selected keyframes before optimization
+        self.show_filtered = False # Plot filtered points at each step (only works if filter_depth is True)
+        self.optimize_poses = True #Allow grad on poses (there must be lr>0 on the config file)
+        self.get_updates = True # Update selected keyframes before optimization
+
         self.save_renders = True
-        self.save_ply = False
+        self.render_path = "/home/leon/go-slam-tests/renders"
+
+        self.save_ply = True
         self.ply_path = "/home/leon/go-slam-tests/meshes/office0.ply"
 
-        self.w2c_all_frames = []
-        self.keyframe_list = []
-        self.keyframe_time_indices = []
+        self.use_gt_stream = False
+
+        if self.use_gt_stream:
+            if mapping_queue is not None:
+                self.mapping_queue = mapping_queue
+            else:
+                print("No mapping queue, using gt stream is not possible")
+                self.use_gt_stream = False
 
 
-        if mapping_queue is not None:
-            self.mapping_queue = mapping_queue
-            self.use_gt_stream = True
-        else:
-            self.use_gt_stream = False
+        self.visualize = True
+
+        if visualization_queue is not None and self.visualize:
+            self.visualization_queue = visualization_queue
+        elif visualization_queue is None:
+            print("No visualization queue, visualization is not possible")
+            self.visualize = False
 
 
         if "gaussian_distribution" not in self.cfg:
@@ -628,6 +639,7 @@ class GaussianMapper(object):
 
             # Densification & KeyFrame-based Mapping
             if time_idx == 0 or (time_idx+1) % self.cfg["mapping"]["map_every"] == 0:
+                print(f"\nMapping at frame {time_idx}")
                 # Densification
                 if self.cfg["mapping"]["add_new_gaussians"] and time_idx > 0:
                     # Setup Data for Densification
@@ -668,7 +680,7 @@ class GaussianMapper(object):
                     selected_keyframes.append(-1)
 
                     # Print the selected keyframes
-                    print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
+                    print(f"Selected Keyframes at Frames: {selected_time_idx}")
 
                 # Reset Optimizer & Learning Rates for Full Map Optimization
                 optimizer = initialize_optimizer(self.params, self.cfg["mapping"]["lrs"]) 
@@ -697,7 +709,7 @@ class GaussianMapper(object):
                     # Loss for current frame
                     loss, self.variables, losses = get_loss(self.params, iter_data, self.variables, iter_time_idx, self.cfg["mapping"]["loss_weights"],
                                                     self.cfg["mapping"]["use_sil_for_loss"], self.cfg["mapping"]["sil_thres"],
-                                                    self.cfg["mapping"]["use_l1"], self.cfg["mapping"]["ignore_outlier_depth_loss"], do_ba=self.optimize_poses)
+                                                    self.cfg["mapping"]["use_l1"], self.cfg["mapping"]["ignore_outlier_depth_loss"], optimize_poses=self.optimize_poses)
                     # Pruning and densification not really used
                     with torch.no_grad():
                         # Prune Gaussians
@@ -733,20 +745,21 @@ class GaussianMapper(object):
                 #print(f"\nAdded Keyframe at Frame {time_idx}. Total number of keyframes: {len(self.keyframe_list)}")
 
 
-
+            print("Total number: ", self.n_gaussians)
             if time_idx % 10 == 0 and self.save_renders:
-                print("Number of Gaussians: ", self.n_gaussians)
                 im = render_view(self.params, time_idx, self.cam, opaque = False)
-                cv2.imwrite(f"/home/leon/go-slam-tests/renders/{time_idx}.png", im)
+                cv2.imwrite(f"{self.render_path}/{time_idx}.png", im)
 
-            if time_idx % 30 == 0:
-                plot_3d(self.video.images[time_idx], depth)
-                plot_centers(self.params)
+            # if time_idx % 10 == 0:
+            #     plot_3d(self.video.images[time_idx], depth)
+            #     plot_centers(self.params)
+                
+            if self.visualize and time_idx % 5 == 0:
+                self.visualization_queue.put(self.params)
 
             
-        if the_end and self.last_idx == cur_idx:
-            print("Gaussian Mapping Ended")
-
+        if the_end and self.last_idx == cur_idx-1:
+            plot_centers(self.params)
             if self.save_ply:
                 save_ply(self.params, self.ply_path)
 
@@ -761,7 +774,7 @@ class GaussianMapper(object):
         Depth filer with single frame
         Update poses of old frames
 
-        new keyframe selection: all frames that we get from video?
+        redundant code about keyframe logic
 
         optimize filter and frame update
 
@@ -770,6 +783,8 @@ class GaussianMapper(object):
         elipsoid visualization
         regularization for elongated gaussians
         better pruning
+
+        optimization after new frames finish¿
         """
 
         
