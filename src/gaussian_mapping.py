@@ -5,16 +5,16 @@ import cv2
 import open3d as o3d
 import torch.nn.functional as F
 
-from utils.slam_helpers import (
+from splatam_utils.slam_helpers import (
     transformed_params2rendervar, transformed_params2depthplussilhouette,
     transform_to_frame, l1_loss_v1, matrix_to_quaternion
 )
-from utils.recon_helpers import setup_camera
-from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
-from utils.keyframe_selection import keyframe_selection_overlap
+from splatam_utils.recon_helpers import setup_camera
+from splatam_utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
+from splatam_utils.keyframe_selection import keyframe_selection_overlap
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
-from utils.extract_ply import save_ply
+from splatam_utils.extract_ply import save_ply
 
 import droid_backends
 

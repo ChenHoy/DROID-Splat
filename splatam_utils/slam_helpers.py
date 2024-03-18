@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from utils.slam_external import build_rotation
+from splatam_utils.slam_external import build_rotation
 
 def l1_loss_v1(x, y):
     return torch.abs((x - y)).mean()

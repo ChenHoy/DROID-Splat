@@ -38,7 +38,6 @@ class PoseTrajectoryFiller:
         ### linear pose interpolation ###
         N = self.video.counter.value
         M = len(timestamps)
-
         ts = self.video.timestamp[:N]
         Ps = SE3(self.video.poses[:N])
 

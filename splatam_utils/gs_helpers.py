@@ -6,8 +6,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from utils.recon_helpers import setup_camera
-from utils.slam_external import build_rotation,calc_psnr
+from splatam_utils.recon_helpers import setup_camera
+from splatam_utils.slam_external import build_rotation,calc_psnr
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 

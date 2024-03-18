@@ -26,6 +26,7 @@ from .gaussian_mapping import GaussianMapper
 from .render import Renderer
 from .mesher import Mesher
 from .InstantNeuS import InstantNeuS
+from .monogs_mapping import GaussianMapper as MonogsGaussianMapper
 
 
 class Tracker(nn.Module):
@@ -180,6 +181,7 @@ class SLAM:
 
         self.gaussian_mapper = GaussianMapper(cfg, args, self, mapping_queue=None, visualization_queue = self.visualization_queue)
 
+        self.gaussian_mapper2 = MonogsGaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
 
 
     def update_cam(self, cfg):
@@ -245,7 +247,7 @@ class SLAM:
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
             # if mapping_queue is not None and (timestamp == 0 or (timestamp+1) % 10 == 0):
-            #     mapping_queue.put(frame)
+            mapping_queue.put(frame)
 
 
             # predict mesh every 50 frames for video making
@@ -311,11 +313,11 @@ class SLAM:
         while self.tracking_finished < 1 and not dont_run:
             while self.hang_on > 0 and self.make_video:
                 sleep(1.0)
-            self.gaussian_mapper()
+            self.gaussian_mapper2()
         finished = False
         if not dont_run:
             while not finished:
-                finished = self.gaussian_mapper(the_end=True)
+                finished = self.gaussian_mapper2(the_end=True)
         
         self.gaussian_mapping_finished += 1
         print("Gaussian Mapping Done!")
