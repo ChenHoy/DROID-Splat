@@ -135,6 +135,7 @@ def bundle_adjustment(
     damping: torch.Tensor,
     poses: torch.Tensor,
     disps: torch.Tensor,
+    disps_sens: Optional[torch.Tensor],
     intrinsics: torch.Tensor,
     ii: torch.Tensor,
     jj: torch.Tensor,
@@ -143,7 +144,6 @@ def bundle_adjustment(
     iters: int = 4,
     lm: float = 1e-4,
     ep: float = 0.1,
-    disps_sens: Optional[torch.Tensor] = None,
     structure_only: bool = False,
     motion_only: bool = False,
 ) -> None:
@@ -155,17 +155,21 @@ def bundle_adjustment(
     # Batch up the tensors to work with the pure Python code
     disps, weight = disps.unsqueeze(0), weight.unsqueeze(0)
     target, intrinsics = target.unsqueeze(0), intrinsics.unsqueeze(0)
+    if disps_sens is not None:
+        disps_sens = disps_sens.unsqueeze(0)
+    else:
+        disps_sens = None
 
     for i in range(iters):
         if motion_only:
             MoBA(target, weight, damping, Gs, disps, intrinsics, ii, jj, t0, t1, ep, lm)
 
         if structure_only:
-            BA(target, weight, damping, Gs, disps, intrinsics, ii, jj, t0, t1, ep, lm, True)
+            BA(target, weight, damping, Gs, disps, disps_sens, intrinsics, ii, jj, t0, t1, ep, lm, True)
             disps.clamp(min=0.001)
 
         if not motion_only and not structure_only:
-            BA(target, weight, damping, Gs, disps, intrinsics, ii, jj, t0, t1, ep, lm)
+            BA(target, weight, damping, Gs, disps, disps_sens, intrinsics, ii, jj, t0, t1, ep, lm)
             disps.clamp(min=0.001)
 
     # Update the video
@@ -250,8 +254,7 @@ def MoBA(
     then excludes all poses as fixed before t0.
     """
     # Select keyframe window to optimize over!
-    disps, poses = all_disps[:, :t1], all_poses[:, :t1]
-    intrinsics = all_intrinsics[:, :t1]
+    disps, poses, intrinsics = all_disps[:, :t1], all_poses[:, :t1], all_intrinsics[:, :t1]
 
     # Always fix the first pose and then fix all poses outside of optimization window
     fixedp = max(t0, 1)
@@ -305,6 +308,7 @@ def BA(
     eta: torch.Tensor,
     all_poses: SE3,
     all_disps: torch.Tensor,
+    all_disps_sens: Optional[torch.Tensor],
     all_intrinsics: torch.Tensor,
     ii: torch.Tensor,
     jj: torch.Tensor,
@@ -312,6 +316,7 @@ def BA(
     t1: int,
     ep: float = 0.1,
     lm: float = 1e-4,
+    alpha: float = 0.05,
     rig: int = 1,
     structure_only: bool = False,
 ) -> None:
@@ -336,8 +341,11 @@ def BA(
         t1: Optimitation window end time
     """
     # Select keyframe window to optimize over!
-    disps, poses = all_disps[:, :t1], all_poses[:, :t1]
-    intrinsics = all_intrinsics[:, :t1]
+    disps, poses, intrinsics = all_disps[:, :t1], all_poses[:, :t1], all_intrinsics[:, :t1]
+    if all_disps_sens is not None:
+        disps_sens = all_disps_sens[:, :t1]
+    else:
+        disps_sens = None
 
     # Always fix the first pose and then fix all poses outside of optimization window
     fixedp = max(t0, 1)
@@ -381,11 +389,18 @@ def BA(
     # This reduces the number of elements to M defined by kk
     # kk basically scatters all edges ij onto i, i.e. we sum up all edges that are connected to i
     C = safe_scatter_add_vec(Ck, kk, N)
-    eta = rearrange(eta, "n h w -> 1 n (h w)")
-    C = C + eta + 1e-7  # Apply damping
-    C = rearrange(C, "b n hw -> b (n hw) 1 1")
-
     w = safe_scatter_add_vec(wk, kk, N)
+    eta = rearrange(eta, "n h w -> 1 n (h w)")
+
+    if disps_sens is not None:
+        m = disps_sens[:, kx].view(B, -1, ht*wd) > 0
+        m = m.int()
+        # Add alpha only for where there is a prior, else only add normal damping
+        C = C + alpha * m + (1 - m) * eta + 1e-7
+        w = w - m * alpha * (disps[:, kx] - disps_sens[:, kx]).view(B, -1, ht*wd)
+    else:
+        C = C + eta + 1e-7  # Apply damping
+    C = rearrange(C, "b n hw -> b (n hw) 1 1")
     w = rearrange(w, "b n hw -> b (n hw) 1 1")
 
     ### 3: solve the system ###
