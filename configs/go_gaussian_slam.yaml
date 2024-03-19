@@ -194,3 +194,25 @@ model_params:
 pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False
+
+Dataset:
+  sensor_type: 'depth'
+  pcd_downsample: 64
+  pcd_downsample_init: 32
+  adaptive_pointsize: True
+  point_size: 0.05
+  type: 'replica'
+  Calibration:
+    fx: 600.0
+    fy: 600.0
+    cx: 599.5
+    cy: 339.5
+    k1: 0.0
+    k2: 0.0
+    p1: 0.0
+    p2: 0.0
+    k3: 0.0
+    width: 1200
+    height: 680
+    depth_scale: 6553.5
+    distorted: False

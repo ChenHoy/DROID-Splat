@@ -246,8 +246,8 @@ class SLAM:
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
-            # if mapping_queue is not None and (timestamp == 0 or (timestamp+1) % 10 == 0):
-            mapping_queue.put(frame)
+            if mapping_queue is not None and (timestamp == 0 or (timestamp) % 10 == 0):
+                mapping_queue.put(frame)
 
 
             # predict mesh every 50 frames for video making

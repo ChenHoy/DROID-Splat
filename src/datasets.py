@@ -208,7 +208,7 @@ class Replica(BaseDataset):
         self.poses = self.poses[::stride]
 
 
-        relative_poses = False
+        relative_poses = True # True to test the gt stream mapping
         if relative_poses:
             self.poses = torch.from_numpy(np.array(self.poses))
             trans_10 = torch.inverse(self.poses[0].unsqueeze(0).repeat(self.poses.shape[0], 1, 1))

@@ -750,9 +750,9 @@ class GaussianMapper(object):
                 im = render_view(self.params, time_idx, self.cam, opaque = False)
                 cv2.imwrite(f"{self.render_path}/{time_idx}.png", im)
 
-            # if time_idx % 10 == 0:
-            #     plot_3d(self.video.images[time_idx], depth)
-            #     plot_centers(self.params)
+            if time_idx % 10 == 0:
+                #plot_3d(self.video.images[time_idx], depth)
+                plot_centers(self.params)
                 
             if self.visualize and time_idx % 5 == 0:
                 self.visualization_queue.put(self.params)

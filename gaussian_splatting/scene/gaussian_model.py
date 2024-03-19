@@ -114,7 +114,7 @@ class GaussianModel:
             rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
             depth = o3d.geometry.Image(depthmap.astype(np.float32))
         else:
-            depth_raw = cam.depth
+            depth_raw = cam.depth.contiguous().cpu().numpy()
             if depth_raw is None:
                 depth_raw = np.empty((cam.image_height, cam.image_width))
 
