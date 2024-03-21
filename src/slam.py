@@ -22,7 +22,8 @@ from .multiview_filter import MultiviewFilter
 from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .mapping import Mapper
-from .gaussian_mapping import GaussianMapper
+# old splatam mapper
+# from .gaussian_mapping import GaussianMapper
 from .render import Renderer
 from .mesher import Mesher
 from .InstantNeuS import InstantNeuS
@@ -516,7 +517,7 @@ class SLAM:
             mp.Process(target=self.mapping, args=(5, True)),
             mp.Process(target=self.meshing, args=(6, True)),
             mp.Process(target=self.gaussian_mapping, args=(7, False)),
-            mp.Process(target=self.gaussian_visualizing, args=(8, True, self.visualization_queue)),
+            mp.Process(target=self.gaussian_visualizing, args=(8, False, self.visualization_queue)),
 
         ]
 
