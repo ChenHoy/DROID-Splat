@@ -10,3 +10,12 @@
 [submodule "ext/Zoedepth"]
 	path = ext/Zoedepth
 	url = https://github.com/isl-org/ZoeDepth
+[submodule "thirdparty/diff-gaussian-rasterization-w-pose"]
+	path = thirdparty/diff-gaussian-rasterization-w-pose
+	url = https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose.git
+[submodule "thirdparty/--force"]
+	path = thirdparty/--force
+	url = https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose.git
+[submodule "thirdparty/diff_gaussian_rasterization_w_pose"]
+	path = thirdparty/diff_gaussian_rasterization_w_pose
+	url = https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose.git
