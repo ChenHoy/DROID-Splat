@@ -216,3 +216,11 @@ Dataset:
     height: 680
     depth_scale: 6553.5
     distorted: False
+
+
+Training:
+  rgb_boundary_threshold: 0.01
+  gaussian_th: 0.005
+  gaussian_extent: 15
+  size_threshold: 10
+  prune_every: 5
