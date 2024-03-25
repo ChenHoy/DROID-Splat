@@ -178,18 +178,26 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
 
   # TODO
 - [x] Fix bug in main branch that distorts the reconstruction
-- [ ] Exchange NeRF mapping from [GO-SLAM](https://arxiv.org/pdf/2309.02436.pdf) with Gaussian Splatting from [Splatam](https://arxiv.org/pdf/2312.02126.pdf)
-  - [ ] Create mapping thread that uses the add_gaussians(), prune_gaussians() functions
-  - [ ] Test these functions in the frontend by creating and optimizing Gaussians from new keyframes
-  - [ ] After optimizing the scene, render the images into the keyframe and output this in another visualization thread similar to show_frame()
-  - [ ] Trick: Use the RGBD stream and gt poses first instead of depth_video, to optimize a scene and check if everything works correctly before moving on to the predicted poses and disparities
+- [x] Exchange NeRF mapping from [GO-SLAM](https://arxiv.org/pdf/2309.02436.pdf) with Gaussian Splatting from [Splatam](https://arxiv.org/pdf/2312.02126.pdf)
+  - [x] Create mapping thread that uses the add_gaussians(), prune_gaussians() functions
+  - [x] Test these functions in the frontend by creating and optimizing Gaussians from new keyframes
+  - [x] After optimizing the scene, render the images into the keyframe and output this in another visualization thread similar to show_frame()
+  - [x] Trick: Use the RGBD stream and gt poses first instead of depth_video, to optimize a scene and check if everything works correctly before moving on to the predicted poses and disparities
 - [ ] Use scale adjustment optimization similar to [HI-SLAM](https://arxiv.org/pdf/2310.04787.pdf) to optimize the Monocular depth estimation prior into the map
   - [ ] Implement naive optmization using off-the-shelf Adam optimizer to update scale and shift and fit the prior similar to [CVPR23 paper](https://openaccess.thecvf.com/content/CVPR2023/papers/Dong_Fast_Monocular_Scene_Reconstruction_With_Global-Sparse_Local-Dense_Grids_CVPR_2023_paper.pdf)
-  - [ ] Implement Gauss-Newton updates in Python on combined objective of Reprojection error and Depth prior loss with fixed pose graph
+  - [x] Implement Gauss-Newton updates in Python on combined objective of Reprojection error and Depth prior loss with fixed pose graph
   - [ ] Use a mixed residual objective in a true least-squares objective
-  - [ ] Can we observe a huge difference between these techniques? 
-  - [ ] Do we need more rigorous treatment of this optimization or is this good enough?
-
+- [ ] FIX bug in ellipsoid renderer
+- [ ] Properly evaluate our new code base for standard metrics
+    - [ ] ATE error, how does this change when using the new Renderer for mapping?
+    - [ ] Rendering loss, can we achieve similar results like the paper?
+- [ ] Backpropagate the pose loss from the Rendering objective into the SLAM tracking
+    - [ ] Optimize poses with additional optimizer
+    - [ ] Setup synchronization between mapping and frontend/backend
+    - [ ] Test stability and hyperparameter, e.g. when and how often to sync
+- [ ] Test / Evaluate code on monocular scenes with GSplatting Mapping
+- [ ] How well does our new mapping work on unbounded / outdoor scenes?
+  
 # Potential Future Features
 - [ ] Change the Gaussian Splatting formulation to a variant like [Dynamic Gaussian Splatting](https://github.com/JonathonLuiten/Dynamic3DGaussians)
   - This is done for every Gaussian, we can instead factorize more efficiently into static and dynamic based on  
