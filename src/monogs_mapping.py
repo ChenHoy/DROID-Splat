@@ -42,7 +42,12 @@ class GaussianMapper(object):
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
 
+<<<<<<< HEAD
+        self.mapping_queue = mapping_queue
+        self.use_gui = False ## change this for gui
+=======
         self.use_gui = True
+>>>>>>> renderer
         self.q_main2vis = mp.Queue() if self.use_gui else FakeQueue()
         self.q_vis2main = mp.Queue() if self.use_gui else FakeQueue()
         self.params_gui = gui_utils.ParamsGUI(
@@ -99,6 +104,9 @@ class GaussianMapper(object):
         return Camera(idx, image, depth, gt_pose, self.projection_matrix, fx, fy, cx, cy, fovx, fovy, height, width, device=self.device)
 
     def plot_centers(self):
+        '''
+        Display just the centers of the gaussians
+        '''
         means = self.gaussians.get_xyz.detach().cpu().numpy()
         rgb = self.gaussians.get_features[:, 0, :].detach().cpu().numpy()
         rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min())
@@ -202,13 +210,19 @@ class GaussianMapper(object):
                 )
 
             print(f"Frame: {cam.uid}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
+<<<<<<< HEAD
+            
+=======
 
             if self.save_renders and cam.uid % 5 == 0:
                 im = np.uint8(255*render_pkg["render"].detach().cpu().numpy().transpose(1, 2, 0))
                 cv2.imwrite(f"{self.render_path}/{cam.uid}.png", im)
 
+>>>>>>> renderer
             if cam.uid % 100 == 0 and not self.use_gui:
                 # Simple o3d plot of the centers
+                ## NOTE: this runs only one time
+                print("Plotted some gaussians")
                 self.plot_centers()
 
 
@@ -229,4 +243,11 @@ class GaussianMapper(object):
             - Pruning criteria (splatam vs monoGS)
             - Optimize poses as well
 
+            
+
+            Notes:
+
+            - the gaussian model is in gaussian_splatting/scene/gaussian_model.py. The whole gaussian splatting is imported from monogs
+            - the monogs mapping has a gui flag
+            - the plot_centers doesnt seem to update
             """

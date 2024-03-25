@@ -23,7 +23,7 @@ from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .mapping import Mapper
 # old splatam mapper
-# from .gaussian_mapping import GaussianMapper
+from .gaussian_mapping import GaussianMapper
 from .render import Renderer
 from .mesher import Mesher
 from .InstantNeuS import InstantNeuS
@@ -505,14 +505,16 @@ class SLAM:
         print("Terminate: Done!")
 
     def run(self, stream):
+
+        
         # TODO why exactly does our open3d visualization look so unclean compared to the droidcalib one?
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe, self.mapping_queue)),
             mp.Process(target=self.optimizing, args=(2, False)),
-            mp.Process(target=self.multiview_filtering, args=(3, False)),
-            mp.Process(target=self.visualizing, args=(4, True)),
+            mp.Process(target=self.multiview_filtering, args=(3, True)),
+            mp.Process(target=self.visualizing, args=(4, False)),
             #### These are for visual quality only and generating a map of indoor rooms afterwards
             mp.Process(target=self.mapping, args=(5, True)),
             mp.Process(target=self.meshing, args=(6, True)),
@@ -523,6 +525,7 @@ class SLAM:
 
         self.num_running_thread[0] += len(processes)
         for p in processes:
+            
             p.start()
 
         # This will not be hit until all threads are finished
