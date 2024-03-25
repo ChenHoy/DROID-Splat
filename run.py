@@ -163,8 +163,8 @@ if __name__ == "__main__":
     )
     print(args)
     # Save state for reproducibility
-    backup_source_code(os.path.join(output_dir, "code"))
-    config.save_config(cfg, f"{output_dir}/cfg.yaml")
+    # backup_source_code(os.path.join(output_dir, "code"))
+    # config.save_config(cfg, f"{output_dir}/cfg.yaml")
 
     # Run SLAM
     dataset = get_dataset(cfg, args, device=args.device)

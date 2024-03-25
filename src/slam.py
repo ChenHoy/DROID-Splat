@@ -159,6 +159,7 @@ class SLAM:
         self.post_processing_iters = cfg["mapping"]["post_processing_iters"]
 
         # store images, depth, poses, intrinsics (shared between process)
+        ### NOTE: use this for getting the gt and rendered images
         self.video = DepthVideo(cfg, args)
 
         self.tracker = Tracker(cfg, args, self)
@@ -317,6 +318,7 @@ class SLAM:
             self.gaussian_mapper()
         finished = False
         if not dont_run:
+            print("Last run")
             while not finished:
                 finished = self.gaussian_mapper(the_end=True)
             
@@ -488,6 +490,9 @@ class SLAM:
                     align=True,
                     correct_scale=True,
                 )
+                '''
+                check that is close to what people publish
+                '''
 
                 out_path = os.path.join(self.output, "metrics_traj.txt")
                 with open(out_path, "a") as fp:
@@ -514,13 +519,12 @@ class SLAM:
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe, self.mapping_queue)),
             mp.Process(target=self.optimizing, args=(2, False)),
             mp.Process(target=self.multiview_filtering, args=(3, True)),
-            mp.Process(target=self.visualizing, args=(4, False)),
+            mp.Process(target=self.visualizing, args=(4, True)),
             #### These are for visual quality only and generating a map of indoor rooms afterwards
-            mp.Process(target=self.mapping, args=(5, True)),
-            mp.Process(target=self.meshing, args=(6, True)),
+            mp.Process(target=self.mapping, args=(5, False)),
+            mp.Process(target=self.meshing, args=(6, False)),
             mp.Process(target=self.gaussian_mapping, args=(7, False)),
             mp.Process(target=self.gaussian_visualizing, args=(8, True, self.visualization_queue)),
-
         ]
 
         self.num_running_thread[0] += len(processes)

@@ -3,7 +3,7 @@
 MODE=$1
 EXPNAME=$2
 
-OUT_DIR=/home/leon/go-slam-tests
+OUT_DIR=/home/andrei/go-slam-tests
 
 scenes="office0"
 

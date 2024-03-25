@@ -42,12 +42,8 @@ class GaussianMapper(object):
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
 
-<<<<<<< HEAD
         self.mapping_queue = mapping_queue
-        self.use_gui = False ## change this for gui
-=======
         self.use_gui = True
->>>>>>> renderer
         self.q_main2vis = mp.Queue() if self.use_gui else FakeQueue()
         self.q_vis2main = mp.Queue() if self.use_gui else FakeQueue()
         self.params_gui = gui_utils.ParamsGUI(
@@ -210,15 +206,11 @@ class GaussianMapper(object):
                 )
 
             print(f"Frame: {cam.uid}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
-<<<<<<< HEAD
-            
-=======
 
             if self.save_renders and cam.uid % 5 == 0:
                 im = np.uint8(255*render_pkg["render"].detach().cpu().numpy().transpose(1, 2, 0))
                 cv2.imwrite(f"{self.render_path}/{cam.uid}.png", im)
 
->>>>>>> renderer
             if cam.uid % 100 == 0 and not self.use_gui:
                 # Simple o3d plot of the centers
                 ## NOTE: this runs only one time
