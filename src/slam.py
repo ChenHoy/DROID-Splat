@@ -180,9 +180,7 @@ class SLAM:
         self.mapping_queue = mp.Queue()
         self.visualization_queue = mp.Queue()
 
-        self.gaussian_mapper = GaussianMapper(cfg, args, self, mapping_queue=None, visualization_queue = self.visualization_queue)
-
-        self.gaussian_mapper2 = MonogsGaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
+        self.gaussian_mapper = MonogsGaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
 
 
     def update_cam(self, cfg):
@@ -247,8 +245,8 @@ class SLAM:
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
-            if mapping_queue is not None and (timestamp == 0 or (timestamp) % 10 == 0):
-                mapping_queue.put(frame)
+            # if mapping_queue is not None and (timestamp == 0 or (timestamp) % 10 == 0):
+            #     mapping_queue.put(frame)
 
 
             # predict mesh every 50 frames for video making
@@ -257,6 +255,8 @@ class SLAM:
             while self.hang_on > 0:
                 sleep(1.0)
 
+        # while not mapping_queue.empty():
+        #     sleep(1.0)
         self.tracking_finished += 1
         print("Tracking Done!")
 
@@ -314,14 +314,12 @@ class SLAM:
         while self.tracking_finished < 1 and not dont_run:
             while self.hang_on > 0 and self.make_video:
                 sleep(1.0)
-            self.gaussian_mapper2()
-            # self.gaussian_mapper()
+            self.gaussian_mapper()
         finished = False
         if not dont_run:
             while not finished:
-                finished = self.gaussian_mapper2(the_end=True)
-                # finished = self.gaussian_mapper(the_end=True)
-        
+                finished = self.gaussian_mapper(the_end=True)
+            
         self.gaussian_mapping_finished += 1
         print("Gaussian Mapping Done!")
 
@@ -518,9 +516,9 @@ class SLAM:
             mp.Process(target=self.multiview_filtering, args=(3, True)),
             mp.Process(target=self.visualizing, args=(4, False)),
             #### These are for visual quality only and generating a map of indoor rooms afterwards
-            mp.Process(target=self.mapping, args=(5, False)),
-            mp.Process(target=self.meshing, args=(6, False)),
-            mp.Process(target=self.gaussian_mapping, args=(7, True)),
+            mp.Process(target=self.mapping, args=(5, True)),
+            mp.Process(target=self.meshing, args=(6, True)),
+            mp.Process(target=self.gaussian_mapping, args=(7, False)),
             mp.Process(target=self.gaussian_visualizing, args=(8, True, self.visualization_queue)),
 
         ]
