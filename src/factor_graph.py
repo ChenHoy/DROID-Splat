@@ -439,7 +439,16 @@ class FactorGraph:
         return edge_num
 
     @torch.cuda.amp.autocast(enabled=True)
-    def update(self, t0=None, t1=None, iters=2, use_inactive=False, motion_only=False):
+    def update(
+        self,
+        t0=None,
+        t1=None,
+        iters=2,
+        use_inactive=False,
+        lm=1e-4,
+        ep=0.1,
+        motion_only=False,
+    ):
         """run update operator on factor graph"""
 
         # motion features
@@ -497,8 +506,8 @@ class FactorGraph:
                 t0=t0,
                 t1=t1,
                 iters=iters,
-                lm=1e-4,
-                ep=0.1,
+                lm=lm,
+                ep=ep,
                 motion_only=motion_only,
                 ba_type=None,
             )
@@ -516,6 +525,8 @@ class FactorGraph:
         iters=2,
         steps=8,
         max_t=None,
+        lm: float = 1e-5,
+        ep: float = 1e-2,
         ba_type="dense",
         motion_only=False,
     ):
@@ -526,9 +537,8 @@ class FactorGraph:
         t = max_t if max_t is not None else cur_t
 
         sel_index = torch.arange(0, cur_t + 2)
-        num, rig, ch, ht, wd = self.video.fmaps[
-            sel_index
-        ].shape  # rig = 1(mono); 2(stereo)
+        # rig = 1(mono); 2(stereo)
+        num, rig, ch, ht, wd = self.video.fmaps[sel_index].shape
         corr_op = AltCorrBlock(
             self.video.fmaps[sel_index].view(1, num * rig, ch, ht, wd)
         )
@@ -548,7 +558,7 @@ class FactorGraph:
                 )
                 motion = motion.permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
 
-            s = 13
+            s = 13  # This is 8 in original DROID-SLAM implementation
             for i in range(self.ii.min(), self.ii.max() + 1, s):
                 v = (self.ii >= i) & (self.ii < i + s)
                 if v.sum() < 1:
@@ -593,36 +603,20 @@ class FactorGraph:
 
             # dense bundle adjustment, fix the first keyframe, while optimize within [1, t]
             # NOTE we need to pass the ba_type here to lock the threads correctly
-            if ba_type == "loop":
-                self.video.ba(
-                    target,
-                    weight,
-                    damping,
-                    self.ii,
-                    self.jj,
-                    t0=t0,
-                    t1=t1,
-                    iters=iters,
-                    lm=1e-4,
-                    ep=1e-1,
-                    motion_only=motion_only,
-                    ba_type=ba_type,
-                )
-            else:
-                self.video.ba(
-                    target,
-                    weight,
-                    damping,
-                    self.ii,
-                    self.jj,
-                    t0=t0,
-                    t1=t1,
-                    iters=iters,
-                    lm=1e-5,
-                    ep=1e-2,
-                    motion_only=motion_only,
-                    ba_type=ba_type,
-                )
+            self.video.ba(
+                target,
+                weight,
+                damping,
+                self.ii,
+                self.jj,
+                t0=t0,
+                t1=t1,
+                iters=iters,
+                lm=lm,
+                ep=ep,
+                motion_only=motion_only,
+                ba_type=ba_type,
+            )
 
             # for visualization
             self.video.dirty[:t] = True

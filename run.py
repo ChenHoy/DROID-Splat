@@ -1,8 +1,10 @@
-import numpy as np
-import torch
 import argparse
 import shutil
+import ipdb
 import os
+
+import numpy as np
+import torch
 
 from src import config
 from src.slam import SLAM
@@ -47,6 +49,7 @@ def parse_args():
         help="image height and width, this have higher priority, can overwrite the one in config file",
     )
     parser.add_argument(
+<<<<<<< HEAD
         "--calibration_txt",
         type=str,
         default=None,
@@ -54,6 +57,8 @@ def parse_args():
     )
     parser.add_argument("--mode", type=str, help="slam mode: mono, rgbd or stereo")
     parser.add_argument(
+=======
+>>>>>>> 3ffc1b2e8b8d4f44ebdcd08ea9ae670cebc674ba
         "--opt_intr",
         action="store_true",
         help="optimize intrinsics in bundle adjustment as well",
@@ -65,6 +70,18 @@ def parse_args():
         choices=["pinhole", "mei"],
         help="camera model used for projection",
     )
+<<<<<<< HEAD
+=======
+    parser.add_argument(
+        "--calibration_txt",
+        type=str,
+        default=None,
+        help="calibration parameters: fx, fy, cx, cy, this have higher priority, can overwrite the one in config file",
+    )
+    parser.add_argument(
+        "--mode", type=str, help="slam mode: mono, prgbd, rgbd or stereo"
+    )
+>>>>>>> 3ffc1b2e8b8d4f44ebdcd08ea9ae670cebc674ba
     return parser.parse_args()
 
 
@@ -119,7 +136,11 @@ def set_args(args, cfg):
             np.loadtxt(args.calibration_txt).tolist()
         )
 
+<<<<<<< HEAD
     assert cfg["mode"] in ["rgbd", "mono", "stereo"], cfg["mode"]
+=======
+    assert cfg["mode"] in ["rgbd", "prgbd", "mono", "stereo"], cfg["mode"]
+>>>>>>> 3ffc1b2e8b8d4f44ebdcd08ea9ae670cebc674ba
     if args.output is None:
         output_dir = cfg["data"]["output"]
     else:
@@ -163,6 +184,7 @@ if __name__ == "__main__":
     print(
         f"\n\n** Running {cfg['data']['input_folder']} in {cfg['mode']} mode!!! **\n\n"
     )
+
     slam = SLAM(args, cfg)
     slam.run(dataset)
     slam.terminate(rank=-1, stream=dataset)

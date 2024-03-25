@@ -6,6 +6,7 @@ from tqdm import tqdm
 from time import gmtime, strftime, time, sleep
 
 import cv2
+import open3d as o3d
 import numpy as np
 import torch
 import torch.nn as nn
@@ -21,9 +22,12 @@ from .multiview_filter import MultiviewFilter
 from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .mapping import Mapper
+# old splatam mapper
+# from .gaussian_mapping import GaussianMapper
 from .render import Renderer
 from .mesher import Mesher
 from .InstantNeuS import InstantNeuS
+from .monogs_mapping import GaussianMapper as MonogsGaussianMapper
 
 
 class Tracker(nn.Module):
@@ -136,12 +140,16 @@ class SLAM:
         self.tracking_finished.share_memory_()
         self.mapping_finished = torch.zeros((1)).int()
         self.mapping_finished.share_memory_()
+        self.gaussian_mapping_finished = torch.zeros((1)).int()
+        self.gaussian_mapping_finished.share_memory_()
         self.meshing_finished = torch.zeros((1)).int()
         self.meshing_finished.share_memory_()
         self.optimizing_finished = torch.zeros((1)).int()
         self.optimizing_finished.share_memory_()
         self.visualizing_finished = torch.zeros((1)).int()
         self.visualizing_finished.share_memory_()
+        self.gaussian_visualizing_finished = torch.zeros((1)).int()
+        self.gaussian_visualizing_finished.share_memory_()
 
         self.hang_on = torch.zeros((1)).int()
         self.hang_on.share_memory_()
@@ -168,6 +176,12 @@ class SLAM:
 
         self.mapper = Mapper(cfg, args, self)
         self.mesher = Mesher(cfg, args, self)
+
+        self.mapping_queue = mp.Queue()
+        self.visualization_queue = mp.Queue()
+
+        self.gaussian_mapper = MonogsGaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
+
 
     def update_cam(self, cfg):
         """
@@ -215,20 +229,25 @@ class SLAM:
 
         self.net.load_state_dict(state_dict)
 
-    def tracking(self, rank, stream, input_queue=mp.Queue):
+    def tracking(self, rank, stream, input_queue=mp.Queue, mapping_queue=None):
         print("Tracking Triggered!")
         self.all_trigered += 1
         # Wait up for other threads to start
         while self.all_trigered < self.num_running_thread:
             pass
-        for timestamp, image, depth, intrinsic, gt_pose in tqdm(stream):
-            if self.mode != "rgbd":
+        for frame in tqdm(stream):
+            timestamp, image, depth, intrinsic, gt_pose = frame
+            if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
-            input_queue.put(image)
-            input_queue.put(depth)
+            # input_queue.put(image)
+            # input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
+
+            # if mapping_queue is not None and (timestamp == 0 or (timestamp) % 10 == 0):
+            #     mapping_queue.put(frame)
+
 
             # predict mesh every 50 frames for video making
             if timestamp % 50 == 0 and timestamp > 0 and self.make_video:
@@ -236,8 +255,16 @@ class SLAM:
             while self.hang_on > 0:
                 sleep(1.0)
 
+        # while not mapping_queue.empty():
+        #     sleep(1.0)
         self.tracking_finished += 1
         print("Tracking Done!")
+
+    # We need some signal that the rendering works
+    # i) Use mp.Queue from rendering/mapping to visualization/show_stream
+    # ii) Render the key frame image from the Gaussians and send this into the queue
+    # iii) In visu thread: Take renderings and output them
+    # Nerfstudio has like a 3D volume with the colors that you can fly through
 
     def optimizing(self, rank, dont_run=False):
         print("Full Bundle Adjustment Triggered!")
@@ -281,6 +308,57 @@ class SLAM:
         self.mapping_finished += 1
         print("Dense Mapping Done!")
 
+    def gaussian_mapping(self, rank, dont_run=False):
+        print("Gaussian Mapping Triggered!")
+        self.all_trigered += 1
+        while self.tracking_finished < 1 and not dont_run:
+            while self.hang_on > 0 and self.make_video:
+                sleep(1.0)
+            self.gaussian_mapper()
+        finished = False
+        if not dont_run:
+            while not finished:
+                finished = self.gaussian_mapper(the_end=True)
+            
+        self.gaussian_mapping_finished += 1
+        print("Gaussian Mapping Done!")
+
+
+
+    def gaussian_visualizing(self, rank, dont_run=False, visualization_queue=None):
+        print("Gaussian visualization Triggered!")
+        self.all_trigered += 1
+        if visualization_queue is None:
+            print("No queue for Gaussian visualization")
+            return
+        
+        vis = o3d.visualization.Visualizer()
+        vis.create_window()
+        point_cloud = o3d.geometry.PointCloud()
+        point_cloud.points = o3d.utility.Vector3dVector(np.random.rand(10, 3))
+        point_cloud.colors = o3d.utility.Vector3dVector(np.random.rand(10, 3))
+        vis.add_geometry(point_cloud)
+
+        while (self.gaussian_mapping_finished < 1) and (
+            not dont_run
+        ):
+            if not visualization_queue.empty():
+                print("Point cloud updated")
+                params = visualization_queue.get()
+                means3D = params["means3D"].detach().cpu().numpy()
+                rgb_colors = params["rgb_colors"].detach().cpu().numpy()  
+                n_gaussians = means3D.shape[0]
+                idxs = np.random.choice(np.arange(n_gaussians), n_gaussians//10, replace=False)
+                point_cloud.points = o3d.utility.Vector3dVector(means3D[idxs, :]) 
+                point_cloud.colors = o3d.utility.Vector3dVector(rgb_colors[idxs, :]) 
+                vis.update_geometry(point_cloud)
+                vis.poll_events()
+                vis.update_renderer()
+
+
+        self.gaussian_visualizing_finished += 1
+        print("Gaussian Visualization done!")
+
     def meshing(self, rank, dont_run=False):
         print("Meshing Triggered!")
         self.all_trigered += 1
@@ -292,9 +370,9 @@ class SLAM:
 
         self.meshing_finished += 1
         print("Meshing Done!")
-
+    
     def visualizing(self, rank, dont_run=False):
-        print("Visualization Triggered!")
+        print("Visualization triggered!")
         self.all_trigered += 1
         while (self.tracking_finished < 1 or self.optimizing_finished < 1) and (
             not dont_run
@@ -309,17 +387,22 @@ class SLAM:
         self.all_trigered += 1
         while self.tracking_finished < 1 or self.optimizing_finished < 1:
             if not input_queue.empty():
-                rgb = input_queue.get()
-                depth = input_queue.get()
+                try:
+                    rgb = input_queue.get()
+                    depth = input_queue.get()
 
-                rgb_image = rgb[0, [2, 1, 0], ...].permute(1, 2, 0).clone().cpu()
-                cv2.imshow("RGB", rgb_image.numpy())
-                if self.mode == "rgbd" and depth is not None:
-                    # Create normalized depth map with intensity plot
-                    depth_image = depth2rgb(depth.clone().cpu())[0]
-                    # Convert to BGR for cv2
-                    cv2.imshow("depth", depth_image[..., ::-1])
-                cv2.waitKey(1)
+                    rgb_image = rgb[0, [2, 1, 0], ...].permute(1, 2, 0).clone().cpu()
+                    cv2.imshow("RGB", rgb_image.numpy())
+                    if self.mode in ["rgbd", "prgbd"] and depth is not None:
+                        # Create normalized depth map with intensity plot
+                        depth_image = depth2rgb(depth.clone().cpu())[0]
+                        # Convert to BGR for cv2
+                        cv2.imshow("depth", depth_image[..., ::-1])
+                    cv2.waitKey(1)
+                except Exception as e:
+                    print(e)
+                    print("Continuing...")
+                    pass
 
     def terminate(self, rank, stream=None):
         """fill poses for non-keyframe images and evaluate"""
@@ -356,6 +439,8 @@ class SLAM:
             camera_trajectory = w2w * camera_trajectory.inv()
             traj_est = camera_trajectory.data.cpu().numpy()
             estimate_c2w_list = camera_trajectory.matrix().data.cpu()
+
+            
             out_path = os.path.join(self.output, "checkpoints/est_poses.npy")
             np.save(out_path, estimate_c2w_list.numpy())  # c2ws
 
@@ -420,21 +505,26 @@ class SLAM:
         print("Terminate: Done!")
 
     def run(self, stream):
+        # TODO why exactly does our open3d visualization look so unclean compared to the droidcalib one?
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
-            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
+            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe, self.mapping_queue)),
             mp.Process(target=self.optimizing, args=(2, False)),
-            mp.Process(target=self.multiview_filtering, args=(3, True)),
-            mp.Process(target=self.visualizing, args=(4, False)),
+            mp.Process(target=self.multiview_filtering, args=(3, False)),
+            mp.Process(target=self.visualizing, args=(4, True)),
             #### These are for visual quality only and generating a map of indoor rooms afterwards
             mp.Process(target=self.mapping, args=(5, True)),
             mp.Process(target=self.meshing, args=(6, True)),
+            mp.Process(target=self.gaussian_mapping, args=(7, False)),
+            mp.Process(target=self.gaussian_visualizing, args=(8, True, self.visualization_queue)),
+
         ]
 
         self.num_running_thread[0] += len(processes)
         for p in processes:
             p.start()
 
+        # This will not be hit until all threads are finished
         for p in processes:
             p.join()

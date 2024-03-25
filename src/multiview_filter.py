@@ -14,12 +14,10 @@ class MultiviewFilter(nn.Module):
         self.cfg = cfg
         self.device = args.device
         self.warmup = cfg["tracking"]["warmup"]
-        self.filter_thresh = cfg["tracking"]["multiview_filter"][
-            "thresh"
-        ]  # dpeth error < 0.01m
-        self.filter_visible_num = cfg["tracking"]["multiview_filter"][
-            "visible_num"
-        ]  # points viewed by at least 3 cameras
+        # dpeth error < 0.01m
+        self.filter_thresh = cfg["tracking"]["multiview_filter"]["thresh"]
+        # points viewed by at least 3 cameras
+        self.filter_visible_num = cfg["tracking"]["multiview_filter"]["visible_num"]
         self.kernel_size = cfg["tracking"]["multiview_filter"]["kernel_size"]  # 3
         self.bound_enlarge_scale = cfg["tracking"]["multiview_filter"][
             "bound_enlarge_scale"
@@ -198,6 +196,7 @@ class MultiviewFilter(nn.Module):
                 self.video.mask_filtered[:cur_t] = extended_masks.detach()
                 self.video.disps_filtered[:cur_t] = disps.detach()
                 self.video.poses_filtered[:cur_t] = poses.detach()
+                # Update the filter id
                 self.video.filtered_id[0] = cur_t
                 self.video.bound[0] = bound
 

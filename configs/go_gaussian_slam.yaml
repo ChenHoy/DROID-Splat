@@ -1,0 +1,226 @@
+sync_method: strict
+verbose: True
+dataset: "folder"
+mode: "mono"  # 'mono', 'stereo', 'rgbd'
+stride: 2
+only_tracking: False
+
+mapping:
+  device: "cuda:0"
+  bound: [[-10.0, 10.0], [-10.0, 10.0], [-10.0, 10.0]]
+  BA: True
+  BA_cam_lr: 0.001
+  net_lr: 0.001
+  grid_lr: 0.01
+  w_color_loss: 2.0
+  w_sdf_smooth_loss: 1.0
+  w_sdf_loss: 2.0
+  w_eikonal_loss: 0.1
+  uncertainty_weight_loss: True
+  mapping_window_size: 22
+  pixels: 4400
+  iters: 2
+  post_processing_iters: 10
+  decay: 0.8
+  model:
+    sdf_smooth_std: 0.005
+    sdf_sparse_factor: 5
+    sdf_truncation: 0.16
+    sdf_random_weight: 0.04
+
+    sdf_network:
+      d_in: 3
+      d_out: 32  # remember also modify the d_feat in color_network
+
+    color_network:
+      d_in: 3
+      d_feat: 31  # d_out-1 in sdf_network
+      d_hidden: 64
+      n_layers: 2
+
+    variance_network:
+      init_val: 0.2
+      scale_factor: 10.0
+
+  # Spaltam mapping settings
+  map_every: 1
+  keyframe_every: 5
+  scene_radius_depth_ratio: 3 # Max First Frame Depth to Scene Radius Ratio (For Pruning/Densification)
+  mean_sq_dist_method: "projective" # ["projective", "knn"] (Type of Mean Squared Distance Calculation for Scale of Gaussians)
+  gaussian_distribution: "isotropic" # ["isotropic", "anisotropic"] (Isotropic -> Spherical Covariance, Anisotropic -> Ellipsoidal Covariance)
+    
+  num_iters: 60 # Number of Mapping Iterations
+  add_new_gaussians: True
+  sil_thres: 0.5 # For Addition of new Gaussians
+  use_l1: True
+  use_sil_for_loss: False
+  ignore_outlier_depth_loss: False
+  loss_weights:
+    im: 0.5
+    depth: 1.0
+           
+  lrs:
+    means3D: 0.0001
+    rgb_colors: 0.0025
+    unnorm_rotations: 0.001
+    logit_opacities: 0.05
+    log_scales: 0.001
+    cam_unnorm_rots: 0.0004
+    cam_trans: 0.002
+
+        
+  prune_gaussians: True # Prune Gaussians during Mapping
+  pruning_dict: # Needs to be updated based on the number of mapping iterations
+    start_after: 0
+    remove_big_after: 0
+    stop_after: 40
+    prune_every: 20
+    removal_opacity_threshold: 0.005
+    final_removal_opacity_threshold: 0.005
+    reset_opacities: False
+    reset_opacities_every: 500 # Doesn't consider iter 0
+
+  use_gaussian_splatting_densification: False # Use Gaussian Splatting-based Densification during Mapping
+  densify_dict: # Needs to be updated based on the number of mapping iterations
+    start_after: 500
+    remove_big_after: 3000
+    stop_after: 5000
+    densify_every: 100
+    grad_thresh: 0.0002
+    num_to_split_into: 2
+    removal_opacity_threshold: 0.005
+    final_removal_opacity_threshold: 0.005
+    reset_opacities_every: 3000 # Doesn't consider iter 0
+
+
+tracking:
+  device: "cuda:0"
+  pretrained: ./pretrained/droid.pth
+  # pretrained: ./../droidcalib/droid.pth # Sanity check
+  buffer: 1024
+  # TODO this is in stark contrast to demo where beta is 0.3
+  beta: 0.75  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
+  warmup: 8
+  upsample: True
+  motion_filter:
+    thresh: 5.0  # add as keyframe if avg flow >:  4.0 pixels
+  multiview_filter:
+    thresh: 0.01  # depth error < 0.01m
+    visible_num: 2  # points viewed by at least 2 cameras
+    kernel_size: inf
+    bound_enlarge_scale: 1.20
+  frontend:
+    enable_loop: True
+    keyframe_thresh: 6.0  # remove keyframe if avg flow < 4.0 pixels
+    thresh: 16.0  # only consider edge with avg flow < 16.0 pixels
+    window: 25  # local ba window size
+    radius: 2
+    nms: 1
+    max_factors: 100  # num of edges within local ba
+  backend:
+    thresh: 25.0  # only consider edge with avg flow < 25.0 pixels
+    radius: 1
+    nms: 5
+    # used for loop detection
+    loop_window: 25
+    loop_thresh: 50.0  # only consider edge with avg flow < 50.0 pixels
+    loop_radius: 1
+    loop_nms: 12
+
+cam:
+  ### original camera parameters
+  H: 540
+  W: 960
+  ### target/output camera settings, camera_size -> resize -> crop -> target_size
+  H_out: 540
+  W_out: 960
+  H_edge: 0 # NOTE i think this is just padding
+  W_edge: 0
+  fx: 577.590698
+  fy: 578.729797
+  cx: 318.905426
+  cy: 242.683609
+  png_depth_scale: 1000.0 #for depth image in png format
+  calibration_txt: ''
+
+rendering:
+  N_samples: 24
+  N_surface: 48
+  lindisp: False
+  perturb: 1.0
+
+data:
+  input_folder: ''
+  output: ''
+  video_length: ''
+
+meshing:
+  level_set: 0
+  resolution: 512  # change to 512 for higher resolution geometry
+  eval_rec: False
+  get_largest_components: False
+  remove_small_geometry_threshold: 0.2
+  n_points_to_eval: 200000
+  mesh_threshold_to_eval: 0.05
+  gt_mesh_path: ''
+  forecast_radius: 0 # >0 outside the image plane, <0 inside the image plane
+
+opt_params:
+  iterations: 30000
+  position_lr_init: 0.00016
+  position_lr_final: 0.0000016
+  position_lr_delay_mult: 0.01
+  position_lr_max_steps: 30000
+  feature_lr: 0.0025
+  opacity_lr: 0.05
+  scaling_lr: 0.001
+  rotation_lr: 0.001
+  percent_dense: 0.01
+  lambda_dssim: 0.2
+  densification_interval: 100
+  opacity_reset_interval: 3000
+  densify_from_iter: 500
+  densify_until_iter: 15000
+  densify_grad_threshold: 0.0002
+
+model_params:
+  sh_degree: 0
+  source_path: ""
+  model_path: ""
+  resolution: -1
+  white_background: False
+  data_device: "cuda"
+
+pipeline_params:
+  convert_SHs_python: False
+  compute_cov3D_python: False
+
+Dataset:
+  sensor_type: 'depth'
+  pcd_downsample: 64
+  pcd_downsample_init: 32
+  adaptive_pointsize: True
+  point_size: 0.05
+  type: 'replica'
+  Calibration:
+    fx: 600.0
+    fy: 600.0
+    cx: 599.5
+    cy: 339.5
+    k1: 0.0
+    k2: 0.0
+    p1: 0.0
+    p2: 0.0
+    k3: 0.0
+    width: 1200
+    height: 680
+    depth_scale: 6553.5
+    distorted: False
+
+
+Training:
+  rgb_boundary_threshold: 0.01
+  gaussian_th: 0.005
+  gaussian_extent: 15
+  size_threshold: 10
+  prune_every: 5
