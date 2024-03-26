@@ -183,18 +183,18 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
   - [x] Test these functions in the frontend by creating and optimizing Gaussians from new keyframes
   - [x] After optimizing the scene, render the images into the keyframe and output this in another visualization thread similar to show_frame()
   - [x] Trick: Use the RGBD stream and gt poses first instead of depth_video, to optimize a scene and check if everything works correctly before moving on to the predicted poses and disparities
-- [ ] Use scale adjustment optimization similar to [HI-SLAM](https://arxiv.org/pdf/2310.04787.pdf) to optimize the Monocular depth estimation prior into the map
-  - [ ] Implement naive optmization using off-the-shelf Adam optimizer to update scale and shift and fit the prior similar to [CVPR23 paper](https://openaccess.thecvf.com/content/CVPR2023/papers/Dong_Fast_Monocular_Scene_Reconstruction_With_Global-Sparse_Local-Dense_Grids_CVPR_2023_paper.pdf)
+- [x] Use scale adjustment optimization similar to [HI-SLAM](https://arxiv.org/pdf/2310.04787.pdf) to optimize the Monocular depth estimation prior into the map
+  - [x] Implement naive optmization using off-the-shelf Adam optimizer to update scale and shift and fit the prior similar to [CVPR23 paper](https://openaccess.thecvf.com/content/CVPR2023/papers/Dong_Fast_Monocular_Scene_Reconstruction_With_Global-Sparse_Local-Dense_Grids_CVPR_2023_paper.pdf). This would not optimize the disparities and only the scales & shifts
   - [x] Implement Gauss-Newton updates in Python on combined objective of Reprojection error and Depth prior loss with fixed pose graph
-  - [ ] Use a mixed residual objective in a true least-squares objective
-- [ ] FIX bug in ellipsoid renderer
-- [ ] Properly evaluate our new code base for standard metrics
-    - [ ] ATE error, how does this change when using the new Renderer for mapping?
-    - [ ] Rendering loss, can we achieve similar results like the paper?
+  - [x] Use a mixed residual objective in a true least-squares objective
+- [x] FIX bug in ellipsoid renderer
 - [ ] Backpropagate the pose loss from the Rendering objective into the SLAM tracking
     - [ ] Optimize poses with additional optimizer
     - [ ] Setup synchronization between mapping and frontend/backend
     - [ ] Test stability and hyperparameter, e.g. when and how often to sync
+- [ ] Properly evaluate our new code base for standard metrics
+    - [ ] ATE error, how does this change when using the new Renderer for mapping?
+    - [ ] Rendering loss, can we achieve similar results like the paper?
 - [ ] Test / Evaluate code on monocular scenes with GSplatting Mapping
 - [ ] How well does our new mapping work on unbounded / outdoor scenes?
   
