@@ -16,6 +16,9 @@ from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWor
 from utils.multiprocessing_utils import clone_obj
 from utils.multiprocessing_utils import FakeQueue
 from utils.camera_utils import Camera
+from utils.pose_utils import update_pose
+
+import droid_backends
 
 
 
@@ -62,8 +65,9 @@ class GaussianMapper(object):
         self.cameras = [] ## list of views for rendering
         self.last_idx = -1
         self.initialized = False
-
+        self.optimize_poses = True
         self.mapping_queue = mapping_queue
+        self.filter_depth = True
         self.save_renders = True
         self.render_path = "/home/andrei/results/monogs/renders"
         self.mesh_path = "/home/andrei/results/monogs/meshes"
@@ -74,18 +78,19 @@ class GaussianMapper(object):
         image, depth, intrinsic, gt_pose = image.squeeze().to(self.device), depth.to(self.device), intrinsic.to(self.device), gt_pose.to(self.device)
         return self.camera_from_frame(idx, image, depth, intrinsic, gt_pose)
 
-    def camera_from_video(self, idx):
+    def camera_from_video(self, idx: int):
         color, depth, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
         color = color.permute(2, 0, 1)
         intrinsics = self.video.intrinsics[0]*self.video.scale_factor
 
-        # if filter_depth:
-        #     mask = depth_filter(idx, video)
-        #     depth = (depth*mask)
+        if self.filter_depth:
+            mask = self.depth_filter(idx)
+            depth = (depth*mask)
 
         return self.camera_from_frame(idx, color, depth, intrinsics, c2w)
+    
 
-    def camera_from_frame(self, idx, image, depth, intrinsic, gt_pose):
+    def camera_from_frame(self, idx: int, image: torch.Tensor, depth: torch.Tensor, intrinsic: torch.Tensor, gt_pose: torch.Tensor):
         fx, fy, cx, cy = intrinsic
         height, width = image.shape[1:]
         gt_pose = torch.linalg.inv(gt_pose)  # They invert the poses in the dataloader 
@@ -99,6 +104,62 @@ class GaussianMapper(object):
 
         return Camera(idx, image, depth, gt_pose, self.projection_matrix, fx, fy, cx, cy, fovx, fovy, height, width, device=self.device)
 
+    def pose_optimizer(self, frames: list):
+        opt_params = []
+        for cam in frames:
+            opt_params.append(
+                {
+                    "params": [cam.cam_rot_delta],
+                    "lr": self.config["Training"]["lr"]["cam_rot_delta"],
+                    "name": "rot_{}".format(cam.uid),
+                }
+            )
+            opt_params.append(
+                {
+                    "params": [cam.cam_trans_delta],
+                    "lr": self.config["Training"]["lr"]["cam_trans_delta"],
+                    "name": "trans_{}".format(cam.uid),
+                }
+            )
+            opt_params.append(
+                {
+                    "params": [cam.exposure_a],
+                    "lr": 0.01,
+                    "name": "exposure_a_{}".format(cam.uid),
+                }
+            )
+            opt_params.append(
+                {
+                    "params": [cam.exposure_b],
+                    "lr": 0.01,
+                    "name": "exposure_b_{}".format(cam.uid),
+                }
+            )
+
+        return torch.optim.Adam(opt_params)
+
+    def depth_filter(self, idx: int):
+        """
+        Gets the video and the time idex and returns the mask.
+        """
+        #TODO why doesnt it work only with one index?
+        with self.video.get_lock():
+            (dirty_index,) = torch.where(self.video.dirty.clone())
+            dirty_index = dirty_index
+
+        device = self.video.device
+        poses = torch.index_select(self.video.poses, 0, dirty_index)
+        disps = torch.index_select(self.video.disps_up, 0, dirty_index)
+        thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
+        intrinsics = self.video.intrinsics[0]*self.video.scale_factor
+        count = droid_backends.depth_filter(poses, disps, intrinsics, dirty_index, thresh)
+
+        mask = ((count >= 1) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True)))[idx]
+
+        #print(f"Valid points:{mask.sum()}/{mask.numel()}")
+
+        return mask
+
     def plot_centers(self):
         '''
         Display just the centers of the gaussians
@@ -111,7 +172,7 @@ class GaussianMapper(object):
         pcd.colors = o3d.utility.Vector3dVector(rgb)
         o3d.visualization.draw_geometries([pcd])
 
-    def mapping_loss(self, image, depth, cam):
+    def mapping_loss(self, image: torch.Tensor, depth: torch.Tensor, cam: Camera):
         alpha = self.config["Training"]["alpha"] if "alpha" in self.config["Training"] else 0.95
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"] if "rgb_boundary_threshold" in self.config["Training"] else 0.01
 
@@ -121,6 +182,7 @@ class GaussianMapper(object):
         rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
         depth_pixel_mask = (gt_depth > 0.01).view(*depth.shape)
 
+        image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
         l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
         l1_depth = torch.abs(depth * depth_pixel_mask - gt_depth * depth_pixel_mask)
 
@@ -139,8 +201,8 @@ class GaussianMapper(object):
 
         cur_idx = int(self.video.filtered_id.item()) 
 
-        if not self.mapping_queue.empty():
-            cam = self.camera_from_gt()
+        # if not self.mapping_queue.empty():
+        #     cam = self.camera_from_gt()
         
         if self.last_idx+2 < cur_idx:
             self.last_idx += 1
@@ -149,10 +211,10 @@ class GaussianMapper(object):
             cam = self.camera_from_video(self.last_idx)
 
             cam.update_RT(cam.R_gt, cam.T_gt) # Assuming we found the best pose
-
+            self.cameras.append(cam)
 
             # Add gaussian based on the new view
-            self.cameras.append(cam)
+            
             if not self.initialized:
                 self.gaussians.extend_from_pcd_seq(cam, cam.uid, init = True)
                 self.initialized = True
@@ -167,12 +229,18 @@ class GaussianMapper(object):
                 loss = 0
                 frames = self.select_keyframes()
 
+                if self.optimize_poses:
+                    pose_optimizer = self.pose_optimizer(frames)
+
                 for view in frames:
+
                     render_pkg = render(
                         view, self.gaussians, self.pipeline_params, self.background
                     )
                     ## this is the rendered images and depth
                     loss += self.mapping_loss(render_pkg["render"], render_pkg["depth"], view)
+
+                    
 
                 scaling = self.gaussians.get_scaling
                 isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
@@ -189,6 +257,13 @@ class GaussianMapper(object):
                                 )
                     self.gaussians.optimizer.step()
                     self.gaussians.optimizer.zero_grad()
+                    self.gaussians.update_learning_rate(self.last_idx)
+
+                    if self.optimize_poses:
+                        pose_optimizer.step()
+                        pose_optimizer.zero_grad()
+                        for view in frames:
+                            update_pose(view)
 
 
             # Update visualization
@@ -220,9 +295,49 @@ class GaussianMapper(object):
 
 
         #if the_end and self.mapping_queue.empty():
-        if the_end and self.last_idx+1 == cur_idx:
+        if the_end and self.last_idx+2 == cur_idx:
+            print("Mapping refinement starting")
+
+
+            for iter in range(40):
+                loss = 0
+                for view in np.random.permutation(self.cameras):
+                    render_pkg = render(
+                        view, self.gaussians, self.pipeline_params, self.background
+                    )
+                    loss += self.mapping_loss(render_pkg["render"], render_pkg["depth"], view)
+
+                scaling = self.gaussians.get_scaling
+                isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
+                loss += 20 * isotropic_loss.mean()
+                loss.backward()
+
+                with torch.no_grad():
+                    if self.last_idx > 0 and (iter) % self.training_params.prune_every == 0:
+                        self.gaussians.densify_and_prune(
+                                                self.opt_params.densify_grad_threshold,
+                                                0.7,
+                                                1,
+                                                20,
+                                )
+                    self.gaussians.optimizer.step()
+                    self.gaussians.optimizer.zero_grad()
+                    self.gaussians.update_learning_rate(self.last_idx+iter+1)
+            
+            
+                if self.use_gui:
+                    self.q_main2vis.put(
+                            gui_utils.GaussianPacket(
+                                gaussians=clone_obj(self.gaussians),
+                            )
+                    )
+            
+            
+
+
             self.gaussians.save_ply(f"{self.mesh_path}/final.ply")
-            print("Mesh saved ------------------------------------")
+            print("Mesh saved")
+
             return True
         """
             TODO:

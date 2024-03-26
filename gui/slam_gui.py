@@ -633,8 +633,9 @@ class SLAM_GUI:
                 0, 0, width, height, gl.GL_RGB, gl.GL_UNSIGNED_BYTE
             )
             img = np.frombuffer(bufferdata, np.uint8, -1).reshape(height, width, 3)
-            cv2.flip(img, 0, img)
-            render_img = o3d.geometry.Image(img)
+            img2 = np.copy(img)
+            cv2.flip(np.copy(img), 0, img2)
+            render_img = o3d.geometry.Image(img2)
             glfw.swap_buffers(self.window_gl)
         else:
             rgb = (
