@@ -490,14 +490,74 @@ class SLAM:
                     align=True,
                     correct_scale=True,
                 )
-                '''
-                check that is close to what people publish
-                '''
 
                 out_path = os.path.join(self.output, "metrics_traj.txt")
                 with open(out_path, "a") as fp:
                     fp.write(result.pretty_str())
                 trans_init = result.np_arrays["alignment_transformation_sim3"]
+
+                '''
+                check that is close to what people publish
+                TODO: modify evaluation script to compute Rendering loss (get_loss_tracking_rgbd and w/0 d) for Replica dataset
+                TODO: same for ATE (which is already present here), SSIM and LPIPS (https://github.com/richzhang/PerceptualSimilarity)
+                TODO: compare self.videos.images against what? What is the ground truth?
+                self.video.images: torch.Size([256, 3, 272, 480]) where 256 is the size of the buffer
+                
+                See https://github.com/muskie82/MonoGS/blob/main/utils/eval_utils.py for LPIPS
+                '''
+
+                print("Shape of images:",self.video.images.shape)        
+                print(self.gaussian_mapper.video.images.shape)
+                print(np.array_equal(self.video.images[0], self.gaussian_mapper.video.images[0]))       ## False
+                print("Are the same objects:",self.video is self.gaussian_mapper.video) ## True
+
+                folder_path = 'results_imgs'
+                slam_video_imgs = os.path.join(folder_path, "slam_video_imgs")
+                gaussian_video_imgs = os.path.join(folder_path, "gaussian_video_imgs")
+                os.makedirs(folder_path, exist_ok=True)
+                os.makedirs(slam_video_imgs, exist_ok=True)
+                os.makedirs(gaussian_video_imgs, exist_ok=True)
+
+                from PIL import Image
+
+
+                for i, image in enumerate(self.video.images):
+                    # Normalize pixel values to [0, 255] and convert to uint8
+                    image = (np.array(image.cpu()) * 255).astype(np.uint8)
+
+                    # Transpose image from [3, H, W] to [H, W, 3]
+                    image = np.transpose(image, (1, 2, 0))
+
+                    # Create PIL Image object
+                    pil_image = Image.fromarray(image)
+
+                    # Save the image to the folder with a unique name
+                    image_name = f'image_{i}.png'
+                    image_path = os.path.join(slam_video_imgs, image_name)
+                    pil_image.save(image_path)
+
+                    if i == 10:
+                        break
+ 
+
+                    for i, image in enumerate(self.gaussian_mapper.video.images):
+                        # Normalize pixel values to [0, 255] and convert to uint8
+                        image = (np.array(image.cpu()) * 255).astype(np.uint8)
+
+                        # Transpose image from [3, H, W] to [H, W, 3]
+                        image = np.transpose(image, (1, 2, 0))
+
+                        # Create PIL Image object
+                        pil_image = Image.fromarray(image)
+
+                        # Save the image to the folder with a unique name
+                        image_name = f'image_{i}.png'
+                        image_path = os.path.join(gaussian_video_imgs, image_name)
+                        pil_image.save(image_path)
+
+                        if i == 10:
+                            break
+    
 
             if self.meshing_finished > 0 and (not self.only_tracking):
                 self.mesher(
@@ -521,9 +581,9 @@ class SLAM:
             mp.Process(target=self.multiview_filtering, args=(3, True)),
             mp.Process(target=self.visualizing, args=(4, True)),
             #### These are for visual quality only and generating a map of indoor rooms afterwards
-            mp.Process(target=self.mapping, args=(5, False)),
-            mp.Process(target=self.meshing, args=(6, False)),
-            mp.Process(target=self.gaussian_mapping, args=(7, False)),
+            mp.Process(target=self.mapping, args=(5, True)),
+            mp.Process(target=self.meshing, args=(6, True)),
+            mp.Process(target=self.gaussian_mapping, args=(7, True)), ## BUG: this doesnt terminate
             mp.Process(target=self.gaussian_visualizing, args=(8, True, self.visualization_queue)),
         ]
 

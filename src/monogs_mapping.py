@@ -43,7 +43,7 @@ class GaussianMapper(object):
 
 
         self.mapping_queue = mapping_queue
-        self.use_gui = True
+        self.use_gui = False
         self.q_main2vis = mp.Queue() if self.use_gui else FakeQueue()
         self.q_vis2main = mp.Queue() if self.use_gui else FakeQueue()
         self.params_gui = gui_utils.ParamsGUI(
@@ -59,14 +59,14 @@ class GaussianMapper(object):
             print("GUI process started")
             #time.sleep(5)
 
-        self.cameras = []
+        self.cameras = [] ## list of views for rendering
         self.last_idx = -1
         self.initialized = False
 
         self.mapping_queue = mapping_queue
         self.save_renders = True
-        self.render_path = "/home/leon/results/monogs/renders"
-        self.mesh_path = "/home/leon/results/monogs/meshes"
+        self.render_path = "/home/andrei/results/monogs/renders"
+        self.mesh_path = "/home/andrei/results/monogs/meshes"
 
 
     def camera_from_gt(self):
@@ -171,6 +171,7 @@ class GaussianMapper(object):
                     render_pkg = render(
                         view, self.gaussians, self.pipeline_params, self.background
                     )
+                    ## this is the rendered images and depth
                     loss += self.mapping_loss(render_pkg["render"], render_pkg["depth"], view)
 
                 scaling = self.gaussians.get_scaling
@@ -219,12 +220,11 @@ class GaussianMapper(object):
 
 
         #if the_end and self.mapping_queue.empty():
-        if the_end and self.last_idx+2 == cur_idx:
+        if the_end and self.last_idx+1 == cur_idx:
             self.gaussians.save_ply(f"{self.mesh_path}/final.ply")
-            print("Mesh saved")
+            print("Mesh saved ------------------------------------")
             return True
-
-            """
+        """
             TODO:
 
             - If waiting for new frames, optimize in current views
