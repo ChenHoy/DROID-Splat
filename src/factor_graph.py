@@ -27,6 +27,8 @@ class FactorGraph:
         self.corr_impl = corr_impl
         self.upsample = upsample
 
+        self.scale_priors = self.video.optimize_scales
+
         # operator at 1/8 resolution
         ht = video.ht // 8
         wd = video.wd // 8
@@ -476,12 +478,15 @@ class FactorGraph:
             if motion_only:
                 self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, True)
             else:
-                # Use pure Python BA implementation with scale correction for priors
-                # (This makes it possible to work with monocular depth prediction priors)
-                self.video.ba_prior(target, weight, damping, ii, jj, t0=t0, t1=t1, iters=iters, lm=lm, ep=ep)
-                # After optimizing the prior, we need to update the disps_sens and reset the scales
-                # only then can we use global BA and intrinsics optimization with the CUDA kernel later
-                self.video.reset_prior()
+                if self.scale_priors:
+                    # Use pure Python BA implementation with scale correction for priors
+                    # (This makes it possible to work with monocular depth prediction priors)
+                    self.video.ba_prior(target, weight, damping, ii, jj, t0=t0, t1=t1, iters=iters, lm=lm, ep=ep)
+                    # After optimizing the prior, we need to update the disps_sens and reset the scales
+                    # only then can we use global BA and intrinsics optimization with the CUDA kernel later
+                    self.video.reset_prior()
+                else:
+                    self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False)
 
             if self.upsample:
                 self.video.upsample(torch.unique(self.ii, sorted=True), upmask)

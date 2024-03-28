@@ -59,6 +59,7 @@ class DepthVideo:
 
         self.disps_sens = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         # Scale and shift parameters for ambiguous monocular depth
+        self.optimize_scales = cfg["mode"] == "prgbd" # Optimze the scales and shifts for Pseudo-RGBD mode
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
 
