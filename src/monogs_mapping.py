@@ -6,6 +6,7 @@ import numpy as np
 import torch.multiprocessing as mp
 import open3d as o3d
 import cv2
+import matplotlib.pyplot as plt
 
 from gui import gui_utils, slam_gui
 from gaussian_splatting.gaussian_renderer import render
@@ -29,6 +30,7 @@ class GaussianMapper(object):
         self.slam = slam
         self.video = slam.video
         self.device = args.device
+        self.mode = args.mode
         self.model_params = munchify(config["model_params"])
         self.opt_params = munchify(config["opt_params"])
         self.pipeline_params = munchify(config["pipeline_params"])
@@ -65,12 +67,20 @@ class GaussianMapper(object):
         self.cameras = [] ## list of views for rendering
         self.last_idx = -1
         self.initialized = False
+
+        self.mapping_iters = 10
+        self.refinement_iters = 100
+
+        self.loss_list = []
+
         self.optimize_poses = True
+        self.update_frames = False
         self.mapping_queue = mapping_queue
         self.filter_depth = True
         self.save_renders = True
         self.render_path = "/home/andrei/results/monogs/renders"
         self.mesh_path = "/home/andrei/results/monogs/meshes"
+
 
 
     def camera_from_gt(self):
@@ -160,6 +170,98 @@ class GaussianMapper(object):
 
         return mask
 
+    def frame_updater(self, frames):
+        with torch.no_grad():
+            for cam in frames:
+                _, depth, c2w, _, _ = self.video.get_mapping_item(cam.uid, self.video.device)
+                if self.filter_depth:
+                    mask = self.depth_filter(cam.uid)
+                    depth = (depth*mask)
+
+                w2c = torch.inverse(c2w)
+                R = w2c[:3, :3].unsqueeze(0).detach()
+                T = w2c[:3, 3].detach()
+                cam.depth = depth.detach()
+                cam.update_RT(R, T)
+
+    def plot_centers(self):
+        means = self.gaussians.get_xyz.detach().cpu().numpy()
+        rgb = self.gaussians.get_features[:, 0, :].detach().cpu().numpy()
+        rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min())
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(means)
+        pcd.colors = o3d.utility.Vector3dVector(rgb)
+        o3d.visualization.draw_geometries([pcd])
+
+    def mapping_step(self, iter: int, frames: list, pruning_params: dict, densify: bool = True, optimize_poses: bool = False):
+        """
+        Takes the list of selected keyframes to optimize and 
+        """
+        if self.optimize_poses:
+            pose_optimizer = self.pose_optimizer(self.cameras)
+        loss = 0
+        for view in frames:
+
+            render_pkg = render(
+                        view, self.gaussians, self.pipeline_params, self.background
+            )
+
+            (
+                image,
+                viewspace_point_tensor,
+                visibility_filter,
+                radii,
+                depth,
+                opacity,
+                n_touched,
+            ) = (
+                render_pkg["render"],
+                render_pkg["viewspace_points"],
+                render_pkg["visibility_filter"],
+                render_pkg["radii"],
+                render_pkg["depth"],
+                render_pkg["opacity"],
+                render_pkg["n_touched"],
+            )
+
+            loss += self.mapping_loss(image, depth, view)
+
+
+        scaling = self.gaussians.get_scaling
+        isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
+        loss += len(frames) * isotropic_loss.mean()
+        loss.backward()
+
+        with torch.no_grad():
+            self.gaussians.max_radii2D[visibility_filter] = torch.max(
+                    self.gaussians.max_radii2D[visibility_filter],
+                    radii[visibility_filter],
+            )
+
+            if densify:
+                self.gaussians.add_densification_stats(
+                        viewspace_point_tensor, visibility_filter
+                )
+
+            if self.last_idx > 0 and (iter+1) % self.training_params.prune_every == 0:
+                self.gaussians.densify_and_prune(
+                                        self.opt_params.densify_grad_threshold,
+                                        pruning_params.gaussian_th,
+                                        pruning_params.gaussian_extent,
+                                        pruning_params.size_threshold,
+                )
+            self.gaussians.optimizer.step()
+            self.gaussians.optimizer.zero_grad()
+            self.gaussians.update_learning_rate(self.last_idx)
+        
+            if optimize_poses:
+                pose_optimizer.step()
+                pose_optimizer.zero_grad()
+                for view in frames:
+                    update_pose(view)
+
+            return loss.item()
+
 
     def mapping_loss(self, image: torch.Tensor, depth: torch.Tensor, cam: Camera):
         '''
@@ -194,72 +296,43 @@ class GaussianMapper(object):
     def __call__(self, the_end = False):
 
         cur_idx = int(self.video.filtered_id.item()) 
-
-        # if not self.mapping_queue.empty():
-        #     cam = self.camera_from_gt()
         
         if self.last_idx+2 < cur_idx:
             self.last_idx += 1
 
-            print(self.last_idx, cur_idx)
+            # Add camera of the last frame
             cam = self.camera_from_video(self.last_idx)
-
             cam.update_RT(cam.R_gt, cam.T_gt) # Assuming we found the best pose
             self.cameras.append(cam)
 
-            # Add gaussian based on the new view
-            
+
+            # Add gaussians based on the new view
             if not self.initialized:
-                self.gaussians.extend_from_pcd_seq(cam, cam.uid, init = True)
+                self.gaussians.extend_from_pcd_seq(
+                    cam, cam.uid, init = True
+                )
                 self.initialized = True
 
             else:
-                self.gaussians.extend_from_pcd_seq(cam, cam.uid, init = False)
+                n_g = self.gaussians.get_xyz.shape[0]
+                self.gaussians.extend_from_pcd_seq(
+                    cam, cam.uid, init = False
+                )
+                print(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians for the new view" )
 
 
-            # Optimze gaussian
-            self.mapping_iters = 20
+            # Optimze gaussians
             for iter in range(self.mapping_iters):
-                loss = 0
-                frames, _ = self.select_keyframes()
+                frames = self.select_keyframes()
 
-                if self.optimize_poses:
-                    pose_optimizer = self.pose_optimizer(frames)
+                if self.update_frames and not the_end: # Tracking finished, no need to update frames
+                    self.frame_updater(frames)
 
-                for view in frames:
-
-                    render_pkg = render(
-                        view, self.gaussians, self.pipeline_params, self.background
-                    )
-                    ## this is the rendered images and depth
-                    # print(render_pkg['render'].min(), render_pkg['render'].max())
-                    loss += self.mapping_loss(render_pkg["render"], render_pkg["depth"], view)
-
-                    
-
-                scaling = self.gaussians.get_scaling
-                isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-                loss += 10 * isotropic_loss.mean()
-                loss.backward()
-
-                with torch.no_grad():
-                    if self.last_idx > 0 and (iter+1) % self.training_params.prune_every == 0:
-                        self.gaussians.densify_and_prune(
-                                                self.opt_params.densify_grad_threshold,
-                                                self.training_params.gaussian_th,
-                                                self.training_params.gaussian_extent,
-                                                self.training_params.size_threshold,
-                                )
-                    self.gaussians.optimizer.step()
-                    self.gaussians.optimizer.zero_grad()
-                    self.gaussians.update_learning_rate(self.last_idx)
-
-                    if self.optimize_poses:
-                        pose_optimizer.step()
-                        pose_optimizer.zero_grad()
-                        for view in frames:
-                            update_pose(view)
-
+                loss = self.mapping_step(
+                    iter, frames, self.training_params, 
+                    densify = True, optimize_poses = self.optimize_poses
+                )
+                self.loss_list.append(loss/len(frames))
 
             # Update visualization
             if self.use_gui:
@@ -267,7 +340,7 @@ class GaussianMapper(object):
                         gui_utils.GaussianPacket(
                             gaussians=clone_obj(self.gaussians),
                             current_frame=cam,
-                            #keyframes=self.cameras[:],
+                            #keyframes=self.cameras,
                             keyframe = cam,
                             kf_window=None,
                             # Stream visualization
@@ -276,9 +349,13 @@ class GaussianMapper(object):
                         )
                 )
 
-            print(f"Frame: {cam.uid}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
+            print(f"Frame: {cam.uid}. Gaussians: {self.gaussians.get_xyz.shape[0]}. Video at {cur_idx}")
 
+            # Save renders
             if self.save_renders and cam.uid % 5 == 0:
+                render_pkg = render(
+                        cam, self.gaussians, self.pipeline_params, self.background 
+                )
                 im = np.uint8(255*render_pkg["render"].detach().cpu().numpy().transpose(1, 2, 0))
                 cv2.imwrite(f"{self.render_path}/{cam.uid}.png", im)
                 print(f"Render saved at {self.render_path}/{cam.uid}.png")
@@ -288,56 +365,49 @@ class GaussianMapper(object):
             print("Mapping refinement starting")
 
 
-            for iter in range(40):
-                loss = 0
-                for view in np.random.permutation(self.cameras):
-                    render_pkg = render(
-                        view, self.gaussians, self.pipeline_params, self.background
-                    )
-                    loss += self.mapping_loss(render_pkg["render"], render_pkg["depth"], view)
+            for iter in range(self.refinement_iters):                
+                loss = self.mapping_step(
+                    iter, self.cameras, self.training_params.refinement, 
+                    densify = False, optimize_poses = self.optimize_poses
+                )
+                self.loss_list.append(loss/len(self.cameras))
 
-                scaling = self.gaussians.get_scaling
-                isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-                loss += 20 * isotropic_loss.mean()
-                loss.backward()
-
-                with torch.no_grad():
-                    if self.last_idx > 0 and (iter) % self.training_params.prune_every == 0:
-                        self.gaussians.densify_and_prune(
-                                                self.opt_params.densify_grad_threshold,
-                                                0.7,
-                                                1,
-                                                20,
-                                )
-                    self.gaussians.optimizer.step()
-                    self.gaussians.optimizer.zero_grad()
-                    self.gaussians.update_learning_rate(self.last_idx+iter+1)
-            
-            
                 if self.use_gui:
                     self.q_main2vis.put(
                             gui_utils.GaussianPacket(
                                 gaussians=clone_obj(self.gaussians),
+                                keyframes=self.cameras,
                             )
                     )
+        
             
-            
-
-
             self.gaussians.save_ply(f"{self.mesh_path}/final.ply")
             print("Mesh saved")
+
+            fig, ax = plt.subplots()
+            ax.set_yscale("log")
+            ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
+            ax.plot(self.loss_list[-self.refinement_iters:])
+            plt.savefig(f"{self.render_path}/loss_{self.mode}.png")
+            plt.show()
+
+            fig, ax = plt.subplots()
+            ax.set_yscale("log")
+            ax.plot(self.loss_list)
+            plt.show()
+
+            
 
             return True
         """
             TODO:
 
+            - Add more info to GUI
             - If waiting for new frames, optimize in current views
-            - Make it work with depth_video
             - Optimize all new frames at the same time
             - Clean config file
-            - Keyframe selection
             - Pruning criteria (splatam vs monoGS)
-            - Optimize poses as well
+            - Call GUI thread on slam and not on mapping 
 
             
 

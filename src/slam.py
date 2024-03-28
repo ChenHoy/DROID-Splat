@@ -149,8 +149,6 @@ class SLAM:
         self.optimizing_finished.share_memory_()
         self.visualizing_finished = torch.zeros((1)).int()
         self.visualizing_finished.share_memory_()
-        self.gaussian_visualizing_finished = torch.zeros((1)).int()
-        self.gaussian_visualizing_finished.share_memory_()
 
         self.hang_on = torch.zeros((1)).int()
         self.hang_on.share_memory_()

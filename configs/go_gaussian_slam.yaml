@@ -219,13 +219,18 @@ Dataset:
 
 
 Training:
+  prune_every: 10
   rgb_boundary_threshold: 0.01
+
   gaussian_th: 0.005
   gaussian_extent: 30
   size_threshold: 20
-  prune_every: 20
+  refinement:
+    gaussian_th: 0.3
+    gaussian_extent: 2
+    size_threshold: 20
 
 
   lr:
-    cam_rot_delta: 0.003
-    cam_trans_delta: 0.001
+    cam_rot_delta: 0.0003
+    cam_trans_delta: 0.0001
