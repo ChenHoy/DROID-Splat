@@ -228,6 +228,9 @@ class Azure(BaseDataset):
         self.depth_paths = sorted(
             glob.glob(os.path.join(self.input_folder, "depth", "*.png"))
         )
+        stride = cfg["stride"]
+        self.color_paths = self.color_paths[::stride]
+        self.depth_paths = self.depth_paths[::stride]
         self.load_poses(os.path.join(self.input_folder, "scene", "trajectory.log"))
         self.n_img = len(self.color_paths)
 
@@ -308,6 +311,9 @@ class CoFusion(BaseDataset):
         self.depth_paths = sorted(
             glob.glob(os.path.join(self.input_folder, "depth_noise", "*.exr"))
         )
+        stride = cfg["stride"]
+        self.color_paths = self.color_paths[::stride]
+        self.depth_paths = self.depth_paths[::stride]
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         self.load_poses(os.path.join(self.input_folder, "trajectories"))
@@ -329,6 +335,9 @@ class TUM_RGBD(BaseDataset):
         self.color_paths, self.depth_paths, self.poses = self.loadtum(
             self.input_folder, frame_rate=32
         )
+        stride = cfg["stride"]
+        self.color_paths = self.color_paths[::stride]
+        self.depth_paths = self.depth_paths[::stride]
         self.n_img = len(self.color_paths)
 
     def parse_list(self, filepath, skiprows=0):
