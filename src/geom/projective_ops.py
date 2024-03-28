@@ -10,9 +10,7 @@ def extract_intrinsics(intrinsics):
         intrinsics:                     (Tensor), fx, fy, cx, cy
                                         [..., N, 4]
     """
-    return intrinsics[..., None, None, :].unbind(
-        dim=-1
-    )  # fx, fy, cx, cy with shape [..., N, 1, 1]
+    return intrinsics[..., None, None, :].unbind(dim=-1)  # fx, fy, cx, cy with shape [..., N, 1, 1]
 
 
 def coords_grid(ht, wd, device="cuda"):
@@ -170,9 +168,7 @@ def proj(Xs, intrinsics, jacobian=False, return_depth=False):
     return coords, proj_jac
 
 
-def projective_transform(
-    poses, depths, intrinsics, ii, jj, jacobian=False, return_depth=False
-):
+def projective_transform(poses, depths, intrinsics, ii, jj, jacobian=False, return_depth=False):
     """map points from ii -> jj"""
 
     # inverse project (pinhole)
@@ -182,12 +178,8 @@ def projective_transform(
 
     # poses: SE3, [batch, num, 7]; Gij: SE3, [batch, N, 7]
     Gij = poses[:, jj] * poses[:, ii].inv()
-    Gij.data[:, ii == jj] = torch.tensor(
-        [-0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], device=Gij.device
-    )
-    X1, Ja = actp(
-        Gij, X0, jacobian=jacobian
-    )  # X1: [batch, N, h, w, 4], Ja: [batch, N, h, w, 4, 6]
+    Gij.data[:, ii == jj] = torch.tensor([-0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], device=Gij.device)
+    X1, Ja = actp(Gij, X0, jacobian=jacobian)  # X1: [batch, N, h, w, 4], Ja: [batch, N, h, w, 4, 6]
 
     # project (pinhole), x1: [batch, N, h, w, 2/3], 2: x, y, 3: x, y, z, Jp: [batch, N, h, w, 2, 4]
     x1, Jp = proj(X1, intrinsics[:, jj], jacobian=jacobian, return_depth=return_depth)
@@ -198,11 +190,11 @@ def projective_transform(
 
     if jacobian:
         # Ji transforms according to dual adjoint
-        Jj = torch.matmul(Jp, Ja)  # [batch, N, h, w, 2, 6]
+        Jj = torch.matmul(Jp, Ja).float()  # [batch, N, h, w, 2, 6]
         Ji = -Gij[:, :, None, None, None].adjT(Jj)
 
         Jz = Gij[:, :, None, None] * Jz
-        Jz = torch.matmul(Jp, Jz.unsqueeze(dim=-1))
+        Jz = torch.matmul(Jp, Jz.unsqueeze(dim=-1)).float()
 
         return x1, valid, (Ji, Jj, Jz)
 
@@ -229,25 +221,17 @@ def induced_flow(poses, disps, intrinsics, ii, jj):
 ###
 
 
-def general_projective_transform(
-    poses, depths, intrinsics, ii, jj, jacobian=False, return_depth=False, model_id=0
-):
+def general_projective_transform(poses, depths, intrinsics, ii, jj, jacobian=False, return_depth=False, model_id=0):
     if model_id == 0:  # pinhole
-        return projective_transform(
-            poses, depths, intrinsics, ii, jj, jacobian, return_depth
-        )
+        return projective_transform(poses, depths, intrinsics, ii, jj, jacobian, return_depth)
 
     elif model_id == 1:  # mei
-        return projective_transform_mei(
-            poses, depths, intrinsics, ii, jj, jacobian, return_depth
-        )
+        return projective_transform_mei(poses, depths, intrinsics, ii, jj, jacobian, return_depth)
     else:
         raise Exception("Camera model not implemented.")
 
 
-def projective_transform_mei(
-    poses, depths, intr, ii, jj, jacobian=False, return_depth=False
-):
+def projective_transform_mei(poses, depths, intr, ii, jj, jacobian=False, return_depth=False):
     """map points from ii->jj"""
     if torch.sum(torch.isnan(depths)) > 0:
         raise Exception("nan values in depth")
@@ -258,9 +242,7 @@ def projective_transform_mei(
     # transform
     Gij = poses[:, jj] * poses[:, ii].inv()
 
-    Gij.data[:, ii == jj] = torch.as_tensor(
-        [-0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], device="cuda"
-    )
+    Gij.data[:, ii == jj] = torch.as_tensor([-0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], device="cuda")
     X1, _ = actp(Gij, X0, jacobian=jacobian)
 
     # project
