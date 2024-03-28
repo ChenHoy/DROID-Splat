@@ -221,9 +221,9 @@ Dataset:
 Training:
   prune_every: 10
   rgb_boundary_threshold: 0.01
-
+  alpha: 1.0
   gaussian_th: 0.005
-  gaussian_extent: 30
+  gaussian_extent: 10
   size_threshold: 20
   refinement:
     gaussian_th: 0.3

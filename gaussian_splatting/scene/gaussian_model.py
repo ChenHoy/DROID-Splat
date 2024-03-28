@@ -221,6 +221,8 @@ class GaussianModel:
 
         new_unique_kfIDs = torch.ones((new_xyz.shape[0])).int() * kf_id
         new_n_obs = torch.zeros((new_xyz.shape[0])).int()
+        # if new_xyz.shape[0] == 0: # No gaussians added
+        #     return 
         self.densification_postfix(
             new_xyz,
             new_features_dc,
@@ -527,6 +529,7 @@ class GaussianModel:
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group["params"][0], None)
             if stored_state is not None:
+                #print(group["name"], stored_state["exp_avg"].shape, extension_tensor.shape)
                 stored_state["exp_avg"] = torch.cat(
                     (stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0
                 )

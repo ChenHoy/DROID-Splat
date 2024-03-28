@@ -21,6 +21,45 @@ from utils.pose_utils import update_pose
 
 import droid_backends
 
+def plot_3d(rgb: torch.Tensor, depth: torch.Tensor):
+    """Use Open3d to plot the 3D point cloud from the monocular depth and input image."""
+    def get_calib_heuristic(ht: int, wd: int) -> np.ndarray:
+        """On in-the-wild data we dont have any calibration file.
+        Since we optimize this calibration as well, we can start with an initial guess
+        using the heuristic from DeepV2D and other papers"""
+        cx, cy = wd // 2, ht // 2
+        fx, fy = wd * 1.2, wd * 1.2
+        return fx, fy, cx, cy
+    rgb = np.asarray(rgb.cpu())
+    depth = np.asarray(depth.cpu())
+    invalid = (depth < 0.001).flatten()
+    # Get 3D point cloud from depth map
+    depth = depth.squeeze()
+    h, w = depth.shape
+    x, y = np.meshgrid(np.arange(w), np.arange(h))
+    x = x.flatten()
+    y = y.flatten()
+    depth = depth.flatten()
+    # Convert to 3D points
+    fx, fy, cx, cy = get_calib_heuristic(h, w)
+    # Unproject
+    x3 = (x - cx) * depth / fx
+    y3 = (y - cy) * depth / fy
+    z3 = depth
+    # Convert to Open3D format
+    xyz = np.stack([x3, y3, z3], axis=1)
+    rgb = np.stack(
+        [rgb[0, :, :].flatten(), rgb[1, :, :].flatten(), rgb[2, :, :].flatten()], axis=1
+    )
+    depth = depth[~invalid]
+    xyz = xyz[~invalid]
+    rgb = rgb[~invalid]
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(xyz)
+    pcd.colors = o3d.utility.Vector3dVector(rgb)
+    # Plot the point cloud
+    o3d.visualization.draw_geometries([pcd])
+
 
 
 class GaussianMapper(object):
@@ -61,25 +100,26 @@ class GaussianMapper(object):
             gui_process = mp.Process(target=slam_gui.run, args=(self.params_gui,))
             gui_process.start()
             print("GUI process started")
-            #time.sleep(5)
 
         self.cameras = []
         self.last_idx = -1
         self.initialized = False
 
-        self.mapping_iters = 10
+        self.mapping_iters = 20
         self.refinement_iters = 100
 
         self.loss_list = []
 
-        self.optimize_poses = True
-        self.update_frames = False
+        self.optimize_poses = False
+        self.update_frames = True
         self.mapping_queue = mapping_queue
-        self.filter_depth = True
-        self.save_renders = False
+        self.filter_depth = False
+        self.show_filtered = False
+        self.save_renders = True
         self.render_path = "/home/leon/results/monogs/renders"
         self.mesh_path = "/home/leon/results/monogs/meshes"
 
+        self.warmup = 20
 
 
     def camera_from_gt(self):
@@ -88,12 +128,20 @@ class GaussianMapper(object):
         return self.camera_from_frame(idx, image, depth, intrinsic, gt_pose)
 
     def camera_from_video(self, idx: int):
-        color, depth, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
+        color, depth, c2w, gt_c2w, _ = self.video.get_mapping_item(idx, self.device)
         color = color.permute(2, 0, 1)
         intrinsics = self.video.intrinsics[0]*self.video.scale_factor
 
         if self.filter_depth:
             mask = self.depth_filter(idx)
+            print(f"Filtered {100*(1 - mask.sum() / mask.numel()):.2f}% of the points")
+
+            
+            if self.show_filtered:
+                filt_col = color*mask
+                filt_col[0, ~mask] = 255
+                plot_3d(filt_col, depth)
+
             depth = (depth*mask)
 
         return self.camera_from_frame(idx, color, depth, intrinsics, c2w)
@@ -165,6 +213,7 @@ class GaussianMapper(object):
 
         mask = ((count >= 1) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True)))[idx]
 
+
         #print(f"Valid points:{mask.sum()}/{mask.numel()}")
 
         return mask
@@ -191,6 +240,14 @@ class GaussianMapper(object):
         pcd.points = o3d.utility.Vector3dVector(means)
         pcd.colors = o3d.utility.Vector3dVector(rgb)
         o3d.visualization.draw_geometries([pcd])
+
+    def save_render(self, cam, render_path):
+        render_pkg = render(
+                cam, self.gaussians, self.pipeline_params, self.background 
+        )
+        rgb = np.uint8(255*render_pkg["render"].detach().cpu().numpy().transpose(1, 2, 0))
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(render_path, bgr)
 
     def mapping_step(self, iter: int, frames: list, pruning_params: dict, densify: bool = True, optimize_poses: bool = False):
         """
@@ -261,7 +318,6 @@ class GaussianMapper(object):
 
             return loss.item()
 
-
     def mapping_loss(self, image: torch.Tensor, depth: torch.Tensor, cam: Camera):
         alpha = self.config["Training"]["alpha"] if "alpha" in self.config["Training"] else 0.95
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"] if "rgb_boundary_threshold" in self.config["Training"] else 0.01
@@ -291,8 +347,13 @@ class GaussianMapper(object):
 
         cur_idx = int(self.video.filtered_id.item()) 
         
-        if self.last_idx+2 < cur_idx:
+        if self.last_idx+2 < cur_idx and cur_idx > self.warmup:
             self.last_idx += 1
+
+            if self.last_idx == 45: #BUG at this frame, all depths are 0 (but not always)
+                self.show_filtered = True
+                print("frame skipped")
+                return
 
             # Add camera of the last frame
             cam = self.camera_from_video(self.last_idx)
@@ -337,7 +398,6 @@ class GaussianMapper(object):
                             #keyframes=self.cameras,
                             keyframe = cam,
                             kf_window=None,
-                            # Stream visualization
                             gtcolor=cam.original_image,        
                             gtdepth=cam.depth.detach().cpu().numpy(),
                         )
@@ -347,11 +407,7 @@ class GaussianMapper(object):
 
             # Save renders
             if self.save_renders and cam.uid % 5 == 0:
-                render_pkg = render(
-                        cam, self.gaussians, self.pipeline_params, self.background 
-                )
-                im = np.uint8(255*render_pkg["render"].detach().cpu().numpy().transpose(1, 2, 0))
-                cv2.imwrite(f"{self.render_path}/{cam.uid}.png", im)
+                self.save_render(cam, f"{self.render_path}/mapping/{cam.uid}.png")
 
 
         if the_end and self.last_idx+2 == cur_idx:
@@ -377,6 +433,17 @@ class GaussianMapper(object):
             self.gaussians.save_ply(f"{self.mesh_path}/final.ply")
             print("Mesh saved")
 
+            if self.save_renders:
+                for cam in self.cameras:
+                    self.save_render(cam, f"{self.render_path}/final/{cam.uid}.png")
+
+
+            fig, ax = plt.subplots()
+            ax.set_title("Loss per frame evolution")
+            ax.set_yscale("log")
+            ax.plot(self.loss_list)
+            plt.show()
+
             fig, ax = plt.subplots()
             ax.set_yscale("log")
             ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
@@ -384,11 +451,7 @@ class GaussianMapper(object):
             plt.savefig(f"{self.render_path}/loss_{self.mode}.png")
             plt.show()
 
-            fig, ax = plt.subplots()
-            ax.set_yscale("log")
-            ax.plot(self.loss_list)
-            plt.show()
-
+          
             
 
             return True
