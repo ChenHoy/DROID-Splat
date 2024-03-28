@@ -246,6 +246,19 @@ class DepthVideo:
 
         return coords, valid_mask
 
+    def reset_prior(self) -> None:
+        """Adjust the prior according to optimized scales, then reset the scale parameters.
+        This makes it possible to continue to optimize them, but still provide the correct disps_sens to the
+        CUDA kernel for global BA in the backend.
+        """
+        # Rescale the external disparities
+        self.disps_sens = (
+            self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
+        )
+        # Reset the scale and shift parameters to initial state
+        self.scales = torch.ones_like(self.scales)
+        self.shifts = torch.zeros_like(self.shifts)
+
     def distance(self, ii=None, jj=None, beta=0.3, bidirectional=True):
         """frame distance metric, where distance = sqrt((u(ii) - u(jj->ii))^2 + (v(ii) - v(jj->ii))^2)"""
         return_matrix = False
