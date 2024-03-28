@@ -167,7 +167,13 @@ if __name__ == "__main__":
     # config.save_config(cfg, f"{output_dir}/cfg.yaml")
 
     # Run SLAM
+    ## index, color_data, depth_data, intrinsic, pose
+    ## color data is RGB image, depth_data is WxH depth image
     dataset = get_dataset(cfg, args, device=args.device)
+
+    # print(dataset)
+    # index, color_data, depth_data, intrinsic, pose = dataset[5]
+    # print(color_data.shape,depth_data.shape)
     slam = SLAM(args, cfg)
     slam.set_dataset(dataset)
     slam.run(dataset)

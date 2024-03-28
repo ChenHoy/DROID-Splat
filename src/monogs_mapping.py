@@ -24,7 +24,7 @@ import droid_backends
 import lpips
 
 class GaussianMapper(object):
-    def __init__(self, config, args, slam, mapping_queue = None):
+    def __init__(self, config, args, slam, mapping_queue = None,use_gui=False):
         self.config = config
         self.args = args
         self.slam = slam
@@ -48,7 +48,7 @@ class GaussianMapper(object):
 
 
         self.mapping_queue = mapping_queue
-        self.use_gui = True
+        self.use_gui = use_gui
         self.q_main2vis = mp.Queue() if self.use_gui else FakeQueue()
         self.q_vis2main = mp.Queue() if self.use_gui else FakeQueue()
         self.params_gui = gui_utils.ParamsGUI(
@@ -77,7 +77,7 @@ class GaussianMapper(object):
         self.update_frames = False
         self.mapping_queue = mapping_queue
         self.filter_depth = True
-        self.save_renders = True
+        self.save_renders = False
         self.render_path = "/home/andrei/results/monogs/renders"
         self.mesh_path = "/home/andrei/results/monogs/meshes"
 
@@ -323,7 +323,7 @@ class GaussianMapper(object):
 
             # Optimze gaussians
             for iter in range(self.mapping_iters):
-                frames = self.select_keyframes()
+                frames, _ = self.select_keyframes()
 
                 if self.update_frames and not the_end: # Tracking finished, no need to update frames
                     self.frame_updater(frames)
@@ -384,20 +384,17 @@ class GaussianMapper(object):
             self.gaussians.save_ply(f"{self.mesh_path}/final.ply")
             print("Mesh saved")
 
-            fig, ax = plt.subplots()
-            ax.set_yscale("log")
-            ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
-            ax.plot(self.loss_list[-self.refinement_iters:])
-            plt.savefig(f"{self.render_path}/loss_{self.mode}.png")
-            plt.show()
+            # fig, ax = plt.subplots()
+            # ax.set_yscale("log")
+            # ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
+            # ax.plot(self.loss_list[-self.refinement_iters:])
+            # plt.savefig(f"{self.render_path}/loss_{self.mode}.png")
+            # plt.show()
 
-            fig, ax = plt.subplots()
-            ax.set_yscale("log")
-            ax.plot(self.loss_list)
-            plt.show()
-
-            
-
+            # fig, ax = plt.subplots()
+            # ax.set_yscale("log")
+            # ax.plot(self.loss_list)
+            # plt.show()
             return True
         """
             TODO:

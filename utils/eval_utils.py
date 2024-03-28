@@ -109,10 +109,9 @@ def eval_ate(frames, kf_ids, save_dir, iterations, final=False, monocular=False)
         label=label_evo,
         monocular=monocular,
     )
-    wandb.log({"frame_idx": latest_frame_idx, "ate": ate})
+    # wandb.log({"frame_idx": latest_frame_idx, "ate": ate})
     return ate
 
-## TODO: this is not running
 def eval_rendering(
     frames,
     gaussians,
@@ -137,17 +136,18 @@ def eval_rendering(
     '''
     Runs this only for frames that are not keyframes
     '''
+    print("Calculating metrics on non-keyframes. Total keyframes: ", len(kf_indices),"Step used for evaluation: ", interval)
     for idx in range(0, end_idx, interval):
-        print("Rendering frame: ", idx)
         if idx in kf_indices:
             continue
         saved_frame_idx.append(idx)
         frame = frames[idx]
-        gt_image, _, _ = dataset[idx]
+        ## gt_image is an rgb image no depth
+        _, gt_image, _, _, _ = dataset[idx] 
 
-        ## BUG: renderer does not work here
+        gt_image = gt_image.squeeze(0)
+
         rendering = render(frame, gaussians, pipe, background)["render"]
-        print("Rendered image successfully!")
         image = torch.clamp(rendering, 0.0, 1.0)
 
         gt = (gt_image.cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
@@ -161,11 +161,9 @@ def eval_rendering(
 
         mask = gt_image > 0
 
-        psnr_score = psnr((image[mask]).unsqueeze(0), (gt_image[mask]).unsqueeze(0))
-        ssim_score = ssim((image).unsqueeze(0), (gt_image).unsqueeze(0))
-        lpips_score = cal_lpips((image).unsqueeze(0), (gt_image).unsqueeze(0))
-
-        print("Calculated scores successfully!")
+        psnr_score = psnr((image[mask]).unsqueeze(0).to("cuda"), (gt_image[mask]).unsqueeze(0).to("cuda"))
+        ssim_score = ssim((image).unsqueeze(0).to("cuda"), (gt_image).unsqueeze(0).to("cuda"))
+        lpips_score = cal_lpips((image).unsqueeze(0).to("cuda"), (gt_image).unsqueeze(0).to("cuda"))
 
         psnr_array.append(psnr_score.item())
         ssim_array.append(ssim_score.item())
@@ -177,7 +175,7 @@ def eval_rendering(
     output["mean_lpips"] = float(np.mean(lpips_array))
 
     Log(
-        f'mean psnr: {output["mean_psnr"]}, ssim: {output["mean_ssim"]}, lpips: {output["mean_ssim"]}',
+        f'mean psnr: {output["mean_psnr"]}, ssim: {output["mean_ssim"]}, lpips: {output["mean_lpips"]}',
         tag="Eval",
     )
 

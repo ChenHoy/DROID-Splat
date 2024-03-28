@@ -29,7 +29,7 @@ from .mesher import Mesher
 from .InstantNeuS import InstantNeuS
 from .monogs_mapping import GaussianMapper as MonogsGaussianMapper
 from utils.eval_utils import eval_ate, eval_rendering, save_gaussians
-import wandb
+import pandas as pd
 
 class Tracker(nn.Module):
     def __init__(self, cfg, args, slam):
@@ -180,12 +180,13 @@ class SLAM:
         self.mapping_queue = mp.Queue()
         self.visualization_queue = mp.Queue()
 
-        self.gaussian_mapper = MonogsGaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
-
-
         # self.evaluate = cfg["evaluate"]
         self.evaluate = True
         self.dataset = None
+
+        self.gaussian_mapper = MonogsGaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue,use_gui=not self.evaluate)
+
+
 
     def set_dataset(self, dataset):
         self.dataset = dataset
@@ -332,12 +333,12 @@ class SLAM:
         print("Gaussian Mapping Done!")
 
         ### -------------- to be moved in termination thread -------------------
-        print("Initialize evaluation")
-
         if self.evaluate:
+            print("Initialize my evaluation")
+
             eval_save_path = "results_imgs/"
 
-            _, kf_indices = self.gaussian_mapper.select_keyframes()
+            _, kf_indices = self.gaussian_mapper.select_keyframes() 
             print("Selected keyframe indices:", kf_indices)
             rendering_result = eval_rendering(
                 self.gaussian_mapper.cameras,
@@ -356,7 +357,7 @@ class SLAM:
             columns = ["tag", "psnr", "ssim", "lpips"]
             data = [
                 [
-                    "Here write when the evaluation was made (which config)",
+                    "final",
                     rendering_result["mean_psnr"],
                     rendering_result["mean_ssim"],
                     rendering_result["mean_lpips"],
@@ -368,6 +369,9 @@ class SLAM:
 
             print("Evaluation complete")
 
+
+
+      
 
     def gaussian_visualizing(self, rank, dont_run=False, visualization_queue=None):
         print("Gaussian visualization Triggered!")
@@ -477,6 +481,26 @@ class SLAM:
             import numpy as np
             import pandas as pd
 
+
+            ### -------------- to be moved in termination thread -------------------
+            print("Initialize my evaluation")
+
+            eval_save_path = "results_imgs/"
+            print("Number of cameras / frames:",len(self.gaussian_mapper.cameras)) ## BUG: why is number of camera 0 here?
+            _, kf_indices = self.gaussian_mapper.select_keyframes()
+            print("Selected keyframe indices:", kf_indices)
+
+            rendering_result = eval_rendering(
+                self.gaussian_mapper.cameras,
+                self.gaussian_mapper.gaussians,
+                self.dataset,
+                eval_save_path,
+                self.gaussian_mapper.pipeline_params,
+                self.gaussian_mapper.background,
+                kf_indices=kf_indices,
+                iteration="final",
+            )
+
             print("#" * 20 + f" Results for {stream.input_folder} ...")
 
             timestamps = [i for i in range(len(stream))]
@@ -529,7 +553,7 @@ class SLAM:
 
                 traj_ref = PosePath3D(poses_se3=traj_ref)
 
-                result = main_ape.ape(
+                result_ape = main_ape.ape(
                     traj_ref,
                     traj_est,
                     est_name="traj",
@@ -538,19 +562,36 @@ class SLAM:
                     correct_scale=True,
                 )
 
-                out_path = os.path.join(self.output, "metrics_traj.txt")
-                with open(out_path, "a") as fp:
-                    fp.write(result.pretty_str())
-                trans_init = result.np_arrays["alignment_transformation_sim3"]
-
-                '''
-                check that is close to what people publish
-                TODO: modify evaluation script to compute Rendering loss (get_loss_tracking_rgbd and w/0 d) for Replica dataset
-                TODO: same for ATE (which is already present here), SSIM and LPIPS (https://github.com/richzhang/PerceptualSimilarity)
-                self.video.images: torch.Size([256, 3, 272, 480]) where 256 is the size of the buffer
+                ## TODO: change this for depth videos
+                result_ate = eval_ate(self.gaussian_mapper.cameras,kf_ids=kf_indices,save_dir=eval_save_path,iterations=-1,final=True,monocular=True)
+            
                 
-                See https://github.com/muskie82/MonoGS/blob/main/utils/eval_utils.py for LPIPS
-                '''
+                out_path = os.path.join(self.output, "metrics_traj.txt")
+
+                print("Rendering evaluation result:", rendering_result)
+                print("ATE result: ", result_ape.info,result_ape.stats)
+
+                ## TODO: add ATE
+                columns = ["tag", "psnr", "ssim", "lpips","ape"]
+                data = [
+                    [
+                        "optimizing + multiview ",
+                        rendering_result["mean_psnr"],
+                        rendering_result["mean_ssim"],
+                        rendering_result["mean_lpips"],
+                        result_ape.stats['mean']
+                    ]
+                ]
+
+                df = pd.DataFrame(data, columns=columns)
+                df.to_csv(os.path.join(eval_save_path,"metrics.csv"), index=False)
+
+                print("Evaluation complete")
+
+                with open(out_path, "a") as fp:
+                    fp.write(result_ape.pretty_str())
+                trans_init = result_ape.np_arrays["alignment_transformation_sim3"]
+
 
 
             if self.meshing_finished > 0 and (not self.only_tracking):
@@ -590,35 +631,3 @@ class SLAM:
         for p in processes:
             p.join()
 
-        ## evaluation
-        ## TODO: test that its working
-        # if self.evaluate:
-        #     eval_save_path = "results_imgs/"
-
-        #     _, kf_indices = self.gaussian_mapper.select_keyframes()
-        #     rendering_result = eval_rendering(
-        #         self.gaussian_mapper.cameras,
-        #         self.gaussian_mapper.gaussians,
-        #         stream,
-        #         eval_save_path,
-        #         self.gaussian_mapper.pipeline_params,
-        #         self.gaussian_mapper.background,
-        #         kf_indices=kf_indices,
-        #         iteration="final",
-        #     )
-
-        #     print("Rendering evaluation result:", rendering_result)
-
-        #     ## TODO: add ATE from the other part
-        #     columns = ["tag", "psnr", "ssim", "lpips"]
-        #     data = [
-        #         [
-        #             "Here write when the evaluation was made (which config)",
-        #             rendering_result["mean_psnr"],
-        #             rendering_result["mean_ssim"],
-        #             rendering_result["mean_lpips"],
-        #         ]
-        #     ]
-
-        #     df = pd.DataFrame(data, columns=columns)
-        #     df.to_csv(os.path.join(eval_save_path,"metrics.csv"), index=False)
