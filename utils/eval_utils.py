@@ -112,7 +112,7 @@ def eval_ate(frames, kf_ids, save_dir, iterations, final=False, monocular=False)
     wandb.log({"frame_idx": latest_frame_idx, "ate": ate})
     return ate
 
-
+## TODO: this is not running
 def eval_rendering(
     frames,
     gaussians,
@@ -123,6 +123,9 @@ def eval_rendering(
     kf_indices,
     iteration="final",
 ):
+    '''
+    mapper: GaussianMapper
+    '''
     interval = 5
     img_pred, img_gt, saved_frame_idx = [], [], []
     end_idx = len(frames) - 1 if iteration == "final" or "before_opt" else iteration
@@ -130,14 +133,21 @@ def eval_rendering(
     cal_lpips = LearnedPerceptualImagePatchSimilarity(
         net_type="alex", normalize=True
     ).to("cuda")
+
+    '''
+    Runs this only for frames that are not keyframes
+    '''
     for idx in range(0, end_idx, interval):
+        print("Rendering frame: ", idx)
         if idx in kf_indices:
             continue
         saved_frame_idx.append(idx)
         frame = frames[idx]
         gt_image, _, _ = dataset[idx]
 
+        ## BUG: renderer does not work here
         rendering = render(frame, gaussians, pipe, background)["render"]
+        print("Rendered image successfully!")
         image = torch.clamp(rendering, 0.0, 1.0)
 
         gt = (gt_image.cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
@@ -154,6 +164,8 @@ def eval_rendering(
         psnr_score = psnr((image[mask]).unsqueeze(0), (gt_image[mask]).unsqueeze(0))
         ssim_score = ssim((image).unsqueeze(0), (gt_image).unsqueeze(0))
         lpips_score = cal_lpips((image).unsqueeze(0), (gt_image).unsqueeze(0))
+
+        print("Calculated scores successfully!")
 
         psnr_array.append(psnr_score.item())
         ssim_array.append(ssim_score.item())

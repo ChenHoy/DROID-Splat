@@ -28,7 +28,8 @@ from .render import Renderer
 from .mesher import Mesher
 from .InstantNeuS import InstantNeuS
 from .monogs_mapping import GaussianMapper as MonogsGaussianMapper
-
+from utils.eval_utils import eval_ate, eval_rendering, save_gaussians
+import wandb
 
 class Tracker(nn.Module):
     def __init__(self, cfg, args, slam):
@@ -184,6 +185,13 @@ class SLAM:
         self.gaussian_mapper = MonogsGaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
 
 
+        # self.evaluate = cfg["evaluate"]
+        self.evaluate = True
+        self.dataset = None
+
+    def set_dataset(self, dataset):
+        self.dataset = dataset
+
     def update_cam(self, cfg):
         """
         Update the camera intrinsics according to the pre-processing config,
@@ -325,6 +333,42 @@ class SLAM:
         self.gaussian_mapping_finished += 1
         print("Gaussian Mapping Done!")
 
+        ### -------------- to be moved in termination thread -------------------
+        print("Initialize evaluation")
+
+        if self.evaluate:
+            eval_save_path = "results_imgs/"
+
+            _, kf_indices = self.gaussian_mapper.select_keyframes()
+            print("Selected keyframe indices:", kf_indices)
+            rendering_result = eval_rendering(
+                self.gaussian_mapper.cameras,
+                self.gaussian_mapper.gaussians,
+                self.dataset,
+                eval_save_path,
+                self.gaussian_mapper.pipeline_params,
+                self.gaussian_mapper.background,
+                kf_indices=kf_indices,
+                iteration="final",
+            )
+
+            print("Rendering evaluation result:", rendering_result)
+
+            ## TODO: add ATE from the other part
+            columns = ["tag", "psnr", "ssim", "lpips"]
+            data = [
+                [
+                    "Here write when the evaluation was made (which config)",
+                    rendering_result["mean_psnr"],
+                    rendering_result["mean_ssim"],
+                    rendering_result["mean_lpips"],
+                ]
+            ]
+
+            df = pd.DataFrame(data, columns=columns)
+            df.to_csv(os.path.join(eval_save_path,"metrics.csv"), index=False)
+
+            print("Evaluation complete")
 
 
     def gaussian_visualizing(self, rank, dont_run=False, visualization_queue=None):
@@ -409,10 +453,12 @@ class SLAM:
     def terminate(self, rank, stream=None):
         """fill poses for non-keyframe images and evaluate"""
 
+        print("Initiating termination sequence!")
         while self.optimizing_finished < 1:
             if self.num_running_thread == 1 and self.tracking_finished > 0:
                 break
-
+        
+        print("Saving checkpoints...")
         os.makedirs(os.path.join(self.output, "checkpoints/"), exist_ok=True)
         torch.save(
             {
@@ -423,13 +469,15 @@ class SLAM:
             os.path.join(self.output, "checkpoints/go.ckpt"),
         )
 
-        do_evaluation = True
+        do_evaluation = self.evaluate
+        print("Doing evaluation!")
         if do_evaluation:
             from evo.core.trajectory import PoseTrajectory3D
             import evo.main_ape as main_ape
             from evo.core.metrics import PoseRelation
             from evo.core.trajectory import PosePath3D
             import numpy as np
+            import pandas as pd
 
             print("#" * 20 + f" Results for {stream.input_folder} ...")
 
@@ -446,6 +494,7 @@ class SLAM:
             out_path = os.path.join(self.output, "checkpoints/est_poses.npy")
             np.save(out_path, estimate_c2w_list.numpy())  # c2ws
 
+            print("After trajectory filler.")
             traj_ref = []
             traj_est_select = []
             if stream.poses is None:  # for eth3d submission
@@ -500,64 +549,11 @@ class SLAM:
                 check that is close to what people publish
                 TODO: modify evaluation script to compute Rendering loss (get_loss_tracking_rgbd and w/0 d) for Replica dataset
                 TODO: same for ATE (which is already present here), SSIM and LPIPS (https://github.com/richzhang/PerceptualSimilarity)
-                TODO: compare self.videos.images against what? What is the ground truth?
                 self.video.images: torch.Size([256, 3, 272, 480]) where 256 is the size of the buffer
                 
                 See https://github.com/muskie82/MonoGS/blob/main/utils/eval_utils.py for LPIPS
                 '''
 
-                print("Shape of images:",self.video.images.shape)        
-                print(self.gaussian_mapper.video.images.shape)
-                print(np.array_equal(self.video.images[0], self.gaussian_mapper.video.images[0]))       ## False
-                print("Are the same objects:",self.video is self.gaussian_mapper.video) ## True
-
-                folder_path = 'results_imgs'
-                slam_video_imgs = os.path.join(folder_path, "slam_video_imgs")
-                gaussian_video_imgs = os.path.join(folder_path, "gaussian_video_imgs")
-                os.makedirs(folder_path, exist_ok=True)
-                os.makedirs(slam_video_imgs, exist_ok=True)
-                os.makedirs(gaussian_video_imgs, exist_ok=True)
-
-                from PIL import Image
-
-
-                for i, image in enumerate(self.video.images):
-                    # Normalize pixel values to [0, 255] and convert to uint8
-                    image = (np.array(image.cpu()) * 255).astype(np.uint8)
-
-                    # Transpose image from [3, H, W] to [H, W, 3]
-                    image = np.transpose(image, (1, 2, 0))
-
-                    # Create PIL Image object
-                    pil_image = Image.fromarray(image)
-
-                    # Save the image to the folder with a unique name
-                    image_name = f'image_{i}.png'
-                    image_path = os.path.join(slam_video_imgs, image_name)
-                    pil_image.save(image_path)
-
-                    if i == 10:
-                        break
- 
-
-                    for i, image in enumerate(self.gaussian_mapper.video.images):
-                        # Normalize pixel values to [0, 255] and convert to uint8
-                        image = (np.array(image.cpu()) * 255).astype(np.uint8)
-
-                        # Transpose image from [3, H, W] to [H, W, 3]
-                        image = np.transpose(image, (1, 2, 0))
-
-                        # Create PIL Image object
-                        pil_image = Image.fromarray(image)
-
-                        # Save the image to the folder with a unique name
-                        image_name = f'image_{i}.png'
-                        image_path = os.path.join(gaussian_video_imgs, image_name)
-                        pil_image.save(image_path)
-
-                        if i == 10:
-                            break
-    
 
             if self.meshing_finished > 0 and (not self.only_tracking):
                 self.mesher(
@@ -578,13 +574,13 @@ class SLAM:
             mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe, self.mapping_queue)),
             mp.Process(target=self.optimizing, args=(2, False)),
-            mp.Process(target=self.multiview_filtering, args=(3, True)),
+            mp.Process(target=self.multiview_filtering, args=(3, False)),
             mp.Process(target=self.visualizing, args=(4, True)),
             #### These are for visual quality only and generating a map of indoor rooms afterwards
             mp.Process(target=self.mapping, args=(5, True)),
             mp.Process(target=self.meshing, args=(6, True)),
-            mp.Process(target=self.gaussian_mapping, args=(7, True)), ## BUG: this doesnt terminate
-            mp.Process(target=self.gaussian_visualizing, args=(8, True, self.visualization_queue)),
+            mp.Process(target=self.gaussian_mapping, args=(7, False)), ## BUG: this terminates but after it nothing happens
+
         ]
 
         self.num_running_thread[0] += len(processes)
@@ -595,3 +591,36 @@ class SLAM:
         # This will not be hit until all threads are finished
         for p in processes:
             p.join()
+
+        ## evaluation
+        ## TODO: test that its working
+        # if self.evaluate:
+        #     eval_save_path = "results_imgs/"
+
+        #     _, kf_indices = self.gaussian_mapper.select_keyframes()
+        #     rendering_result = eval_rendering(
+        #         self.gaussian_mapper.cameras,
+        #         self.gaussian_mapper.gaussians,
+        #         stream,
+        #         eval_save_path,
+        #         self.gaussian_mapper.pipeline_params,
+        #         self.gaussian_mapper.background,
+        #         kf_indices=kf_indices,
+        #         iteration="final",
+        #     )
+
+        #     print("Rendering evaluation result:", rendering_result)
+
+        #     ## TODO: add ATE from the other part
+        #     columns = ["tag", "psnr", "ssim", "lpips"]
+        #     data = [
+        #         [
+        #             "Here write when the evaluation was made (which config)",
+        #             rendering_result["mean_psnr"],
+        #             rendering_result["mean_ssim"],
+        #             rendering_result["mean_lpips"],
+        #         ]
+        #     ]
+
+        #     df = pd.DataFrame(data, columns=columns)
+        #     df.to_csv(os.path.join(eval_save_path,"metrics.csv"), index=False)

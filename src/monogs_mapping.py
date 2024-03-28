@@ -20,7 +20,7 @@ from utils.pose_utils import update_pose
 
 import droid_backends
 
-
+import lpips
 
 class GaussianMapper(object):
     def __init__(self, config, args, slam, mapping_queue = None):
@@ -46,7 +46,7 @@ class GaussianMapper(object):
 
 
         self.mapping_queue = mapping_queue
-        self.use_gui = False
+        self.use_gui = True
         self.q_main2vis = mp.Queue() if self.use_gui else FakeQueue()
         self.q_vis2main = mp.Queue() if self.use_gui else FakeQueue()
         self.params_gui = gui_utils.ParamsGUI(
@@ -160,19 +160,11 @@ class GaussianMapper(object):
 
         return mask
 
-    def plot_centers(self):
-        '''
-        Display just the centers of the gaussians
-        '''
-        means = self.gaussians.get_xyz.detach().cpu().numpy()
-        rgb = self.gaussians.get_features[:, 0, :].detach().cpu().numpy()
-        rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min())
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(means)
-        pcd.colors = o3d.utility.Vector3dVector(rgb)
-        o3d.visualization.draw_geometries([pcd])
 
     def mapping_loss(self, image: torch.Tensor, depth: torch.Tensor, cam: Camera):
+        '''
+        Loss between gt image and rendered image
+        '''
         alpha = self.config["Training"]["alpha"] if "alpha" in self.config["Training"] else 0.95
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"] if "rgb_boundary_threshold" in self.config["Training"] else 0.01
 
@@ -192,10 +184,12 @@ class GaussianMapper(object):
         # Select last 5 frames and other 5 random frames
         if len(self.cameras) <= 10:
             keyframes = self.cameras
+            keyframes_idx = np.arange(len(self.cameras))
         else:
-            keyframes = self.cameras[-5:] + [self.cameras[i] for i in np.random.choice(len(self.cameras)-5, 5, replace=False)]
-        return keyframes
-
+            keyframes_idx = np.random.choice(len(self.cameras)-5, 5, replace=False)
+            keyframes = self.cameras[-5:] + [self.cameras[i] for i in keyframes_idx]
+        return keyframes,keyframes_idx
+    
 
     def __call__(self, the_end = False):
 
@@ -227,7 +221,7 @@ class GaussianMapper(object):
             self.mapping_iters = 20
             for iter in range(self.mapping_iters):
                 loss = 0
-                frames = self.select_keyframes()
+                frames, _ = self.select_keyframes()
 
                 if self.optimize_poses:
                     pose_optimizer = self.pose_optimizer(frames)
@@ -238,6 +232,7 @@ class GaussianMapper(object):
                         view, self.gaussians, self.pipeline_params, self.background
                     )
                     ## this is the rendered images and depth
+                    # print(render_pkg['render'].min(), render_pkg['render'].max())
                     loss += self.mapping_loss(render_pkg["render"], render_pkg["depth"], view)
 
                     
@@ -286,13 +281,7 @@ class GaussianMapper(object):
             if self.save_renders and cam.uid % 5 == 0:
                 im = np.uint8(255*render_pkg["render"].detach().cpu().numpy().transpose(1, 2, 0))
                 cv2.imwrite(f"{self.render_path}/{cam.uid}.png", im)
-
-            if cam.uid % 100 == 0 and not self.use_gui:
-                # Simple o3d plot of the centers
-                ## NOTE: this runs only one time
-                print("Plotted some gaussians")
-                self.plot_centers()
-
+                print(f"Render saved at {self.render_path}/{cam.uid}.png")
 
         #if the_end and self.mapping_queue.empty():
         if the_end and self.last_idx+2 == cur_idx:

@@ -169,6 +169,7 @@ if __name__ == "__main__":
     # Run SLAM
     dataset = get_dataset(cfg, args, device=args.device)
     slam = SLAM(args, cfg)
+    slam.set_dataset(dataset)
     slam.run(dataset)
     slam.terminate(rank=-1, stream=dataset)
 
