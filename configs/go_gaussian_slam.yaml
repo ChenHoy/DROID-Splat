@@ -1,6 +1,6 @@
 sync_method: strict
 verbose: True
-dataset: "folder"
+dataset: "replica"
 mode: "mono"  # 'mono', 'stereo', 'rgbd'
 stride: 2
 only_tracking: False
@@ -181,5 +181,5 @@ Setup:
   update_frames: True
   filter_depth: True
   save_renders: True
-  render_path: "/home/leon/results/monogs/renders"
-  mesh_path: "/home/leon/results/monogs/meshes"
+  render_path: ""
+  mesh_path: ""

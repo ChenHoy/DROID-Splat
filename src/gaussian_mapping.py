@@ -337,10 +337,12 @@ class GaussianMapper(object):
         # Select last 5 frames and other 5 random frames
         if len(self.cameras) <= 10:
             keyframes = self.cameras
+            keyframes_idx = np.arange(len(self.cameras))
         else:
-            keyframes = self.cameras[-5:] + [self.cameras[i] for i in np.random.choice(len(self.cameras)-5, 5, replace=False)]
-        return keyframes
-
+            keyframes_idx = np.random.choice(len(self.cameras)-5, 5, replace=False)
+            keyframes = self.cameras[-5:] + [self.cameras[i] for i in keyframes_idx]
+        return keyframes,keyframes_idx
+    
 
     def __call__(self, the_end = False):
 
@@ -437,18 +439,18 @@ class GaussianMapper(object):
                     self.save_render(cam, f"{self.setup.render_path}/final/{cam.uid}.png")
 
 
-            fig, ax = plt.subplots()
-            ax.set_title("Loss per frame evolution")
-            ax.set_yscale("log")
-            ax.plot(self.loss_list)
-            plt.show()
+            # fig, ax = plt.subplots()
+            # ax.set_title("Loss per frame evolution")
+            # ax.set_yscale("log")
+            # ax.plot(self.loss_list)
+            # plt.show()
 
-            fig, ax = plt.subplots()
-            ax.set_yscale("log")
-            ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.setup.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
-            ax.plot(self.loss_list[-self.setup.refinement_iters:])
-            plt.savefig(f"{self.setup.render_path}/loss_{self.mode}.png")
-            plt.show()
+            # fig, ax = plt.subplots()
+            # ax.set_yscale("log")
+            # ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.setup.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
+            # ax.plot(self.loss_list[-self.setup.refinement_iters:])
+            # plt.savefig(f"{self.setup.render_path}/loss_{self.mode}.png")
+            # plt.show()
 
 
             return True

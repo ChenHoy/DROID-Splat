@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from kornia.geometry.linalg import compose_transformations
 
+
 def readEXR_onlydepth(filename):
     """
     Read depth data from EXR image file.
@@ -147,9 +148,8 @@ class BaseDataset(Dataset):
         outsize = (H_out_with_edge, W_out_with_edge)
 
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
-        color_data = (
-            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
-        )  # bgr -> rgb, [0, 1]
+        # bgr -> rgb, [0, 1]
+        color_data = torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
         color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
 
         depth_data = self.depthloader(index)
@@ -191,22 +191,13 @@ class ImageFolder(BaseDataset):
         super(ImageFolder, self).__init__(cfg, args, device)
         stride = cfg["stride"]
         # Get either jpg or png files
-        input_images = os.path.join(self.input_folder, "images", "*.jpg")
-        input_depths = os.path.join(self.input_folder, "depthany-vitl-indoor", "*.npy")
+        input_images = os.path.join(self.input_folder, "*.jpg")
         self.color_paths = sorted(glob.glob(input_images))
-        self.depth_paths = sorted(glob.glob(input_depths))
-        # Look for alternative image extensions
         if len(self.color_paths) == 0:
-            input_images = os.path.join(self.input_folder, "images", "*.png")
+            input_images = os.path.join(self.input_folder, "*.png")
             self.color_paths = sorted(glob.glob(input_images))
 
-        if len(self.depth_paths) == 0:
-            self.depth_paths = None
-        else:
-            assert len(self.depth_paths) == len(
-                self.color_paths
-            ), "Number of depth maps does not match number of images"
-            self.depth_paths = self.depth_paths[::stride]
+        # TODO create your own RGBD dataset based on monocular depth predictions from some model like ZoeDepth / Monodepth2 / MiDaS
         self.color_paths = self.color_paths[::stride]
         self.n_img = len(self.color_paths)
 
@@ -216,7 +207,6 @@ class ImageFolder(BaseDataset):
 class Replica(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(Replica, self).__init__(cfg, args, device)
-        stride = cfg["stride"]
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/frame*.jpg")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
@@ -232,19 +222,18 @@ class Replica(BaseDataset):
         else:
             self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/depth*.png")))
 
+        stride = cfg["stride"]
         self.color_paths = self.color_paths[::stride]
         self.depth_paths = self.depth_paths[::stride]
         self.load_poses(os.path.join(self.input_folder, "traj.txt"))
         self.poses = self.poses[::stride]
 
-
-        relative_poses = True # True to test the gt stream mapping
+        relative_poses = True  # True to test the gt stream mapping
         if relative_poses:
             self.poses = torch.from_numpy(np.array(self.poses))
             trans_10 = torch.inverse(self.poses[0].unsqueeze(0).repeat(self.poses.shape[0], 1, 1))
             self.poses = compose_transformations(trans_10, self.poses).numpy()
-        
-        
+
         # Adjust number of images according to strides
         self.n_img = len(self.color_paths)
 
@@ -258,14 +247,11 @@ class Replica(BaseDataset):
             self.poses.append(c2w)
 
 
-
 class TartanAir(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(TartanAir, self).__init__(cfg, args, device)
         stride = cfg["stride"]
-        self.color_paths = sorted(
-            glob.glob(os.path.join(self.input_folder, "image_left/*.png"))
-        )
+        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_left/*.png")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         print("found {} images".format(self.n_img))
@@ -273,9 +259,7 @@ class TartanAir(BaseDataset):
         if cfg["mode"] == "prgbd":
             self.depth_paths = sorted(
                 # glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
-                glob.glob(
-                    os.path.join(self.input_folder, "depthany-vitl-indoor/*.npy")
-                )
+                glob.glob(os.path.join(self.input_folder, "depthany-vitl-indoor/*.npy"))
             )
             assert (
                 len(self.depth_paths) == self.n_img
@@ -289,14 +273,12 @@ class TartanAir(BaseDataset):
         self.load_poses(os.path.join(self.input_folder, "pose_left.txt"))
         self.poses = self.poses[::stride]
 
-
-        relative_poses = True # True to test the gt stream mapping
+        relative_poses = True  # True to test the gt stream mapping
         if relative_poses:
             self.poses = torch.from_numpy(np.array(self.poses))
             trans_10 = torch.inverse(self.poses[0].unsqueeze(0).repeat(self.poses.shape[0], 1, 1))
             self.poses = compose_transformations(trans_10, self.poses).numpy()
-        
-        
+
         # Adjust number of images according to strides
         self.n_img = len(self.color_paths)
 
@@ -314,16 +296,16 @@ class TartanAir(BaseDataset):
             self.poses.append(c2w)
 
 
-
 class Azure(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(Azure, self).__init__(cfg, args, device)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "color", "*.jpg")))
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", "*.png")))
+        self.load_poses(os.path.join(self.input_folder, "scene", "trajectory.log"))
         stride = cfg["stride"]
         self.color_paths = self.color_paths[::stride]
         self.depth_paths = self.depth_paths[::stride]
-        self.load_poses(os.path.join(self.input_folder, "scene", "trajectory.log"))
+        self.poses = self.poses[::stride]
         self.n_img = len(self.color_paths)
 
     def load_poses(self, path):
@@ -393,12 +375,15 @@ class CoFusion(BaseDataset):
         self.input_folder = os.path.join(self.input_folder)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "colour", "*.png")))
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth_noise", "*.exr")))
+
         stride = cfg["stride"]
-        self.color_paths = self.color_paths[::stride]
-        self.depth_paths = self.depth_paths[::stride]
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         self.load_poses(os.path.join(self.input_folder, "trajectories"))
+        self.color_paths = self.color_paths[::stride]
+        self.depth_paths = self.depth_paths[::stride]
+        self.poses = self.poses[::stride]
+        self.n_img = len(self.color_paths)
 
     def load_poses(self, path):
         # We tried, but cannot align the coordinate frame of cofusion to ours.
@@ -418,6 +403,7 @@ class TUM_RGBD(BaseDataset):
         stride = cfg["stride"]
         self.color_paths = self.color_paths[::stride]
         self.depth_paths = self.depth_paths[::stride]
+        self.poses = self.poses[::stride]
         self.n_img = len(self.color_paths)
 
     def parse_list(self, filepath, skiprows=0):
@@ -845,5 +831,5 @@ dataset_dict = {
     "tumrgbd": TUM_RGBD,
     "eth3d": ETH3D,
     "euroc": EuRoC,
-    "tartanair": TartanAir
+    "tartanair": TartanAir,
 }
