@@ -21,13 +21,8 @@ from .motion_filter import MotionFilter
 from .multiview_filter import MultiviewFilter
 from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
-from .mapping import Mapper
-# old splatam mapper
-# from .gaussian_mapping import GaussianMapper
-from .render import Renderer
-from .mesher import Mesher
 from .InstantNeuS import InstantNeuS
-from .monogs_mapping import GaussianMapper as MonogsGaussianMapper
+from .gaussian_mapping import GaussianMapper
 
 
 class Tracker(nn.Module):
@@ -118,19 +113,12 @@ class SLAM:
         self.update_cam(cfg)
         self.load_bound(cfg)
 
-        self.mapping_net = InstantNeuS(
-            cfg["mapping"]["model"],
-            bound=cfg["mapping"]["bound"],
-            device=cfg["mapping"]["device"],
-        ).to(cfg["mapping"]["device"])
+
         self.net = DroidNet()
 
         self.load_pretrained(cfg["tracking"]["pretrained"])
         self.net.to(self.device).eval()
         self.net.share_memory()
-        self.mapping_net.share_memory()
-
-        self.renderer = Renderer(cfg, args, self)
 
         self.num_running_thread = torch.zeros((1)).int()
         self.num_running_thread.share_memory_()
@@ -138,12 +126,8 @@ class SLAM:
         self.all_trigered.share_memory_()
         self.tracking_finished = torch.zeros((1)).int()
         self.tracking_finished.share_memory_()
-        self.mapping_finished = torch.zeros((1)).int()
-        self.mapping_finished.share_memory_()
         self.gaussian_mapping_finished = torch.zeros((1)).int()
         self.gaussian_mapping_finished.share_memory_()
-        self.meshing_finished = torch.zeros((1)).int()
-        self.meshing_finished.share_memory_()
         self.optimizing_finished = torch.zeros((1)).int()
         self.optimizing_finished.share_memory_()
         self.visualizing_finished = torch.zeros((1)).int()
@@ -154,7 +138,6 @@ class SLAM:
 
         self.reload_map = torch.zeros((1)).int()
         self.reload_map.share_memory_()
-        self.post_processing_iters = cfg["mapping"]["post_processing_iters"]
 
         # store images, depth, poses, intrinsics (shared between process)
         self.video = DepthVideo(cfg, args)
@@ -172,13 +155,7 @@ class SLAM:
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
 
-        self.mapper = Mapper(cfg, args, self)
-        self.mesher = Mesher(cfg, args, self)
-
-        self.mapping_queue = mp.Queue()
-        self.visualization_queue = mp.Queue()
-
-        self.gaussian_mapper = MonogsGaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
+        self.gaussian_mapper = GaussianMapper(cfg, args, self)
 
 
     def update_cam(self, cfg):
@@ -227,7 +204,7 @@ class SLAM:
 
         self.net.load_state_dict(state_dict)
 
-    def tracking(self, rank, stream, input_queue=mp.Queue, mapping_queue=None):
+    def tracking(self, rank, stream, input_queue=mp.Queue):
         print("Tracking Triggered!")
         self.all_trigered += 1
         # Wait up for other threads to start
@@ -243,9 +220,6 @@ class SLAM:
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
-            # if mapping_queue is not None and (timestamp == 0 or (timestamp) % 10 == 0):
-            #     mapping_queue.put(frame)
-
 
             # predict mesh every 50 frames for video making
             if timestamp % 50 == 0 and timestamp > 0 and self.make_video:
@@ -253,8 +227,7 @@ class SLAM:
             while self.hang_on > 0:
                 sleep(1.0)
 
-        # while not mapping_queue.empty():
-        #     sleep(1.0)
+
         self.tracking_finished += 1
         print("Tracking Done!")
 
@@ -291,21 +264,6 @@ class SLAM:
 
         print("Multiview Filtering Done!")
 
-    def mapping(self, rank, dont_run=False):
-        print("Dense Mapping Triggered!")
-        self.all_trigered += 1
-        while self.tracking_finished < 1 and not dont_run:
-            while self.hang_on > 0 and self.make_video:
-                sleep(1.0)
-            self.mapper()
-
-        if not dont_run:
-            print("Start post-processing on mapping...")
-            for i in tqdm(range(self.post_processing_iters)):
-                self.mapper(the_end=True)
-        self.mapping_finished += 1
-        print("Dense Mapping Done!")
-
     def gaussian_mapping(self, rank, dont_run=False):
         print("Gaussian Mapping Triggered!")
         self.all_trigered += 1
@@ -320,18 +278,6 @@ class SLAM:
             
         self.gaussian_mapping_finished += 1
         print("Gaussian Mapping Done!")
-
-    def meshing(self, rank, dont_run=False):
-        print("Meshing Triggered!")
-        self.all_trigered += 1
-        while self.mapping_finished < 1 and (not dont_run):
-            while self.hang_on < 1 and self.mapping_finished < 1 and self.make_video:
-                sleep(1.0)
-            self.mesher()
-            self.hang_on[:] = 0
-
-        self.meshing_finished += 1
-        print("Meshing Done!")
     
     def visualizing(self, rank, dont_run=False):
         print("Visualization triggered!")
@@ -376,7 +322,6 @@ class SLAM:
         os.makedirs(os.path.join(self.output, "checkpoints/"), exist_ok=True)
         torch.save(
             {
-                "mapping_net": self.mapping_net.state_dict(),
                 "tracking_net": self.net.state_dict(),
                 "keyframe_timestamps": self.video.timestamp,
             },
@@ -456,13 +401,6 @@ class SLAM:
                     fp.write(result.pretty_str())
                 trans_init = result.np_arrays["alignment_transformation_sim3"]
 
-            if self.meshing_finished > 0 and (not self.only_tracking):
-                self.mesher(
-                    the_end=True,
-                    estimate_c2w_list=estimate_c2w_list,
-                    gt_c2w_list=gt_c2w_list,
-                    trans_init=trans_init,
-                )
 
         print("Terminate: Done!")
 
@@ -471,13 +409,10 @@ class SLAM:
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
-            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe, self.mapping_queue)),
+            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
             mp.Process(target=self.optimizing, args=(2, False)),
             mp.Process(target=self.multiview_filtering, args=(3, False)),
             mp.Process(target=self.visualizing, args=(4, True)),
-            #### These are for visual quality only and generating a map of indoor rooms afterwards
-            mp.Process(target=self.mapping, args=(5, True)),
-            mp.Process(target=self.meshing, args=(6, True)),
             mp.Process(target=self.gaussian_mapping, args=(7, False)),
         ]
 
