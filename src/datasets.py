@@ -44,6 +44,38 @@ def readEXR_onlydepth(filename):
     return Y
 
 
+def quaternion_to_matrix(quaternions: torch.Tensor) -> torch.Tensor:
+    """
+    Convert rotations given as quaternions to rotation matrices.
+
+    Args:
+        quaternions: quaternions with real part first,
+            as tensor of shape (..., 4).
+
+    Returns:
+        Rotation matrices as tensor of shape (..., 3, 3).
+    """
+    r, i, j, k = torch.unbind(quaternions, -1)
+    # pyre-fixme[58]: `/` is not supported for operand types `float` and `Tensor`.
+    two_s = 2.0 / (quaternions * quaternions).sum(-1)
+
+    o = torch.stack(
+        (
+            1 - two_s * (j * j + k * k),
+            two_s * (i * j - k * r),
+            two_s * (i * k + j * r),
+            two_s * (i * j + k * r),
+            1 - two_s * (i * i + k * k),
+            two_s * (j * k - i * r),
+            two_s * (i * k - j * r),
+            two_s * (j * k + i * r),
+            1 - two_s * (i * i + j * j),
+        ),
+        -1,
+    )
+    return o.reshape(quaternions.shape[:-1] + (3, 3))
+
+
 def get_dataset(cfg, args, device="cuda:0"):
     return dataset_dict[cfg["dataset"]](cfg, args, device=device)
 
@@ -225,6 +257,62 @@ class Replica(BaseDataset):
         for i in range(self.n_img):
             line = lines[i]
             c2w = np.array(list(map(float, line.split()))).reshape(4, 4)
+            self.poses.append(c2w)
+
+
+
+class TartanAir(BaseDataset):
+    def __init__(self, cfg, args, device="cuda:0"):
+        super(TartanAir, self).__init__(cfg, args, device)
+        stride = cfg["stride"]
+        self.color_paths = sorted(
+            glob.glob(os.path.join(self.input_folder, "image_left/*.png"))
+        )
+        # Set number of images for loading poses
+        self.n_img = len(self.color_paths)
+        print("found {} images".format(self.n_img))
+        # For Pseudo RGBD, we use monocular depth predictions in another folder
+        if cfg["mode"] == "prgbd":
+            self.depth_paths = sorted(
+                # glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
+                glob.glob(
+                    os.path.join(self.input_folder, "depthany-vitl-indoor/*.npy")
+                )
+            )
+            assert (
+                len(self.depth_paths) == self.n_img
+            ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
+            self.depth_paths = self.depth_paths[::stride]
+
+        else:
+            self.depth_paths = None
+
+        self.color_paths = self.color_paths[::stride]
+        self.load_poses(os.path.join(self.input_folder, "pose_left.txt"))
+        self.poses = self.poses[::stride]
+
+
+        relative_poses = True # True to test the gt stream mapping
+        if relative_poses:
+            self.poses = torch.from_numpy(np.array(self.poses))
+            trans_10 = torch.inverse(self.poses[0].unsqueeze(0).repeat(self.poses.shape[0], 1, 1))
+            self.poses = compose_transformations(trans_10, self.poses).numpy()
+        
+        
+        # Adjust number of images according to strides
+        self.n_img = len(self.color_paths)
+
+    def load_poses(self, path):
+        self.poses = []
+        with open(path, "r") as f:
+            lines = f.readlines()
+        for i in range(self.n_img):
+            line = list(map(float, lines[i].split()))
+            rotation_matrix = quaternion_to_matrix(torch.tensor(line[3:])).detach().numpy()
+            c2w = np.eye(4)
+            c2w[:3, :3] = rotation_matrix
+            c2w[:3, 3] = line[:3]
+
             self.poses.append(c2w)
 
 
@@ -796,4 +884,5 @@ dataset_dict = {
     "tumrgbd": TUM_RGBD,
     "eth3d": ETH3D,
     "euroc": EuRoC,
+    "tartanair": TartanAir
 }

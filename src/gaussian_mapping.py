@@ -548,10 +548,9 @@ class GaussianMapper(object):
         self.get_updates = True # Update selected keyframes before optimization
 
         self.save_renders = True
-        self.render_path = "/home/leon/go-slam-tests/renders/splatam"
-
+        self.render_path = "/home/leon/results/monogs/renders"
         self.save_ply = True
-        self.ply_path = "/home/leon/go-slam-tests/meshes/office0.ply"
+        self.ply_path = "/home/leon/results/monogs/meshesoffice0.ply"
 
         self.use_gt_stream = False
 
