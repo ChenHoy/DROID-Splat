@@ -6,4 +6,4 @@ meshing:
   gt_mesh_path: /media/data/Replica/cull_replica_meshv2/office0.ply
 data:
   input_folder: /media/data/Replica/office0
-  output: /home/leon/go-slam-tests
+  output: ""

@@ -21,14 +21,8 @@ from .motion_filter import MotionFilter
 from .multiview_filter import MultiviewFilter
 from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
-from .mapping import Mapper
-# old splatam mapper
 from .gaussian_mapping import GaussianMapper
-from .render import Renderer
-from .mesher import Mesher
-from .InstantNeuS import InstantNeuS
-from .monogs_mapping import GaussianMapper as MonogsGaussianMapper
-from utils.eval_utils import eval_ate, eval_rendering, save_gaussians
+from .gaussian_splatting.eval_utils import eval_ate, eval_rendering, save_gaussians
 import pandas as pd
 
 class Tracker(nn.Module):
@@ -44,9 +38,7 @@ class Tracker(nn.Module):
         # filter incoming frames so that there is enough motion
         self.frontend_window = cfg["tracking"]["frontend"]["window"]
         filter_thresh = cfg["tracking"]["motion_filter"]["thresh"]
-        self.motion_filter = MotionFilter(
-            self.net, self.video, thresh=filter_thresh, device=self.device
-        )
+        self.motion_filter = MotionFilter(self.net, self.video, thresh=filter_thresh, device=self.device)
 
         # frontend process
         self.frontend = Frontend(self.net, self.video, self.args, self.cfg)
@@ -54,9 +46,7 @@ class Tracker(nn.Module):
     def forward(self, timestamp, image, depth, intrinsic, gt_pose=None):
         with torch.no_grad():
             ### check there is enough motion
-            self.motion_filter.track(
-                timestamp, image, depth, intrinsic, gt_pose=gt_pose
-            )
+            self.motion_filter.track(timestamp, image, depth, intrinsic, gt_pose=gt_pose)
 
             # local bundle adjustment
             self.frontend()
@@ -119,17 +109,11 @@ class SLAM:
         self.update_cam(cfg)
         self.load_bound(cfg)
 
-        self.mapping_net = InstantNeuS(
-            cfg["mapping"]["model"],
-            bound=cfg["mapping"]["bound"],
-            device=cfg["mapping"]["device"],
-        ).to(cfg["mapping"]["device"])
         self.net = DroidNet()
 
         self.load_pretrained(cfg["tracking"]["pretrained"])
         self.net.to(self.device).eval()
         self.net.share_memory()
-        self.mapping_net.share_memory()
 
         self.renderer = Renderer(cfg, args, self)
 
@@ -139,12 +123,8 @@ class SLAM:
         self.all_trigered.share_memory_()
         self.tracking_finished = torch.zeros((1)).int()
         self.tracking_finished.share_memory_()
-        self.mapping_finished = torch.zeros((1)).int()
-        self.mapping_finished.share_memory_()
         self.gaussian_mapping_finished = torch.zeros((1)).int()
         self.gaussian_mapping_finished.share_memory_()
-        self.meshing_finished = torch.zeros((1)).int()
-        self.meshing_finished.share_memory_()
         self.optimizing_finished = torch.zeros((1)).int()
         self.optimizing_finished.share_memory_()
         self.visualizing_finished = torch.zeros((1)).int()
@@ -155,7 +135,6 @@ class SLAM:
 
         self.reload_map = torch.zeros((1)).int()
         self.reload_map.share_memory_()
-        self.post_processing_iters = cfg["mapping"]["post_processing_iters"]
 
         # store images, depth, poses, intrinsics (shared between process)
         ### NOTE: use this for getting the gt and rendered images
@@ -167,26 +146,16 @@ class SLAM:
         self.multiview_filter = MultiviewFilter(cfg, args, self)
 
         # post processor - fill in poses for non-keyframes
-        self.traj_filler = PoseTrajectoryFiller(
-            net=self.net, video=self.video, device=self.device
-        )
+        self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
+
+        self.mapping_queue = mp.Queue()
+        self.gaussian_mapper = GaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
-
-        self.mapper = Mapper(cfg, args, self)
-        self.mesher = Mesher(cfg, args, self)
-
-        self.mapping_queue = mp.Queue()
-        self.visualization_queue = mp.Queue()
-
         # self.evaluate = cfg["evaluate"]
         self.evaluate = True
         self.dataset = None
-
-        self.gaussian_mapper = MonogsGaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue,use_gui=not self.evaluate)
-
-
 
     def set_dataset(self, dataset):
         self.dataset = dataset
@@ -226,9 +195,7 @@ class SLAM:
     def load_pretrained(self, pretrained):
         print(f"INFO: load pretrained checkpiont from {pretrained}!")
 
-        state_dict = OrderedDict(
-            [(k.replace("module.", ""), v) for (k, v) in torch.load(pretrained).items()]
-        )
+        state_dict = OrderedDict([(k.replace("module.", ""), v) for (k, v) in torch.load(pretrained).items()])
 
         state_dict["update.weight.2.weight"] = state_dict["update.weight.2.weight"][:2]
         state_dict["update.weight.2.bias"] = state_dict["update.weight.2.bias"][:2]
@@ -237,7 +204,7 @@ class SLAM:
 
         self.net.load_state_dict(state_dict)
 
-    def tracking(self, rank, stream, input_queue=mp.Queue, mapping_queue=None):
+    def tracking(self, rank, stream, input_queue=mp.Queue):
         print("Tracking Triggered!")
         self.all_trigered += 1
         # Wait up for other threads to start
@@ -248,31 +215,18 @@ class SLAM:
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
-            # input_queue.put(image)
-            # input_queue.put(depth)
+            input_queue.put(image)
+            input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
-            # if mapping_queue is not None and (timestamp == 0 or (timestamp) % 10 == 0):
-            #     mapping_queue.put(frame)
-
-
-            # predict mesh every 50 frames for video making
             if timestamp % 50 == 0 and timestamp > 0 and self.make_video:
                 self.hang_on[:] = 1
             while self.hang_on > 0:
                 sleep(1.0)
 
-        # while not mapping_queue.empty():
-        #     sleep(1.0)
         self.tracking_finished += 1
         print("Tracking Done!")
-
-    # We need some signal that the rendering works
-    # i) Use mp.Queue from rendering/mapping to visualization/show_stream
-    # ii) Render the key frame image from the Gaussians and send this into the queue
-    # iii) In visu thread: Take renderings and output them
-    # Nerfstudio has like a 3D volume with the colors that you can fly through
 
     def optimizing(self, rank, dont_run=False):
         print("Full Bundle Adjustment Triggered!")
@@ -292,29 +246,12 @@ class SLAM:
     def multiview_filtering(self, rank, dont_run=False):
         print("Multiview Filtering Triggered!")
         self.all_trigered += 1
-        while (
-            self.tracking_finished < 1 or self.optimizing_finished < 1
-        ) and not dont_run:
+        while (self.tracking_finished < 1 or self.optimizing_finished < 1) and not dont_run:
             while self.hang_on > 0 and self.make_video:
                 sleep(1.0)
             self.multiview_filter()
 
         print("Multiview Filtering Done!")
-
-    def mapping(self, rank, dont_run=False):
-        print("Dense Mapping Triggered!")
-        self.all_trigered += 1
-        while self.tracking_finished < 1 and not dont_run:
-            while self.hang_on > 0 and self.make_video:
-                sleep(1.0)
-            self.mapper()
-
-        if not dont_run:
-            print("Start post-processing on mapping...")
-            for i in tqdm(range(self.post_processing_iters)):
-                self.mapper(the_end=True)
-        self.mapping_finished += 1
-        print("Dense Mapping Done!")
 
     def gaussian_mapping(self, rank, dont_run=False):
         print("Gaussian Mapping Triggered!")
@@ -328,7 +265,7 @@ class SLAM:
             print("Last run")
             while not finished:
                 finished = self.gaussian_mapper(the_end=True)
-            
+
         self.gaussian_mapping_finished += 1
         print("Gaussian Mapping Done!")
 
@@ -369,62 +306,10 @@ class SLAM:
 
             print("Evaluation complete")
 
-
-
-      
-
-    def gaussian_visualizing(self, rank, dont_run=False, visualization_queue=None):
-        print("Gaussian visualization Triggered!")
-        self.all_trigered += 1
-        if visualization_queue is None:
-            print("No queue for Gaussian visualization")
-            return
-        
-        vis = o3d.visualization.Visualizer()
-        vis.create_window()
-        point_cloud = o3d.geometry.PointCloud()
-        point_cloud.points = o3d.utility.Vector3dVector(np.random.rand(10, 3))
-        point_cloud.colors = o3d.utility.Vector3dVector(np.random.rand(10, 3))
-        vis.add_geometry(point_cloud)
-
-        while (self.gaussian_mapping_finished < 1) and (
-            not dont_run
-        ):
-            if not visualization_queue.empty():
-                print("Point cloud updated")
-                params = visualization_queue.get()
-                means3D = params["means3D"].detach().cpu().numpy()
-                rgb_colors = params["rgb_colors"].detach().cpu().numpy()  
-                n_gaussians = means3D.shape[0]
-                idxs = np.random.choice(np.arange(n_gaussians), n_gaussians//10, replace=False)
-                point_cloud.points = o3d.utility.Vector3dVector(means3D[idxs, :]) 
-                point_cloud.colors = o3d.utility.Vector3dVector(rgb_colors[idxs, :]) 
-                vis.update_geometry(point_cloud)
-                vis.poll_events()
-                vis.update_renderer()
-
-
-        self.gaussian_visualizing_finished += 1
-        print("Gaussian Visualization done!")
-
-    def meshing(self, rank, dont_run=False):
-        print("Meshing Triggered!")
-        self.all_trigered += 1
-        while self.mapping_finished < 1 and (not dont_run):
-            while self.hang_on < 1 and self.mapping_finished < 1 and self.make_video:
-                sleep(1.0)
-            self.mesher()
-            self.hang_on[:] = 0
-
-        self.meshing_finished += 1
-        print("Meshing Done!")
-    
     def visualizing(self, rank, dont_run=False):
         print("Visualization triggered!")
         self.all_trigered += 1
-        while (self.tracking_finished < 1 or self.optimizing_finished < 1) and (
-            not dont_run
-        ):
+        while (self.tracking_finished < 1 or self.optimizing_finished < 1) and (not dont_run):
             droid_visualization(self.video, device=self.device, save_root=self.output)
 
         self.visualizing_finished += 1
@@ -464,7 +349,6 @@ class SLAM:
         os.makedirs(os.path.join(self.output, "checkpoints/"), exist_ok=True)
         torch.save(
             {
-                "mapping_net": self.mapping_net.state_dict(),
                 "tracking_net": self.net.state_dict(),
                 "keyframe_timestamps": self.video.timestamp,
             },
@@ -505,14 +389,11 @@ class SLAM:
 
             timestamps = [i for i in range(len(stream))]
             camera_trajectory = self.traj_filler(stream)  # w2cs
-            w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(
-                camera_trajectory.device
-            )
+            w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
             camera_trajectory = w2w * camera_trajectory.inv()
             traj_est = camera_trajectory.data.cpu().numpy()
             estimate_c2w_list = camera_trajectory.matrix().data.cpu()
 
-            
             out_path = os.path.join(self.output, "checkpoints/est_poses.npy")
             np.save(out_path, estimate_c2w_list.numpy())  # c2ws
 
@@ -594,32 +475,17 @@ class SLAM:
 
 
 
-            if self.meshing_finished > 0 and (not self.only_tracking):
-                self.mesher(
-                    the_end=True,
-                    estimate_c2w_list=estimate_c2w_list,
-                    gt_c2w_list=gt_c2w_list,
-                    trans_init=trans_init,
-                )
-
         print("Terminate: Done!")
 
     def run(self, stream):
-
-        
-        # TODO why exactly does our open3d visualization look so unclean compared to the droidcalib one?
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
-            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe, self.mapping_queue)),
+            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
             mp.Process(target=self.optimizing, args=(2, False)),
             mp.Process(target=self.multiview_filtering, args=(3, False)),
             mp.Process(target=self.visualizing, args=(4, True)),
-            #### These are for visual quality only and generating a map of indoor rooms afterwards
-            mp.Process(target=self.mapping, args=(5, True)),
-            mp.Process(target=self.meshing, args=(6, True)),
-            mp.Process(target=self.gaussian_mapping, args=(7, False)), ## BUG: this terminates but after it nothing happens
-
+            mp.Process(target=self.gaussian_mapping, args=(5, False)),
         ]
 
         self.num_running_thread[0] += len(processes)

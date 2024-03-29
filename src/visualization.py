@@ -14,6 +14,9 @@ from lietorch import SE3
 import cv2
 import open3d as o3d
 
+# Only shows errors, not warnings
+o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
+
 from matplotlib.pyplot import get_cmap
 import matplotlib.pyplot as plt
 import matplotlib as mpl
@@ -35,9 +38,7 @@ CAM_POINTS = np.array(
     ]
 )
 
-CAM_LINES = np.array(
-    [[1, 2], [2, 3], [3, 4], [4, 1], [1, 0], [0, 2], [3, 0], [0, 4], [5, 7], [7, 6]]
-)
+CAM_LINES = np.array([[1, 2], [2, 3], [3, 4], [4, 1], [1, 0], [0, 2], [3, 0], [0, 4], [5, 7], [7, 6]])
 
 
 def depth2rgb(depths: torch.Tensor) -> np.ndarray:
@@ -143,12 +144,8 @@ def white_balance(img):
     result = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     avg_a = np.average(result[:, :, 1])
     avg_b = np.average(result[:, :, 2])
-    result[:, :, 1] = result[:, :, 1] - (
-        (avg_a - 128) * (result[:, :, 0] / 255.0) * 1.1
-    )
-    result[:, :, 2] = result[:, :, 2] - (
-        (avg_b - 128) * (result[:, :, 0] / 255.0) * 1.1
-    )
+    result[:, :, 1] = result[:, :, 1] - ((avg_a - 128) * (result[:, :, 0] / 255.0) * 1.1)
+    result[:, :, 2] = result[:, :, 2] - ((avg_b - 128) * (result[:, :, 0] / 255.0) * 1.1)
     result = cv2.cvtColor(result, cv2.COLOR_LAB2BGR)
     return result
 
@@ -214,7 +211,7 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
     droid_visualization.points = {}
     droid_visualization.warmup = 8
     droid_visualization.scale = 10.0  # 1.0
-    droid_visualization.camera_scale = 0.05
+    droid_visualization.camera_scale = 0.025
     droid_visualization.ix = 0
 
     droid_visualization.filter_thresh = 0.005
@@ -223,16 +220,12 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
     def increase_filter(vis):
         droid_visualization.filter_thresh *= 2
         with droid_visualization.video.get_lock():
-            droid_visualization.video.dirty[
-                : droid_visualization.video.counter.value
-            ] = True
+            droid_visualization.video.dirty[: droid_visualization.video.counter.value] = True
 
     def decrease_filter(vis):
         droid_visualization.filter_thresh *= 0.5
         with droid_visualization.video.get_lock():
-            droid_visualization.video.dirty[
-                : droid_visualization.video.counter.value
-            ] = True
+            droid_visualization.video.dirty[: droid_visualization.video.counter.value] = True
 
     def deactivate_update(vis):
         with droid_visualization.video.get_lock():
@@ -241,16 +234,12 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
     def increase_camera(vis):
         droid_visualization.camera_scale *= 1 / 0.8
         with droid_visualization.video.get_lock():
-            droid_visualization.video.dirty[
-                : droid_visualization.video.counter.value
-            ] = True
+            droid_visualization.video.dirty[: droid_visualization.video.counter.value] = True
 
     def decrease_camera(vis):
         droid_visualization.camera_scale *= 0.8
         with droid_visualization.video.get_lock():
-            droid_visualization.video.dirty[
-                : droid_visualization.video.counter.value
-            ] = True
+            droid_visualization.video.dirty[: droid_visualization.video.counter.value] = True
 
     def start_stop_view_resetting(vis):
         droid_visualization.do_reset = not droid_visualization.do_reset
@@ -278,17 +267,11 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
             images = torch.index_select(video.images, 0, dirty_index)
             # images = images.cpu()[:, [2, 1, 0], 3::8, 3::8].permute(0, 2, 3, 1)
             images = images.cpu()[:, ..., 3::8, 3::8].permute(0, 2, 3, 1)
-            points = droid_backends.iproj(
-                SE3(poses).inv().data, disps, video.intrinsics[0]
-            ).cpu()
+            points = droid_backends.iproj(SE3(poses).inv().data, disps, video.intrinsics[0]).cpu()
 
-            thresh = droid_visualization.filter_thresh * torch.ones_like(
-                disps.mean(dim=[1, 2])
-            )
+            thresh = droid_visualization.filter_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
 
-            count = droid_backends.depth_filter(
-                video.poses, video.disps, video.intrinsics[0], dirty_index, thresh
-            )
+            count = droid_backends.depth_filter(video.poses, video.disps, video.intrinsics[0], dirty_index, thresh)
 
             count, disps = count.cpu(), disps.cpu()
             masks = (count >= 2) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
@@ -314,9 +297,7 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
                 ### add camera actor ###
                 cam_actor = create_camera_actor(True, droid_visualization.camera_scale)
                 cam_actor.transform(pose)
-                vis.add_geometry(
-                    cam_actor, reset_bounding_box=droid_visualization.do_reset
-                )
+                vis.add_geometry(cam_actor, reset_bounding_box=droid_visualization.do_reset)
                 droid_visualization.cameras[ix] = cam_actor
 
                 mask = masks[i].reshape(-1)
@@ -325,9 +306,7 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
 
                 ## add point actor ###
                 point_actor = create_point_actor(pts, clr)
-                vis.add_geometry(
-                    point_actor, reset_bounding_box=droid_visualization.do_reset
-                )
+                vis.add_geometry(point_actor, reset_bounding_box=droid_visualization.do_reset)
                 droid_visualization.points[ix] = point_actor
 
             # hack to allow interacting with vizualization during inference
@@ -336,9 +315,7 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
 
             droid_visualization.ix += 1
 
-            cam = vis.get_view_control().convert_from_pinhole_camera_parameters(
-                cam_params, True
-            )
+            cam = vis.get_view_control().convert_from_pinhole_camera_parameters(cam_params, True)
             vis.poll_events()
             vis.update_renderer()
 

@@ -1,6 +1,6 @@
 verbose: False
-dataset: 'replica'
-mode: 'rgbd'
+dataset: 'tartanair'
+mode: 'mono'
 stride: 1
 mapping:
   device: "cuda:0"
@@ -50,40 +50,3 @@ meshing:
   n_points_to_eval: 200000
   mesh_threshold_to_eval: 0.05
   forecast_radius: 25
-
-Dataset:
-  sensor_type: 'depth'
-  pcd_downsample: 64
-  pcd_downsample_init: 32
-  adaptive_pointsize: True
-  point_size: 0.05
-  type: 'replica'
-
-Training:
-  prune_every: 10
-  rgb_boundary_threshold: 0.01
-  alpha: 0.95
-  gaussian_th: 0.005
-  gaussian_extent: 10
-  size_threshold: 20
-  refinement:
-    gaussian_th: 0.3
-    gaussian_extent: 2
-    size_threshold: 20
-
-
-  lr: # Pose lr for mapping
-    cam_rot_delta: 0.0003
-    cam_trans_delta: 0.0001
-
-Setup:
-  warmup: 0 # Wait until tracking gets to this frame
-  mapping_iters: 20 # At each new frame, 10 views
-  refinement_iters: 100 # Once at the end, all views
-  use_gui: True
-  optimize_poses: False
-  update_frames: True
-  filter_depth: True
-  save_renders: True
-  render_path: ""
-  mesh_path: ""
