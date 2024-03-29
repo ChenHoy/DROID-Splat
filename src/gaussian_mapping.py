@@ -122,7 +122,7 @@ class GaussianMapper(object):
         color, depth, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
         color = color.permute(2, 0, 1)
         intrinsics = self.video.intrinsics[0]*self.video.scale_factor
-
+        print(depth.mean())
         if self.setup.filter_depth:
             mask = self.depth_filter(idx)
             print(f"Filtered {100*(1 - mask.sum() / mask.numel()):.2f}% of the points")
@@ -345,14 +345,13 @@ class GaussianMapper(object):
     def __call__(self, the_end = False):
 
         cur_idx = int(self.video.filtered_id.item()) 
+
         
         if self.last_idx+2 < cur_idx and cur_idx > self.setup.warmup:
             self.last_idx += 1
+            
+            print(f"\n      Starting frame: {self.last_idx}. Gaussians: {self.gaussians.get_xyz.shape[0]}. Video at {cur_idx}")
 
-            # if self.last_idx == 45: #BUG at this frame, all depths are 0 (but not always)
-            #     self.show_filtered = True
-            #     print("frame skipped")
-            #     return
 
             # Add camera of the last frame
             cam = self.camera_from_video(self.last_idx)
@@ -392,24 +391,24 @@ class GaussianMapper(object):
             if self.setup.use_gui:
                 self.q_main2vis.put(
                         gui_utils.GaussianPacket(
-                            gaussians=clone_obj(self.gaussians),
-                            current_frame=cam,
+                            #gaussians=clone_obj(self.gaussians),
+                            #current_frame=cam,
                             #keyframes=self.cameras,
-                            keyframe = cam,
+                            #keyframe = cam,
                             kf_window=None,
                             gtcolor=cam.original_image,        
                             gtdepth=cam.depth.detach().cpu().numpy(),
                         )
                 )
 
-            print(f"Frame: {cam.uid}. Gaussians: {self.gaussians.get_xyz.shape[0]}. Video at {cur_idx}")
+            
 
             # Save renders
             if self.setup.save_renders and cam.uid % 5 == 0:
-                self.save_render(cam, f"{self.setup.render_path}/mapping/{cam.uid}.png")
+                self.save_render(cam, f"{self.slam.output}/renders/mapping/{cam.uid}.png")
 
 
-        if the_end and self.last_idx+2 == cur_idx:
+        elif the_end and self.last_idx+2 == cur_idx:
             print("Mapping refinement starting")
 
 
@@ -429,12 +428,12 @@ class GaussianMapper(object):
                     )
             print("Mapping refinement finished")
             
-            self.gaussians.save_ply(f"{self.setup.mesh_path}/final.ply")
+            self.gaussians.save_ply(f"{self.slam.output}/mesh/final.ply")
             print("Mesh saved")
 
             if self.setup.save_renders:
                 for cam in self.cameras:
-                    self.save_render(cam, f"{self.setup.render_path}/final/{cam.uid}.png")
+                    self.save_render(cam, f"{self.slam.output}/renders/final/{cam.uid}.png")
 
 
             fig, ax = plt.subplots()
@@ -447,7 +446,7 @@ class GaussianMapper(object):
             ax.set_yscale("log")
             ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.setup.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
             ax.plot(self.loss_list[-self.setup.refinement_iters:])
-            plt.savefig(f"{self.setup.render_path}/loss_{self.mode}.png")
+            plt.savefig(f"{self.output}/loss_{self.mode}.png")
             plt.show()
 
 

@@ -174,12 +174,10 @@ Training:
 
 Setup:
   warmup: 0 # Wait until tracking gets to this frame
-  mapping_iters: 20 # At each new frame, 10 views
+  mapping_iters: 10 # At each new frame, 10 views
   refinement_iters: 100 # Once at the end, all views
   use_gui: True
   optimize_poses: False
-  update_frames: True
-  filter_depth: True
+  update_frames: False
+  filter_depth: False
   save_renders: True
-  render_path: "/home/leon/results/monogs/renders"
-  mesh_path: "/home/leon/results/monogs/meshes"

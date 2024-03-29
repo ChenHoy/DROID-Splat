@@ -107,8 +107,11 @@ class SLAM:
             self.output = cfg["data"]["output"]
         else:
             self.output = args.output
-        os.makedirs(self.output, exist_ok=True)
+        #os.makedirs(self.output, exist_ok=True)
         os.makedirs(f"{self.output}/logs/", exist_ok=True)
+        #os.makedirs(f"{self.output}/renders/", exist_ok=True)
+        os.makedirs(f"{self.output}/renders/mapping/", exist_ok=True)
+        os.makedirs(f"{self.output}/renders/final", exist_ok=True)
 
         self.update_cam(cfg)
         self.load_bound(cfg)
