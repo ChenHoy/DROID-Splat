@@ -32,8 +32,7 @@ ii) We optimize disparities, scale and shift parameters for given fixed poses in
 
 NOTE The prior objective is quite robust, but will still result in artifacts. Interestingly 
 these will be occluded, i.e. the objective optimizes a consistent visible scene which matches 
-the predicted optical flow. This is mostly stable when having scale vary between [0.1, 2.0] and some shifts. 
-Values above/below that result in large drifts when used naively.
+the predicted optical flow. 
 
 NOTE PyTorch 2.1.2 and Python3.11 somehow results in float16 output of matmul 
 of two float32 inputs! :/
@@ -150,7 +149,7 @@ def bundle_adjustment(
     structure_only: bool = False,
     motion_only: bool = False,
     scale_prior: bool = False,
-    alpha: float = 1.0,
+    alpha: float = 0.1,
 ) -> None:
     """Wrapper function around different bundle adjustment methods."""
 
@@ -189,9 +188,9 @@ def bundle_adjustment(
         disps.clamp(min=0.001)  # Disparities should never be negative
     ####
 
-    # Update data structure
+    # Update data structure & remove the batch dimension again
     poses = Gs.data[0]
-    disps = disps[0]  # Remove the batch dimension again
+    disps = disps[0]  
     if scale_prior:
         scales = scales[0]
         shifts = shifts[0]
