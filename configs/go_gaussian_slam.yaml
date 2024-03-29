@@ -1,6 +1,6 @@
 sync_method: strict
 verbose: True
-dataset: "folder"
+dataset: "replica"
 mode: "mono"  # 'mono', 'stereo', 'rgbd'
 stride: 2
 only_tracking: False
@@ -41,56 +41,6 @@ mapping:
     variance_network:
       init_val: 0.2
       scale_factor: 10.0
-
-  # Spaltam mapping settings
-  map_every: 1
-  keyframe_every: 5
-  scene_radius_depth_ratio: 3 # Max First Frame Depth to Scene Radius Ratio (For Pruning/Densification)
-  mean_sq_dist_method: "projective" # ["projective", "knn"] (Type of Mean Squared Distance Calculation for Scale of Gaussians)
-  gaussian_distribution: "isotropic" # ["isotropic", "anisotropic"] (Isotropic -> Spherical Covariance, Anisotropic -> Ellipsoidal Covariance)
-    
-  num_iters: 60 # Number of Mapping Iterations
-  add_new_gaussians: True
-  sil_thres: 0.5 # For Addition of new Gaussians
-  use_l1: True
-  use_sil_for_loss: False
-  ignore_outlier_depth_loss: False
-  loss_weights:
-    im: 0.5
-    depth: 1.0
-           
-  lrs:
-    means3D: 0.0001
-    rgb_colors: 0.0025
-    unnorm_rotations: 0.001
-    logit_opacities: 0.05
-    log_scales: 0.001
-    cam_unnorm_rots: 0.0004
-    cam_trans: 0.002
-
-        
-  prune_gaussians: True # Prune Gaussians during Mapping
-  pruning_dict: # Needs to be updated based on the number of mapping iterations
-    start_after: 0
-    remove_big_after: 0
-    stop_after: 40
-    prune_every: 20
-    removal_opacity_threshold: 0.005
-    final_removal_opacity_threshold: 0.005
-    reset_opacities: False
-    reset_opacities_every: 500 # Doesn't consider iter 0
-
-  use_gaussian_splatting_densification: False # Use Gaussian Splatting-based Densification during Mapping
-  densify_dict: # Needs to be updated based on the number of mapping iterations
-    start_after: 500
-    remove_big_after: 3000
-    stop_after: 5000
-    densify_every: 100
-    grad_thresh: 0.0002
-    num_to_split_into: 2
-    removal_opacity_threshold: 0.005
-    final_removal_opacity_threshold: 0.005
-    reset_opacities_every: 3000 # Doesn't consider iter 0
 
 
 tracking:
@@ -202,28 +152,14 @@ Dataset:
   adaptive_pointsize: True
   point_size: 0.05
   type: 'replica'
-  Calibration:
-    fx: 600.0
-    fy: 600.0
-    cx: 599.5
-    cy: 339.5
-    k1: 0.0
-    k2: 0.0
-    p1: 0.0
-    p2: 0.0
-    k3: 0.0
-    width: 1200
-    height: 680
-    depth_scale: 6553.5
-    distorted: False
 
 
 Training:
   prune_every: 10
   rgb_boundary_threshold: 0.01
-
+  alpha: 0.95
   gaussian_th: 0.005
-  gaussian_extent: 30
+  gaussian_extent: 10
   size_threshold: 20
   refinement:
     gaussian_th: 0.3
@@ -231,6 +167,19 @@ Training:
     size_threshold: 20
 
 
-  lr:
+  lr: # Pose lr for mapping
     cam_rot_delta: 0.0003
     cam_trans_delta: 0.0001
+
+
+Setup:
+  warmup: 0 # Wait until tracking gets to this frame
+  mapping_iters: 20 # At each new frame, 10 views
+  refinement_iters: 100 # Once at the end, all views
+  use_gui: True
+  optimize_poses: False
+  update_frames: True
+  filter_depth: True
+  save_renders: True
+  render_path: ""
+  mesh_path: ""
