@@ -27,6 +27,8 @@ class FactorGraph:
         self.corr_impl = corr_impl
         self.upsample = upsample
 
+        self.scale_priors = self.video.optimize_scales
+
         # operator at 1/8 resolution
         ht = video.ht // 8
         wd = video.wd // 8
@@ -50,12 +52,8 @@ class FactorGraph:
         self.ii_bad = torch.tensor([], dtype=torch.long, device=device)
         self.jj_bad = torch.tensor([], dtype=torch.long, device=device)
 
-        self.target_inac = torch.zeros(
-            [1, 0, ht, wd, 2], device=device, dtype=torch.float
-        )
-        self.weight_inac = torch.zeros(
-            [1, 0, ht, wd, 2], device=device, dtype=torch.float
-        )
+        self.target_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
+        self.weight_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
 
     def __filter_repeated_edges(self, ii, jj):
         keep = torch.zeros(ii.shape[0], dtype=torch.bool, device=ii.device)
@@ -120,9 +118,7 @@ class FactorGraph:
             and self.corr is not None
             and remove
         ):
-            ix = torch.arange(len(self.age))[
-                torch.argsort(self.age, descending=False).cpu()
-            ]
+            ix = torch.arange(len(self.age))[torch.argsort(self.age, descending=False).cpu()]
             self.rm_factors(ix >= self.max_factors - ii.shape[0], store=True)
 
         net = self.video.nets[ii].to(self.device).unsqueeze(dim=0)
@@ -130,18 +126,12 @@ class FactorGraph:
         # correlation volume for new edges
         if self.corr_impl == "volume":
             c = (ii == jj).long()
-            fmap1 = (
-                self.video.fmaps[ii, 0].to(self.device).unsqueeze(dim=0)
-            )  # [1, num, channel, height, width]
+            fmap1 = self.video.fmaps[ii, 0].to(self.device).unsqueeze(dim=0)  # [1, num, channel, height, width]
             fmap2 = self.video.fmaps[jj, c].to(self.device).unsqueeze(dim=0)
-            corr = CorrBlock(
-                fmap1, fmap2
-            )  # corr pyramid [num, h, w, h//{1,2,4,8}, w//{1,2,4,8}]
+            corr = CorrBlock(fmap1, fmap2)  # corr pyramid [num, h, w, h//{1,2,4,8}, w//{1,2,4,8}]
             self.corr = corr if self.corr is None else self.corr.cat(corr)
 
-            inp = (
-                self.video.inps[ii].to(self.device).unsqueeze(dim=0)
-            )  # [1, num, channel, height, width]
+            inp = self.video.inps[ii].to(self.device).unsqueeze(dim=0)  # [1, num, channel, height, width]
             self.inp = inp if self.inp is None else torch.cat([self.inp, inp], dim=1)
 
         with torch.cuda.amp.autocast(enabled=False):
@@ -166,12 +156,8 @@ class FactorGraph:
         if store:
             self.ii_inac = torch.cat([self.ii_inac, self.ii[mask]], dim=0)
             self.jj_inac = torch.cat([self.jj_inac, self.jj[mask]], dim=0)
-            self.target_inac = torch.cat(
-                [self.target_inac, self.target[:, mask]], dim=1
-            )
-            self.weight_inac = torch.cat(
-                [self.weight_inac, self.weight[:, mask]], dim=1
-            )
+            self.target_inac = torch.cat([self.target_inac, self.target[:, mask]], dim=1)
+            self.weight_inac = torch.cat([self.weight_inac, self.weight[:, mask]], dim=1)
 
         self.ii = self.ii[~mask]
         self.jj = self.jj[~mask]
@@ -243,9 +229,7 @@ class FactorGraph:
 
         self.add_factors(ii[keep], jj[keep])
 
-    def add_proximity_factors(
-        self, t0=0, t1=0, rad=2, nms=2, beta=0.25, thresh=16.0, remove=False, max_t=None
-    ):
+    def add_proximity_factors(self, t0=0, t1=0, rad=2, nms=2, beta=0.25, thresh=16.0, remove=False, max_t=None):
         """add edges to the factor graph based on distance"""
 
         t = max_t if max_t is not None else self.video.counter.value
@@ -341,9 +325,7 @@ class FactorGraph:
     ):
         if t_start_loop is None:
             t_start_loop = t_start
-        assert (
-            t_start_loop >= t_start
-        ), "Loop start cannot be smaller than lower window bound!"
+        assert t_start_loop >= t_start, "Loop start cannot be smaller than lower window bound!"
 
         ilen = t_end - t_start_loop
         jlen = t_end - t_start
@@ -439,7 +421,16 @@ class FactorGraph:
         return edge_num
 
     @torch.cuda.amp.autocast(enabled=True)
-    def update(self, t0=None, t1=None, iters=2, use_inactive=False, motion_only=False):
+    def update(
+        self,
+        t0=None,
+        t1=None,
+        iters=2,
+        use_inactive=False,
+        lm=1e-4,
+        ep=0.1,
+        motion_only=False,
+    ):
         """run update operator on factor graph"""
 
         # motion features
@@ -452,9 +443,7 @@ class FactorGraph:
         # correlation features
         corr = self.corr(coords1)
 
-        self.net, delta, weight, damping, upmask = self.update_op(
-            self.net, self.inp, corr, motion, self.ii, self.jj
-        )
+        self.net, delta, weight, damping, upmask = self.update_op(self.net, self.inp, corr, motion, self.ii, self.jj)
 
         if t0 is None:  # the first keyframe (i.e., 0) should be fixed
             t0 = max(1, self.ii.min().item() + 1)
@@ -480,28 +469,24 @@ class FactorGraph:
                 ii, jj, target, weight = self.ii, self.jj, self.target, self.weight
 
             damping_index = torch.arange(t0, t1).long().to(ii.device)
-            damping_index = torch.unique(
-                torch.cat([damping_index, ii], dim=0), sorted=True
-            )
+            damping_index = torch.unique(torch.cat([damping_index, ii], dim=0), sorted=True)
             damping = 0.2 * self.damping[damping_index].contiguous() + EPS
 
             target = target.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
             weight = weight.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
 
-            self.video.ba(
-                target,
-                weight,
-                damping,
-                ii,
-                jj,
-                t0=t0,
-                t1=t1,
-                iters=iters,
-                lm=1e-4,
-                ep=0.1,
-                motion_only=motion_only,
-                ba_type=None,
-            )
+            if motion_only:
+                self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, True)
+            else:
+                if self.scale_priors:
+                    # Use pure Python BA implementation with scale correction for priors
+                    # (This makes it possible to work with monocular depth prediction priors)
+                    self.video.ba_prior(target, weight, damping, ii, jj, t0=t0, t1=t1, iters=iters, lm=lm, ep=ep)
+                    # After optimizing the prior, we need to update the disps_sens and reset the scales
+                    # only then can we use global BA and intrinsics optimization with the CUDA kernel later
+                    self.video.reset_prior()
+                else:
+                    self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False)
 
             if self.upsample:
                 self.video.upsample(torch.unique(self.ii, sorted=True), upmask)
@@ -516,6 +501,8 @@ class FactorGraph:
         iters=2,
         steps=8,
         max_t=None,
+        lm: float = 1e-5,
+        ep: float = 1e-2,
         ba_type="dense",
         motion_only=False,
     ):
@@ -526,12 +513,9 @@ class FactorGraph:
         t = max_t if max_t is not None else cur_t
 
         sel_index = torch.arange(0, cur_t + 2)
-        num, rig, ch, ht, wd = self.video.fmaps[
-            sel_index
-        ].shape  # rig = 1(mono); 2(stereo)
-        corr_op = AltCorrBlock(
-            self.video.fmaps[sel_index].view(1, num * rig, ch, ht, wd)
-        )
+        # rig = 1(mono); 2(stereo)
+        num, rig, ch, ht, wd = self.video.fmaps[sel_index].shape
+        corr_op = AltCorrBlock(self.video.fmaps[sel_index].view(1, num * rig, ch, ht, wd))
 
         if t0 is None:  # the first keyframe (i.e., 0) should be fixed
             t0 = max(1, self.ii.min().item() + 1)
@@ -543,12 +527,10 @@ class FactorGraph:
             with torch.cuda.amp.autocast(enabled=False):
                 # [batch, N, h, w, 2]
                 coords1, mask = self.video.reproject(self.ii, self.jj)
-                motion = torch.cat(
-                    [coords1 - self.coords0, self.target - coords1], dim=-1
-                )
+                motion = torch.cat([coords1 - self.coords0, self.target - coords1], dim=-1)
                 motion = motion.permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
 
-            s = 13
+            s = 13  # This is 8 in original DROID-SLAM implementation
             for i in range(self.ii.min(), self.ii.max() + 1, s):
                 v = (self.ii >= i) & (self.ii < i + s)
                 if v.sum() < 1:
@@ -559,19 +541,12 @@ class FactorGraph:
 
                 # for stereo case, i.e., rig=2, each video.fmaps contain both left and right feature maps
                 # edge ii == jj means stereo pair, corr1: [B, N, (2r+1)^2 * num_levels, H, W]
-                corr1 = corr_op(
-                    coords1[:, v], rig * iis, rig * jjs + (iis == jjs).long()
-                )
+                corr1 = corr_op(coords1[:, v], rig * iis, rig * jjs + (iis == jjs).long())
 
                 with torch.cuda.amp.autocast(enabled=True):
                     # [B, N, C, H, W], [B, N, H, W, 2],[B, N, H, W, 2], [B, s, H, W], [B, s, 8*9*9, H, W]
                     net, delta, weight, damping, upmask = self.update_op(
-                        self.net[:, v],
-                        self.video.inps[None, iis],
-                        corr1,
-                        motion[:, v],
-                        iis,
-                        jjs,
+                        self.net[:, v], self.video.inps[None, iis], corr1, motion[:, v], iis, jjs
                     )
 
                     if self.upsample:
@@ -583,9 +558,7 @@ class FactorGraph:
                 self.damping[torch.unique(iis, sorted=True)] = damping
 
             damping_index = torch.arange(t0, t1).long().to(self.ii.device)
-            damping_index = torch.unique(
-                torch.cat([damping_index, self.ii], dim=0), sorted=True
-            )
+            damping_index = torch.unique(torch.cat([damping_index, self.ii], dim=0), sorted=True)
             damping = 0.2 * self.damping[damping_index].contiguous() + EPS
 
             target = self.target.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
@@ -593,36 +566,9 @@ class FactorGraph:
 
             # dense bundle adjustment, fix the first keyframe, while optimize within [1, t]
             # NOTE we need to pass the ba_type here to lock the threads correctly
-            if ba_type == "loop":
-                self.video.ba(
-                    target,
-                    weight,
-                    damping,
-                    self.ii,
-                    self.jj,
-                    t0=t0,
-                    t1=t1,
-                    iters=iters,
-                    lm=1e-4,
-                    ep=1e-1,
-                    motion_only=motion_only,
-                    ba_type=ba_type,
-                )
-            else:
-                self.video.ba(
-                    target,
-                    weight,
-                    damping,
-                    self.ii,
-                    self.jj,
-                    t0=t0,
-                    t1=t1,
-                    iters=iters,
-                    lm=1e-5,
-                    ep=1e-2,
-                    motion_only=motion_only,
-                    ba_type=ba_type,
-                )
+            self.video.ba(
+                target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep, motion_only, ba_type=ba_type
+            )
 
             # for visualization
             self.video.dirty[:t] = True
@@ -630,6 +576,4 @@ class FactorGraph:
     @torch.cuda.amp.autocast(enabled=True)
     def update_fast(self, t0=None, t1=None, iters=2, steps=8, motion_only=False):
         """run update operator on factor graph similar to dense lowmemory, but without using the AltCorr kernel"""
-        raise NotImplementedError(
-            "This function is implemented in GO-SLAM, but never used!"
-        )
+        raise NotImplementedError("This function is implemented in GO-SLAM, but never used!")

@@ -197,6 +197,8 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
     - [ ] Rendering loss, can we achieve similar results like the paper?
 - [ ] Test / Evaluate code on monocular scenes with GSplatting Mapping
 - [ ] How well does our new mapping work on unbounded / outdoor scenes?
+  - [ ] Kitti for driving
+  - [ ] TartanAir for drone like odometries
   
 # Potential Future Features
 - [ ] Change the Gaussian Splatting formulation to a variant like [Dynamic Gaussian Splatting](https://github.com/JonathonLuiten/Dynamic3DGaussians)

@@ -5,15 +5,7 @@ import torch
 from einops import rearrange, einsum, reduce
 from torch_scatter import scatter_sum
 
-from .chol import (
-    schur_solve,
-    schur_block_solve,
-    cholesky_block_solve,
-    CholeskySolver,
-    LUSolver,
-    show_matrix,
-    block_show,
-)
+from .chol import schur_solve, schur_block_solve, CholeskySolver, LUSolver, show_matrix
 from .projective_ops import projective_transform
 from lietorch import SE3
 import lietorch
@@ -549,6 +541,7 @@ def get_regularizor_jacobians(disps_sens, bs, n, ht, wd):
 # NOTE this is unstable and does not seem to work properly
 # this might be because of a bug or because there is an ambiguity between poses and scales
 # the same system works if we fix the poses, so I think this rules out a potential implementation bug
+# TODO extend with kx_exp similar to CUDA kernel here and BA_prior_nomotion
 def BA_prior(
     target: torch.Tensor,
     weight: torch.Tensor,
@@ -611,6 +604,7 @@ def BA_prior(
 
     # Residuals for r2(disps, s, o) (B, N, HW)
     scaled_prior = disps_sens[:, kx].view(bs, -1, ht * wd) * scales[:, kx, None] + shifts[:, kx, None]
+    # scaled_prior = scaled_prior.clamp(min=0.001)  # Prior should never be negative, i.e. clip this if s and o are diverging
     r2 = (disps[:, kx].view(bs, -1, ht * wd) - scaled_prior).double()
     w = w - alpha * r2
     w = rearrange(w, "b n hw -> b (n hw) 1 1")
@@ -706,17 +700,19 @@ def BA_prior_no_motion(
     w_exp[:, non_empty_nodes] = w
 
     eta = rearrange(eta, "n h w -> 1 n (h w)")
+    # C = C + alpha * 1.0 + eta
+    # C = rearrange(C, "b n hw -> b (n hw) 1 1")
     C_exp = C_exp + alpha * 1.0 + eta
     C_exp = rearrange(C_exp, "b n hw -> b (n hw) 1 1")
 
     scaled_prior = disps_sens[:, kx_exp].view(bs, -1, ht * wd) * scales[:, kx_exp, None] + shifts[:, kx_exp, None]
+    # scaled_prior = scaled_prior.clamp(min=0.001)  # Prior should never be negative, i.e. clip this if s and o are diverging
     r2 = (disps[:, kx_exp].view(bs, -1, ht * wd) - scaled_prior).double()
     w_exp[:, non_empty_nodes] = w_exp[:, non_empty_nodes] - alpha * r2[:, non_empty_nodes]
     w_exp = rearrange(w_exp, "b n hw -> b (n hw) 1 1")
 
     ### 3: Create augmented system
     Js_exp, Jo_exp = get_regularizor_jacobians(disps_sens[:, kx_exp], bs, n_exp, ht, wd)
-    # Dont update empty nodes
     if empty_nodes > 0:
         Js_exp[:, :, ~non_empty_nodes] = torch.zeros(
             (bs, n_exp * ht * wd, empty_nodes), device=Js_exp.device, dtype=torch.float64
@@ -734,9 +730,7 @@ def BA_prior_no_motion(
     v = torch.cat([vs, vo], dim=1)
 
     ### 4: Solve whole system with dX, ds, do, dZ ###
-    dso, dz, chol_success = schur_solve(H, E, C_exp, v, w_exp, ep=ep, lm=lm, return_state=True)
-    if not chol_success:
-        ipdb.set_trace()
+    dso, dz = schur_solve(H, E, C_exp, v, w_exp, ep=ep, lm=lm)
     ds, do = dso[:, :n_exp], dso[:, n_exp:]
     dz = rearrange(dz, "b (n h w) -> b n h w", n=n_exp, h=ht, w=wd)
 

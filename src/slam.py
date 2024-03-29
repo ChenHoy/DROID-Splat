@@ -222,7 +222,7 @@ class SLAM:
         while self.all_trigered < self.num_running_thread:
             pass
         for timestamp, image, depth, intrinsic, gt_pose in tqdm(stream):
-            if self.mode != "rgbd":
+            if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
             input_queue.put(image)
@@ -238,6 +238,12 @@ class SLAM:
 
         self.tracking_finished += 1
         print("Tracking Done!")
+
+    # We need some signal that the rendering works
+    # i) Use mp.Queue from rendering/mapping to visualization/show_stream
+    # ii) Render the key frame image from the Gaussians and send this into the queue
+    # iii) In visu thread: Take renderings and output them
+    # Nerfstudio has like a 3D volume with the colors that you can fly through
 
     def optimizing(self, rank, dont_run=False):
         print("Full Bundle Adjustment Triggered!")
@@ -309,17 +315,22 @@ class SLAM:
         self.all_trigered += 1
         while self.tracking_finished < 1 or self.optimizing_finished < 1:
             if not input_queue.empty():
-                rgb = input_queue.get()
-                depth = input_queue.get()
+                try:
+                    rgb = input_queue.get()
+                    depth = input_queue.get()
 
-                rgb_image = rgb[0, [2, 1, 0], ...].permute(1, 2, 0).clone().cpu()
-                cv2.imshow("RGB", rgb_image.numpy())
-                if self.mode == "rgbd" and depth is not None:
-                    # Create normalized depth map with intensity plot
-                    depth_image = depth2rgb(depth.clone().cpu())[0]
-                    # Convert to BGR for cv2
-                    cv2.imshow("depth", depth_image[..., ::-1])
-                cv2.waitKey(1)
+                    rgb_image = rgb[0, [2, 1, 0], ...].permute(1, 2, 0).clone().cpu()
+                    cv2.imshow("RGB", rgb_image.numpy())
+                    if self.mode in ["rgbd", "prgbd"] and depth is not None:
+                        # Create normalized depth map with intensity plot
+                        depth_image = depth2rgb(depth.clone().cpu())[0]
+                        # Convert to BGR for cv2
+                        cv2.imshow("depth", depth_image[..., ::-1])
+                    cv2.waitKey(1)
+                except Exception as e:
+                    print(e)
+                    print("Continuing...")
+                    pass
 
     def terminate(self, rank, stream=None):
         """fill poses for non-keyframe images and evaluate"""
@@ -420,12 +431,13 @@ class SLAM:
         print("Terminate: Done!")
 
     def run(self, stream):
+        # TODO why exactly does our open3d visualization look so unclean compared to the droidcalib one?
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
             mp.Process(target=self.optimizing, args=(2, False)),
-            mp.Process(target=self.multiview_filtering, args=(3, True)),
+            mp.Process(target=self.multiview_filtering, args=(3, False)),
             mp.Process(target=self.visualizing, args=(4, False)),
             #### These are for visual quality only and generating a map of indoor rooms afterwards
             mp.Process(target=self.mapping, args=(5, True)),
@@ -436,5 +448,6 @@ class SLAM:
         for p in processes:
             p.start()
 
+        # This will not be hit until all threads are finished
         for p in processes:
             p.join()

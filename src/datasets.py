@@ -72,9 +72,7 @@ class BaseDataset(Dataset):
         self.H_out, self.W_out = int(cfg["cam"]["H_out"]), int(cfg["cam"]["W_out"])
         self.H_edge, self.W_edge = int(cfg["cam"]["H_edge"]), int(cfg["cam"]["W_edge"])
 
-        self.distortion = (
-            np.array(cfg["cam"]["distortion"]) if "distortion" in cfg["cam"] else None
-        )
+        self.distortion = np.array(cfg["cam"]["distortion"]) if "distortion" in cfg["cam"] else None
 
         if args.input_folder is None:
             self.input_folder = cfg["data"]["input_folder"]
@@ -89,12 +87,15 @@ class BaseDataset(Dataset):
             return None
         depth_path = self.depth_paths[index]
         if ".png" in depth_path:
-            depth_data = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+            depth_data = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32)
+            depth_data /= self.png_depth_scale
         elif ".exr" in depth_path:
-            depth_data = readEXR_onlydepth(depth_path)
+            depth_data = readEXR_onlydepth(depth_path).astype(np.float32)
+            depth_data /= self.png_depth_scale
+        elif ".npy" in depth_path:
+            depth_data = np.load(depth_path).astype(np.float32)
         else:
             raise TypeError(depth_path)
-        depth_data = depth_data.astype(np.float32) / self.png_depth_scale
 
         return depth_data
 
@@ -115,17 +116,14 @@ class BaseDataset(Dataset):
 
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
         color_data = (
-            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :]
-            / 255.0
+            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
         )  # bgr -> rgb, [0, 1]
         color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
 
         depth_data = self.depthloader(index)
         if depth_data is not None:
             depth_data = torch.from_numpy(depth_data).float()
-            depth_data = F.interpolate(depth_data[None, None], outsize, mode="nearest")[
-                0, 0
-            ]
+            depth_data = F.interpolate(depth_data[None, None], outsize, mode="nearest")[0, 0]
 
         intrinsic = torch.as_tensor([self.fx, self.fy, self.cx, self.cy]).float()
         intrinsic[0] *= W_out_with_edge / self.W
@@ -161,13 +159,22 @@ class ImageFolder(BaseDataset):
         super(ImageFolder, self).__init__(cfg, args, device)
         stride = cfg["stride"]
         # Get either jpg or png files
-        input_images = os.path.join(self.input_folder, "*.jpg")
+        input_images = os.path.join(self.input_folder, "images", "*.jpg")
+        input_depths = os.path.join(self.input_folder, "depthany-vitl-indoor", "*.npy")
         self.color_paths = sorted(glob.glob(input_images))
+        self.depth_paths = sorted(glob.glob(input_depths))
+        # Look for alternative image extensions
         if len(self.color_paths) == 0:
-            input_images = os.path.join(self.input_folder, "*.png")
+            input_images = os.path.join(self.input_folder, "images", "*.png")
             self.color_paths = sorted(glob.glob(input_images))
 
-        # TODO create your own RGBD dataset based on monocular depth predictions from some model like ZoeDepth / Monodepth2 / MiDaS
+        if len(self.depth_paths) == 0:
+            self.depth_paths = None
+        else:
+            assert len(self.depth_paths) == len(
+                self.color_paths
+            ), "Number of depth maps does not match number of images"
+            self.depth_paths = self.depth_paths[::stride]
         self.color_paths = self.color_paths[::stride]
         self.n_img = len(self.color_paths)
 
@@ -178,14 +185,20 @@ class Replica(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(Replica, self).__init__(cfg, args, device)
         stride = cfg["stride"]
-        self.color_paths = sorted(
-            glob.glob(os.path.join(self.input_folder, "results/frame*.jpg"))
-        )
+        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/frame*.jpg")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
-        self.depth_paths = sorted(
-            glob.glob(os.path.join(self.input_folder, "results/depth*.png"))
-        )
+        # For Pseudo RGBD, we use monocular depth predictions in another folder
+        if cfg["mode"] == "prgbd":
+            self.depth_paths = sorted(
+                # glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
+                glob.glob(os.path.join(self.input_folder, "depthany-vitl-indoor/frame*.npy"))
+            )
+            assert (
+                len(self.depth_paths) == self.n_img
+            ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
+        else:
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/depth*.png")))
 
         self.color_paths = self.color_paths[::stride]
         self.depth_paths = self.depth_paths[::stride]
@@ -207,12 +220,11 @@ class Replica(BaseDataset):
 class Azure(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(Azure, self).__init__(cfg, args, device)
-        self.color_paths = sorted(
-            glob.glob(os.path.join(self.input_folder, "color", "*.jpg"))
-        )
-        self.depth_paths = sorted(
-            glob.glob(os.path.join(self.input_folder, "depth", "*.png"))
-        )
+        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "color", "*.jpg")))
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", "*.png")))
+        stride = cfg["stride"]
+        self.color_paths = self.color_paths[::stride]
+        self.depth_paths = self.depth_paths[::stride]
         self.load_poses(os.path.join(self.input_folder, "scene", "trajectory.log"))
         self.n_img = len(self.color_paths)
 
@@ -230,13 +242,7 @@ class Azure(BaseDataset):
                     fitness = data[2]
 
                     # format %f x 16
-                    c2w = np.array(
-                        list(
-                            map(
-                                float, ("".join(content[i + 1 : i + 5])).strip().split()
-                            )
-                        )
-                    ).reshape((4, 4))
+                    c2w = np.array(list(map(float, ("".join(content[i + 1 : i + 5])).strip().split()))).reshape((4, 4))
 
                     self.poses.append(c2w)
         else:
@@ -287,12 +293,11 @@ class CoFusion(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(CoFusion, self).__init__(cfg, args, device)
         self.input_folder = os.path.join(self.input_folder)
-        self.color_paths = sorted(
-            glob.glob(os.path.join(self.input_folder, "colour", "*.png"))
-        )
-        self.depth_paths = sorted(
-            glob.glob(os.path.join(self.input_folder, "depth_noise", "*.exr"))
-        )
+        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "colour", "*.png")))
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth_noise", "*.exr")))
+        stride = cfg["stride"]
+        self.color_paths = self.color_paths[::stride]
+        self.depth_paths = self.depth_paths[::stride]
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         self.load_poses(os.path.join(self.input_folder, "trajectories"))
@@ -311,9 +316,10 @@ class CoFusion(BaseDataset):
 class TUM_RGBD(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(TUM_RGBD, self).__init__(cfg, args, device)
-        self.color_paths, self.depth_paths, self.poses = self.loadtum(
-            self.input_folder, frame_rate=32
-        )
+        self.color_paths, self.depth_paths, self.poses = self.loadtum(self.input_folder, frame_rate=32)
+        stride = cfg["stride"]
+        self.color_paths = self.color_paths[::stride]
+        self.depth_paths = self.depth_paths[::stride]
         self.n_img = len(self.color_paths)
 
     def parse_list(self, filepath, skiprows=0):
@@ -334,9 +340,7 @@ class TUM_RGBD(BaseDataset):
                 j = np.argmin(np.abs(tstamp_depth - t))
                 k = np.argmin(np.abs(tstamp_pose - t))
 
-                if (np.abs(tstamp_depth[j] - t) < max_dt) and (
-                    np.abs(tstamp_pose[k] - t) < max_dt
-                ):
+                if (np.abs(tstamp_depth[j] - t) < max_dt) and (np.abs(tstamp_pose[k] - t) < max_dt):
                     associations.append((i, j, k))
 
         return associations
@@ -433,9 +437,7 @@ class ETH3D(BaseDataset):
                 j = np.argmin(np.abs(tstamp_depth - t))
                 k = np.argmin(np.abs(tstamp_pose - t))
 
-                if (np.abs(tstamp_depth[j] - t) < max_dt) and (
-                    np.abs(tstamp_pose[k] - t) < max_dt
-                ):
+                if (np.abs(tstamp_depth[j] - t) < max_dt) and (np.abs(tstamp_pose[k] - t) < max_dt):
                     associations.append((i, j, k))
 
         return associations
@@ -488,11 +490,7 @@ class ETH3D(BaseDataset):
             assert len(associations) == len(
                 tstamp_image
             ), "Not all images are loaded. While benchmark need all images' pose!"
-            print(
-                "\nDataset: no gt pose avaliable, {} images found\n".format(
-                    len(tstamp_image)
-                )
-            )
+            print("\nDataset: no gt pose avaliable, {} images found\n".format(len(tstamp_image)))
             for ix in range(len(associations)):
                 (i, j) = associations[ix]
                 images += [os.path.join(datapath, image_data[i, 1])]
@@ -516,18 +514,14 @@ class EuRoC(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(EuRoC, self).__init__(cfg, args, device)
         stride = cfg["stride"]
-        self.color_paths, self.right_color_paths, self.poses = self.loadtum(
-            self.input_folder, frame_rate=-1
-        )
+        self.color_paths, self.right_color_paths, self.poses = self.loadtum(self.input_folder, frame_rate=-1)
         self.color_paths = self.color_paths[::stride]
         self.right_color_paths = self.right_color_paths[::stride]
         self.poses = None if self.poses is None else self.poses[::stride]
 
         self.n_img = len(self.color_paths)
 
-        K_l = np.array(
-            [458.654, 0.0, 367.215, 0.0, 457.296, 248.375, 0.0, 0.0, 1.0]
-        ).reshape(3, 3)
+        K_l = np.array([458.654, 0.0, 367.215, 0.0, 457.296, 248.375, 0.0, 0.0, 1.0]).reshape(3, 3)
         d_l = np.array([-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05, 0.0])
         R_l = np.array(
             [
@@ -559,16 +553,10 @@ class EuRoC(BaseDataset):
                 0,
             ]
         ).reshape(3, 4)
-        map_l = cv2.initUndistortRectifyMap(
-            K_l, d_l, R_l, P_l[:3, :3], (752, 480), cv2.CV_32F
-        )
+        map_l = cv2.initUndistortRectifyMap(K_l, d_l, R_l, P_l[:3, :3], (752, 480), cv2.CV_32F)
 
-        K_r = np.array(
-            [457.587, 0.0, 379.999, 0.0, 456.134, 255.238, 0.0, 0.0, 1]
-        ).reshape(3, 3)
-        d_r = np.array(
-            [-0.28368365, 0.07451284, -0.00010473, -3.555907e-05, 0.0]
-        ).reshape(5)
+        K_r = np.array([457.587, 0.0, 379.999, 0.0, 456.134, 255.238, 0.0, 0.0, 1]).reshape(3, 3)
+        d_r = np.array([-0.28368365, 0.07451284, -0.00010473, -3.555907e-05, 0.0]).reshape(5)
         R_r = np.array(
             [
                 0.9999633526194376,
@@ -599,9 +587,7 @@ class EuRoC(BaseDataset):
                 0,
             ]
         ).reshape(3, 4)
-        map_r = cv2.initUndistortRectifyMap(
-            K_r, d_r, R_r, P_r[:3, :3], (752, 480), cv2.CV_32F
-        )
+        map_r = cv2.initUndistortRectifyMap(K_r, d_r, R_r, P_r[:3, :3], (752, 480), cv2.CV_32F)
 
         self.map_l = map_l
         self.map_r = map_r
@@ -637,22 +623,16 @@ class EuRoC(BaseDataset):
 
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
         color_data = (
-            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :]
-            / 255.0
+            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
         )  # bgr -> rgb, [0, 1]
         color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
 
         if self.stereo:
             right_color_path = self.right_color_paths[index]
             right_color_data = self.load_right_image(right_color_path)
-            right_color_data = cv2.resize(
-                right_color_data, (W_out_with_edge, H_out_with_edge)
-            )
+            right_color_data = cv2.resize(right_color_data, (W_out_with_edge, H_out_with_edge))
             right_color_data = (
-                torch.from_numpy(right_color_data)
-                .float()
-                .permute(2, 0, 1)[[2, 1, 0], :, :]
-                / 255.0
+                torch.from_numpy(right_color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
             )  # bgr -> rgb, [0, 1]
             right_color_data = right_color_data.unsqueeze(dim=0)  # [1, 3, h, w]
             color_data = torch.cat([color_data, right_color_data], dim=0)
@@ -705,9 +685,7 @@ class EuRoC(BaseDataset):
                 j = np.argmin(np.abs(tstamp_depth - t))
                 k = np.argmin(np.abs(tstamp_pose - t))
 
-                if (np.abs(tstamp_depth[j] - t) < max_dt) and (
-                    np.abs(tstamp_pose[k] - t) < max_dt
-                ):
+                if (np.abs(tstamp_depth[j] - t) < max_dt) and (np.abs(tstamp_pose[k] - t) < max_dt):
                     associations.append((i, j, k))
 
         return associations
@@ -719,9 +697,7 @@ class EuRoC(BaseDataset):
         if os.path.isfile(os.path.join(datapath, f"{scene_name}.txt")):
             pose_list = os.path.join(datapath, f"{scene_name}.txt")
         else:
-            raise ValueError(
-                f"EuRoC_DATA_ROOT/{scene_name}/{scene_name}.txt doesn't exist!"
-            )
+            raise ValueError(f"EuRoC_DATA_ROOT/{scene_name}/{scene_name}.txt doesn't exist!")
 
         pose_data = self.parse_list(pose_list, skiprows=1)
         pose_vecs = pose_data[:, 1:].astype(np.float64)
