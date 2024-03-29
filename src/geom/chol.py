@@ -113,8 +113,6 @@ def block_matmul(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     return C
 
 
-# NOTE this function can be less stable than the non-block function
-# I am not sure if this is due to block_matmul, but it is how it is
 def cholesky_block_solve(H: torch.Tensor, b: torch.Tensor, ep: float = 0.1, lm: float = 1e-4) -> torch.Tensor:
     """solve normal equations for block structure matrices of shape (n1 n2 d1 d2)"""
     bs, n, _, d, _ = H.shape

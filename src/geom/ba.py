@@ -5,7 +5,15 @@ import torch
 from einops import rearrange, einsum, reduce
 from torch_scatter import scatter_sum
 
-from .chol import schur_solve, schur_block_solve, CholeskySolver, LUSolver, show_matrix
+from .chol import (
+    schur_solve,
+    schur_block_solve,
+    cholesky_block_solve,
+    CholeskySolver,
+    LUSolver,
+    show_matrix,
+    block_show,
+)
 from .projective_ops import projective_transform
 from lietorch import SE3
 import lietorch
@@ -32,7 +40,8 @@ ii) We optimize disparities, scale and shift parameters for given fixed poses in
 
 NOTE The prior objective is quite robust, but will still result in artifacts. Interestingly 
 these will be occluded, i.e. the objective optimizes a consistent visible scene which matches 
-the predicted optical flow. 
+the predicted optical flow. This is mostly stable when having scale vary between [0.1, 2.0] and some shifts. 
+Values above/below that result in large drifts when used naively.
 
 NOTE PyTorch 2.1.2 and Python3.11 somehow results in float16 output of matmul 
 of two float32 inputs! :/
@@ -149,7 +158,7 @@ def bundle_adjustment(
     structure_only: bool = False,
     motion_only: bool = False,
     scale_prior: bool = False,
-    alpha: float = 0.1,
+    alpha: float = 1.0,
 ) -> None:
     """Wrapper function around different bundle adjustment methods."""
 
@@ -188,9 +197,9 @@ def bundle_adjustment(
         disps.clamp(min=0.001)  # Disparities should never be negative
     ####
 
-    # Update data structure & remove the batch dimension again
+    # Update data structure
     poses = Gs.data[0]
-    disps = disps[0]  
+    disps = disps[0]  # Remove the batch dimension again
     if scale_prior:
         scales = scales[0]
         shifts = shifts[0]
@@ -403,9 +412,9 @@ def BA(
     # Always fix the first pose and then fix all poses outside of optimization window
     fixedp = max(t0, 1)
 
-    B, M, ht, wd = disps.shape  # M is a all cameras
+    bs, m, ht, wd = disps.shape  # M is a all cameras
     num_edges = ii.shape[0]  # Number of edges for relative pose constraints
-    D = poses.manifold_dim  # 6 for SE3, 7 for SIM3
+    d = poses.manifold_dim  # 6 for SE3, 7 for SIM3
 
     ### 1: compute jacobians and residuals ###
     coords, valid, (Ji, Jj, Jz) = projective_transform(poses, disps, intrinsics, ii, jj, jacobian=True)
@@ -416,36 +425,42 @@ def BA(
 
     # Construct larger sparse system
     kx, kk = torch.unique(ii, return_inverse=True)
-    N = len(kx)  # Actual unique key frame nodes to be updated
+    ts = torch.arange(t0, t1).long().to(ii.device)
+    kx_exp, kk_exp = torch.unique(torch.cat([ts, ii], dim=0), return_inverse=True)
+
+    n = len(kx)  # Actual unique key frame nodes to be updated
+    n_exp = len(kx_exp)  # Expand with [t0, t1] to include all nodes in interval even if they dont contribute
+    empty_nodes = n_exp - n
+    non_empty_nodes = torch.isin(kx_exp, kx)  # We can use this to filter eta
     # only optimize keyframe poses
-    M = M - fixedp
+    m = m - fixedp
     ii = ii // rig - fixedp
     jj = jj // rig - fixedp
 
-    H, E, C, v, w = scatter_pose_structure(Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk, ii, jj, kk, B, M, N, D)
+    H, E, C, v, w = scatter_pose_structure(Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk, ii, jj, kk, bs, m, n, d)
     eta = rearrange(eta, "n h w -> 1 n (h w)")
 
     if disps_sens is not None:
-        m = disps_sens[:, kx].view(B, -1, ht * wd) > 0
-        m = m.int()
+        has_sens = disps_sens[:, kx].view(bs, -1, ht * wd) > 0
+        has_sens = has_sens.int()
         # Add alpha only for where there is a prior, else only add normal damping
-        C = C + alpha * m + (1 - m) * eta + 1e-7
-        w = w - m * alpha * (disps[:, kx] - disps_sens[:, kx]).view(B, -1, ht * wd)
+        C = C + alpha * has_sens + (1 - has_sens) * eta[:, non_empty_nodes] + 1e-7
+        w = w - has_sens * alpha * (disps[:, kx] - disps_sens[:, kx]).view(bs, -1, ht * wd)
     else:
-        C = C + eta + 1e-7  # Apply damping
+        C = C + eta[:, non_empty_nodes] + 1e-7  # Apply damping
     C = rearrange(C, "b n hw -> b (n hw) 1 1")
     w = rearrange(w, "b n hw -> b (n hw) 1 1")
 
     ### 3: solve the system ###
     if structure_only:
         dz = schur_block_solve(H, E, C, v, w, ep=ep, lm=lm, structure_only=True)
-        dz = rearrange(dz, "b (n h w) 1 1 -> b n h w", n=N, h=ht, w=wd)
+        dz = rearrange(dz, "b (n h w) 1 1 -> b n h w", n=n, h=ht, w=wd)
         ### 4: apply retraction ###
         all_disps[:, :t1] = additive_retr(disps, dz, kx)
 
     else:
         dx, dz = schur_block_solve(H, E, C, v, w, ep=ep, lm=lm)
-        dz = rearrange(dz, "b (n h w) 1 1 -> b n h w", n=N, h=ht, w=wd)
+        dz = rearrange(dz, "b (n h w) 1 1 -> b n h w", n=n, h=ht, w=wd)
         ### 4: apply retraction ###
         # Update only un-fixed poses
         poses1, poses2 = poses[:, :fixedp], poses[:, fixedp:]
@@ -540,7 +555,6 @@ def get_regularizor_jacobians(disps_sens, bs, n, ht, wd):
 # NOTE this is unstable and does not seem to work properly
 # this might be because of a bug or because there is an ambiguity between poses and scales
 # the same system works if we fix the poses, so I think this rules out a potential implementation bug
-# TODO extend with kx_exp similar to CUDA kernel here and BA_prior_nomotion
 def BA_prior(
     target: torch.Tensor,
     weight: torch.Tensor,
@@ -584,8 +598,14 @@ def BA_prior(
 
     # Construct larger sparse system
     kx, kk = torch.unique(ii, return_inverse=True)
+    ts = torch.arange(t0, t1).long().to(ii.device)
+    kx_exp, kk_exp = torch.unique(torch.cat([ts, ii], dim=0), return_inverse=True)
+
     n = len(kx)  # Actual unique key frame nodes to be updated
-    # Always fix at least the first keyframe!
+    n_exp = len(kx_exp)  # Expand with [t0, t1] to include all nodes in interval even if they dont contribute
+    empty_nodes = n_exp - n
+    non_empty_nodes = torch.isin(kx_exp, kx)  # We can use this to filter eta
+    # only optimize keyframe poses
     m = m - fixedp
     ii = ii - fixedp
     jj = jj - fixedp
@@ -598,7 +618,7 @@ def BA_prior(
     # NOTE the original code for RGBD mode adds the derivative term +1*alpha ONLY when a prior exists
     # else it applies damping.
     # We apply both damping and the second term derivative to stay true to the objective function
-    C = C + alpha * 1.0 + eta
+    C = C + alpha * 1.0 + eta[:, non_empty_nodes]
     C = rearrange(C, "b n hw -> b (n hw) 1 1")
 
     # Residuals for r2(disps, s, o) (B, N, HW)
@@ -635,8 +655,6 @@ def BA_prior(
     all_shifts[:, :t1] = additive_retr(shifts, do.squeeze(-1), kx)
 
 
-# TODO add the overall indexing strategy to the other functions
-# this is required to use the same damping parameters as the CUDA kernel
 def BA_prior_no_motion(
     target: torch.Tensor,
     weight: torch.Tensor,
@@ -684,23 +702,20 @@ def BA_prior_no_motion(
     n = len(kx)  # Actual unique key frame nodes to be updated
     n_exp = len(kx_exp)  # Expand with [t0, t1] to include all nodes in interval even if they dont contribute
     empty_nodes = n_exp - n
-    # Always fix at least the first keyframe!
+    non_empty_nodes = torch.isin(kx_exp, kx)
+    # only optimize keyframe poses
     m = m - fixedp
     ii = ii - fixedp
     jj = jj - fixedp
 
     C = safe_scatter_add_vec(Ck, kk, n)
     w = safe_scatter_add_vec(wk, kk, n)
-
-    non_empty_nodes = torch.isin(kx_exp, kx)
     C_exp = torch.zeros((bs, n_exp, ht * wd), device=C.device, dtype=torch.float64)
     w_exp = torch.zeros((bs, n_exp, ht * wd), device=w.device, dtype=torch.float64)
     C_exp[:, non_empty_nodes] = C
     w_exp[:, non_empty_nodes] = w
 
     eta = rearrange(eta, "n h w -> 1 n (h w)")
-    # C = C + alpha * 1.0 + eta
-    # C = rearrange(C, "b n hw -> b (n hw) 1 1")
     C_exp = C_exp + alpha * 1.0 + eta
     C_exp = rearrange(C_exp, "b n hw -> b (n hw) 1 1")
 
