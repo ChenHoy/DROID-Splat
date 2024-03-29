@@ -73,8 +73,17 @@ class GaussianMapper(object):
         self.pipeline_params = munchify(config["pipeline_params"])
         self.training_params = munchify(config["Training"])
         self.setup = munchify(config["Setup"])
+
+        # Saving dirs
         self.setup.mesh_path = os.path.join(config["data"]["output"], "mesh")
         self.setup.render_path = os.path.join(config["data"]["output"], "render")
+        # Create needed paths if non-existent
+        if not os.path.exists(self.setup.mesh_path):
+            os.makedirs(self.setup.mesh_path)
+        if not os.path.exists(self.setup.render_path):
+            os.makedirs(self.setup.render_path)
+            os.makedirs(os.path.join(self.setup.render_path, "mapping"))
+            os.makedirs(os.path.join(self.setup.render_path, "final"))
 
         self.use_spherical_harmonics = False
         self.model_params.sh_degree = 3 if self.use_spherical_harmonics else 0
