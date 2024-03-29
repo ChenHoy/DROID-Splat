@@ -1,6 +1,6 @@
 sync_method: strict
 verbose: True
-dataset: "folder"
+dataset: "replica"
 mode: "mono"  # 'mono', 'stereo', 'rgbd'
 stride: 2
 only_tracking: False

@@ -24,9 +24,7 @@ def parse_args():
         default=-1,
         help="Only [0, max_frames] Frames will be run",
     )
-    parser.add_argument(
-        "--only_tracking", action="store_true", help="Only tracking is triggered"
-    )
+    parser.add_argument("--only_tracking", action="store_true", help="Only tracking is triggered")
     parser.add_argument(
         "--make_video",
         action="store_true",
@@ -42,6 +40,7 @@ def parse_args():
         type=str,
         help="output folder, this have higher priority, can overwrite the one in config file",
     )
+    parser.add_argument("--mode", type=str, help="slam mode: mono, rgbd or stereo")
     parser.add_argument(
         "--image_size",
         nargs="+",
@@ -49,16 +48,12 @@ def parse_args():
         help="image height and width, this have higher priority, can overwrite the one in config file",
     )
     parser.add_argument(
-<<<<<<< HEAD
         "--calibration_txt",
         type=str,
         default=None,
         help="calibration parameters: fx, fy, cx, cy, this have higher priority, can overwrite the one in config file",
     )
-    parser.add_argument("--mode", type=str, help="slam mode: mono, rgbd or stereo")
     parser.add_argument(
-=======
->>>>>>> 3ffc1b2e8b8d4f44ebdcd08ea9ae670cebc674ba
         "--opt_intr",
         action="store_true",
         help="optimize intrinsics in bundle adjustment as well",
@@ -70,18 +65,6 @@ def parse_args():
         choices=["pinhole", "mei"],
         help="camera model used for projection",
     )
-<<<<<<< HEAD
-=======
-    parser.add_argument(
-        "--calibration_txt",
-        type=str,
-        default=None,
-        help="calibration parameters: fx, fy, cx, cy, this have higher priority, can overwrite the one in config file",
-    )
-    parser.add_argument(
-        "--mode", type=str, help="slam mode: mono, prgbd, rgbd or stereo"
-    )
->>>>>>> 3ffc1b2e8b8d4f44ebdcd08ea9ae670cebc674ba
     return parser.parse_args()
 
 
@@ -132,15 +115,11 @@ def set_args(args, cfg):
     if args.image_size is not None:
         cfg["cam"]["H_out"], cfg["cam"]["W_out"] = args.image_size
     if args.calibration_txt is not None:
-        cfg["cam"]["fx"], cfg["cam"]["fy"], cfg["cam"]["cx"], cfg["cam"]["cy"] = (
-            np.loadtxt(args.calibration_txt).tolist()
-        )
+        cfg["cam"]["fx"], cfg["cam"]["fy"], cfg["cam"]["cx"], cfg["cam"]["cy"] = np.loadtxt(
+            args.calibration_txt
+        ).tolist()
 
-<<<<<<< HEAD
     assert cfg["mode"] in ["rgbd", "mono", "stereo"], cfg["mode"]
-=======
-    assert cfg["mode"] in ["rgbd", "prgbd", "mono", "stereo"], cfg["mode"]
->>>>>>> 3ffc1b2e8b8d4f44ebdcd08ea9ae670cebc674ba
     if args.output is None:
         output_dir = cfg["data"]["output"]
     else:
@@ -159,9 +138,7 @@ def typecheck_cfg(cfg):
         elif k in ints:
             cfg["cam"][k] = int(v)
         else:
-            raise ValueError(
-                f"Unknown type {type(k)} for '{k}'. This should be either float or int"
-            )
+            raise ValueError(f"Unknown type {type(k)} for '{k}'. This should be either float or int")
     return cfg
 
 
@@ -181,9 +158,7 @@ if __name__ == "__main__":
     ### Running SLAM
     dataset = get_dataset(cfg, args, device=args.device)
 
-    print(
-        f"\n\n** Running {cfg['data']['input_folder']} in {cfg['mode']} mode!!! **\n\n"
-    )
+    print(f"\n\n** Running {cfg['data']['input_folder']} in {cfg['mode']} mode!!! **\n\n")
 
     slam = SLAM(args, cfg)
     slam.run(dataset)
