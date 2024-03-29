@@ -207,7 +207,6 @@ class ImageFolder(BaseDataset):
 class Replica(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(Replica, self).__init__(cfg, args, device)
-        stride = cfg["stride"]
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/frame*.jpg")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
@@ -223,6 +222,7 @@ class Replica(BaseDataset):
         else:
             self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/depth*.png")))
 
+        stride = cfg["stride"]
         self.color_paths = self.color_paths[::stride]
         self.depth_paths = self.depth_paths[::stride]
         self.load_poses(os.path.join(self.input_folder, "traj.txt"))
@@ -302,6 +302,10 @@ class Azure(BaseDataset):
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "color", "*.jpg")))
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", "*.png")))
         self.load_poses(os.path.join(self.input_folder, "scene", "trajectory.log"))
+        stride = cfg["stride"]
+        self.color_paths = self.color_paths[::stride]
+        self.depth_paths = self.depth_paths[::stride]
+        self.poses = self.poses[::stride]
         self.n_img = len(self.color_paths)
 
     def load_poses(self, path):
@@ -371,9 +375,15 @@ class CoFusion(BaseDataset):
         self.input_folder = os.path.join(self.input_folder)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "colour", "*.png")))
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth_noise", "*.exr")))
+
+        stride = cfg["stride"]
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         self.load_poses(os.path.join(self.input_folder, "trajectories"))
+        self.color_paths = self.color_paths[::stride]
+        self.depth_paths = self.depth_paths[::stride]
+        self.poses = self.poses[::stride]
+        self.n_img = len(self.color_paths)
 
     def load_poses(self, path):
         # We tried, but cannot align the coordinate frame of cofusion to ours.
@@ -390,6 +400,10 @@ class TUM_RGBD(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(TUM_RGBD, self).__init__(cfg, args, device)
         self.color_paths, self.depth_paths, self.poses = self.loadtum(self.input_folder, frame_rate=32)
+        stride = cfg["stride"]
+        self.color_paths = self.color_paths[::stride]
+        self.depth_paths = self.depth_paths[::stride]
+        self.poses = self.poses[::stride]
         self.n_img = len(self.color_paths)
 
     def parse_list(self, filepath, skiprows=0):

@@ -21,9 +21,7 @@ from .motion_filter import MotionFilter
 from .multiview_filter import MultiviewFilter
 from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
-
-from .render import Renderer
-from .monogs_mapping import GaussianMapper as MonogsGaussianMapper
+from .gaussian_mapping import GaussianMapper
 
 
 class Tracker(nn.Module):
@@ -124,12 +122,8 @@ class SLAM:
         self.all_trigered.share_memory_()
         self.tracking_finished = torch.zeros((1)).int()
         self.tracking_finished.share_memory_()
-        self.mapping_finished = torch.zeros((1)).int()
-        self.mapping_finished.share_memory_()
         self.gaussian_mapping_finished = torch.zeros((1)).int()
         self.gaussian_mapping_finished.share_memory_()
-        self.meshing_finished = torch.zeros((1)).int()
-        self.meshing_finished.share_memory_()
         self.optimizing_finished = torch.zeros((1)).int()
         self.optimizing_finished.share_memory_()
         self.visualizing_finished = torch.zeros((1)).int()
@@ -140,7 +134,6 @@ class SLAM:
 
         self.reload_map = torch.zeros((1)).int()
         self.reload_map.share_memory_()
-        self.post_processing_iters = cfg["mapping"]["post_processing_iters"]
 
         # store images, depth, poses, intrinsics (shared between process)
         self.video = DepthVideo(cfg, args)
@@ -154,11 +147,10 @@ class SLAM:
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
 
         self.mapping_queue = mp.Queue()
-        self.gaussian_mapper = MonogsGaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
+        self.gaussian_mapper = GaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
-        self.visualization_queue = mp.Queue()
 
     def update_cam(self, cfg):
         """
@@ -204,7 +196,7 @@ class SLAM:
 
         self.net.load_state_dict(state_dict)
 
-    def tracking(self, rank, stream, input_queue=mp.Queue, mapping_queue=None):
+    def tracking(self, rank, stream, input_queue=mp.Queue):
         print("Tracking Triggered!")
         self.all_trigered += 1
         # Wait up for other threads to start
@@ -220,17 +212,11 @@ class SLAM:
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
-            # if mapping_queue is not None and (timestamp == 0 or (timestamp) % 10 == 0):
-            #     mapping_queue.put(frame)
-
-            # predict mesh every 50 frames for video making
             if timestamp % 50 == 0 and timestamp > 0 and self.make_video:
                 self.hang_on[:] = 1
             while self.hang_on > 0:
                 sleep(1.0)
 
-        # while not mapping_queue.empty():
-        #     sleep(1.0)
         self.tracking_finished += 1
         print("Tracking Done!")
 
@@ -315,7 +301,6 @@ class SLAM:
         os.makedirs(os.path.join(self.output, "checkpoints/"), exist_ok=True)
         torch.save(
             {
-                "mapping_net": self.mapping_net.state_dict(),
                 "tracking_net": self.net.state_dict(),
                 "keyframe_timestamps": self.video.timestamp,
             },
@@ -392,21 +377,13 @@ class SLAM:
                     fp.write(result.pretty_str())
                 trans_init = result.np_arrays["alignment_transformation_sim3"]
 
-            if self.meshing_finished > 0 and (not self.only_tracking):
-                self.mesher(
-                    the_end=True,
-                    estimate_c2w_list=estimate_c2w_list,
-                    gt_c2w_list=gt_c2w_list,
-                    trans_init=trans_init,
-                )
-
         print("Terminate: Done!")
 
     def run(self, stream):
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
-            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe, self.mapping_queue)),
+            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
             mp.Process(target=self.optimizing, args=(2, False)),
             mp.Process(target=self.multiview_filtering, args=(3, False)),
             mp.Process(target=self.visualizing, args=(4, True)),
