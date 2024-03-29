@@ -113,6 +113,7 @@ class GaussianMapper(object):
         )
         return self.camera_from_frame(idx, image, depth, intrinsic, gt_pose)
 
+    # TODO only take object here if dirty_index is set to see if this is a new updated frame
     def camera_from_video(self, idx: int):
         """
         Takes the frame data from the video and returns a Camera object.
@@ -219,11 +220,14 @@ class GaussianMapper(object):
         device = self.video.device
         poses = torch.index_select(self.video.poses, 0, dirty_index)
         disps = torch.index_select(self.video.disps_up, 0, dirty_index)
-        thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
+        # thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
+        thresh = 0.005
         intrinsics = self.video.intrinsics[0] * self.video.scale_factor
         count = droid_backends.depth_filter(poses, disps, intrinsics, dirty_index, thresh)
 
-        mask = ((count >= 1) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True)))[idx]
+        mask = (count >= 1) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
+        if len(mask) > 0:
+            mask = mask[idx]
 
         # print(f"Valid points:{mask.sum()}/{mask.numel()}")
 
