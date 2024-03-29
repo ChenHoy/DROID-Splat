@@ -4,15 +4,15 @@ import numpy as np
 import torch
 import torch.multiprocessing as mp
 
-from gaussian_splatting.gaussian_renderer import render
-from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
+from gaussian_renderer import render
+from utils.graphics_utils import getProjectionMatrix2, getWorld2View2
 from gui import gui_utils
-from utils.camera_utils import Camera
-from utils.eval_utils import eval_ate, save_gaussians
-from utils.logging_utils import Log
-from utils.multiprocessing_utils import clone_obj
-from utils.pose_utils import update_pose
-from utils.slam_utils import get_loss_tracking, get_median_depth
+from camera_utils import Camera
+from eval_utils import eval_ate, save_gaussians
+from logging_utils import Log
+from multiprocessing_utils import clone_obj
+from pose_utils import update_pose
+from slam_utils import get_loss_tracking, get_median_depth
 
 
 class FrontEnd(mp.Process):
@@ -77,24 +77,16 @@ class FrontEnd(mp.Process):
                         inv_depth > inv_median_depth + inv_std,
                         inv_depth < inv_median_depth - inv_std,
                     )
-                    invalid_depth_mask = torch.logical_or(
-                        invalid_depth_mask, ~valid_mask
-                    )
+                    invalid_depth_mask = torch.logical_or(invalid_depth_mask, ~valid_mask)
                     inv_depth[invalid_depth_mask] = inv_median_depth
-                    inv_initial_depth = inv_depth + torch.randn_like(
-                        inv_depth
-                    ) * torch.where(invalid_depth_mask, inv_std * 0.5, inv_std * 0.2)
+                    inv_initial_depth = inv_depth + torch.randn_like(inv_depth) * torch.where(
+                        invalid_depth_mask, inv_std * 0.5, inv_std * 0.2
+                    )
                     initial_depth = 1.0 / inv_initial_depth
                 else:
-                    median_depth, std, valid_mask = get_median_depth(
-                        depth, opacity, mask=valid_rgb, return_std=True
-                    )
-                    invalid_depth_mask = torch.logical_or(
-                        depth > median_depth + std, depth < median_depth - std
-                    )
-                    invalid_depth_mask = torch.logical_or(
-                        invalid_depth_mask, ~valid_mask
-                    )
+                    median_depth, std, valid_mask = get_median_depth(depth, opacity, mask=valid_rgb, return_std=True)
+                    invalid_depth_mask = torch.logical_or(depth > median_depth + std, depth < median_depth - std)
+                    invalid_depth_mask = torch.logical_or(invalid_depth_mask, ~valid_mask)
                     depth[invalid_depth_mask] = median_depth
                     initial_depth = depth + torch.randn_like(depth) * torch.where(
                         invalid_depth_mask, std * 0.5, std * 0.2
@@ -161,18 +153,14 @@ class FrontEnd(mp.Process):
 
         pose_optimizer = torch.optim.Adam(opt_params)
         for tracking_itr in range(self.tracking_itr_num):
-            render_pkg = render(
-                viewpoint, self.gaussians, self.pipeline_params, self.background
-            )
+            render_pkg = render(viewpoint, self.gaussians, self.pipeline_params, self.background)
             image, depth, opacity = (
                 render_pkg["render"],
                 render_pkg["depth"],
                 render_pkg["opacity"],
             )
             pose_optimizer.zero_grad()
-            loss_tracking = get_loss_tracking(
-                self.config, image, depth, opacity, viewpoint
-            )
+            loss_tracking = get_loss_tracking(self.config, image, depth, opacity, viewpoint)
             loss_tracking.backward()
 
             with torch.no_grad():
@@ -184,9 +172,11 @@ class FrontEnd(mp.Process):
                     gui_utils.GaussianPacket(
                         current_frame=viewpoint,
                         gtcolor=viewpoint.original_image,
-                        gtdepth=viewpoint.depth
-                        if not self.monocular
-                        else np.zeros((viewpoint.image_height, viewpoint.image_width)),
+                        gtdepth=(
+                            viewpoint.depth
+                            if not self.monocular
+                            else np.zeros((viewpoint.image_height, viewpoint.image_width))
+                        ),
                     )
                 )
             if converged:
@@ -215,18 +205,14 @@ class FrontEnd(mp.Process):
         dist_check = dist > kf_translation * self.median_depth
         dist_check2 = dist > kf_min_translation * self.median_depth
 
-        union = torch.logical_or(
-            cur_frame_visibility_filter, occ_aware_visibility[last_keyframe_idx]
-        ).count_nonzero()
+        union = torch.logical_or(cur_frame_visibility_filter, occ_aware_visibility[last_keyframe_idx]).count_nonzero()
         intersection = torch.logical_and(
             cur_frame_visibility_filter, occ_aware_visibility[last_keyframe_idx]
         ).count_nonzero()
         point_ratio_2 = intersection / union
         return (point_ratio_2 < kf_overlap and dist_check2) or dist_check
 
-    def add_to_window(
-        self, cur_frame_idx, cur_frame_visibility_filter, occ_aware_visibility, window
-    ):
+    def add_to_window(self, cur_frame_idx, cur_frame_visibility_filter, occ_aware_visibility, window):
         N_dont_touch = 2
         window = [cur_frame_idx] + window
         # remove frames which has little overlap with the current frame
@@ -236,19 +222,13 @@ class FrontEnd(mp.Process):
         for i in range(N_dont_touch, len(window)):
             kf_idx = window[i]
             # szymkiewicz–simpson coefficient
-            intersection = torch.logical_and(
-                cur_frame_visibility_filter, occ_aware_visibility[kf_idx]
-            ).count_nonzero()
+            intersection = torch.logical_and(cur_frame_visibility_filter, occ_aware_visibility[kf_idx]).count_nonzero()
             denom = min(
                 cur_frame_visibility_filter.count_nonzero(),
                 occ_aware_visibility[kf_idx].count_nonzero(),
             )
             point_ratio_2 = intersection / denom
-            cut_off = (
-                self.config["Training"]["kf_cutoff"]
-                if "kf_cutoff" in self.config["Training"]
-                else 0.4
-            )
+            cut_off = self.config["Training"]["kf_cutoff"] if "kf_cutoff" in self.config["Training"] else 0.4
             if not self.initialized:
                 cut_off = 0.4
             if point_ratio_2 <= cut_off:
@@ -354,9 +334,7 @@ class FrontEnd(mp.Process):
                             final=True,
                             monocular=self.monocular,
                         )
-                        save_gaussians(
-                            self.gaussians, self.save_dir, "final", final=True
-                        )
+                        save_gaussians(self.gaussians, self.save_dir, "final", final=True)
                     break
 
                 if self.requested_init:
@@ -371,9 +349,7 @@ class FrontEnd(mp.Process):
                     time.sleep(0.01)
                     continue
 
-                viewpoint = Camera.init_from_dataset(
-                    self.dataset, cur_frame_idx, projection_matrix
-                )
+                viewpoint = Camera.init_from_dataset(self.dataset, cur_frame_idx, projection_matrix)
                 viewpoint.compute_grad_mask(self.config)
 
                 self.cameras[cur_frame_idx] = viewpoint
@@ -384,9 +360,7 @@ class FrontEnd(mp.Process):
                     cur_frame_idx += 1
                     continue
 
-                self.initialized = self.initialized or (
-                    len(self.current_window) == self.window_size
-                )
+                self.initialized = self.initialized or (len(self.current_window) == self.window_size)
 
                 # Tracking
                 render_pkg = self.tracking(cur_frame_idx, viewpoint)
@@ -426,10 +400,7 @@ class FrontEnd(mp.Process):
                         curr_visibility, self.occ_aware_visibility[last_keyframe_idx]
                     ).count_nonzero()
                     point_ratio = intersection / union
-                    create_kf = (
-                        check_time
-                        and point_ratio < self.config["Training"]["kf_overlap"]
-                    )
+                    create_kf = check_time and point_ratio < self.config["Training"]["kf_overlap"]
                 if self.single_thread:
                     create_kf = check_time and create_kf
                 if create_kf:
@@ -441,9 +412,7 @@ class FrontEnd(mp.Process):
                     )
                     if self.monocular and not self.initialized and removed is not None:
                         self.reset = True
-                        Log(
-                            "Keyframes lacks sufficient overlap to initialize the map, resetting."
-                        )
+                        Log("Keyframes lacks sufficient overlap to initialize the map, resetting.")
                         continue
                     depth_map = self.add_new_keyframe(
                         cur_frame_idx,
@@ -451,9 +420,7 @@ class FrontEnd(mp.Process):
                         opacity=render_pkg["opacity"],
                         init=False,
                     )
-                    self.request_keyframe(
-                        cur_frame_idx, viewpoint, self.current_window, depth_map
-                    )
+                    self.request_keyframe(cur_frame_idx, viewpoint, self.current_window, depth_map)
                 else:
                     self.cleanup(cur_frame_idx)
                 cur_frame_idx += 1

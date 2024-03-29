@@ -15,20 +15,18 @@ from matplotlib import pyplot as plt
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 import wandb
-from gaussian_splatting.gaussian_renderer import render
-from gaussian_splatting.utils.image_utils import psnr
-from gaussian_splatting.utils.loss_utils import ssim
-from gaussian_splatting.utils.system_utils import mkdir_p
-from utils.logging_utils import Log
+from .gaussian_renderer import render
+from .utils.image_utils import psnr
+from .utils.loss_utils import ssim
+from .utils.system_utils import mkdir_p
+from .logging_utils import Log
 
 
 def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ## Plot
     traj_ref = PosePath3D(poses_se3=poses_gt)
     traj_est = PosePath3D(poses_se3=poses_est)
-    traj_est_aligned = trajectory.align_trajectory(
-        traj_est, traj_ref, correct_scale=monocular
-    )
+    traj_est_aligned = trajectory.align_trajectory(traj_est, traj_ref, correct_scale=monocular)
 
     ## RMSE
     pose_relation = metrics.PoseRelation.translation_part
@@ -97,9 +95,7 @@ def eval_ate(frames, kf_ids, save_dir, iterations, final=False, monocular=False)
     mkdir_p(plot_dir)
 
     label_evo = "final" if final else "{:04}".format(iterations)
-    with open(
-        os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8"
-    ) as f:
+    with open(os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8") as f:
         json.dump(trj_data, f, indent=4)
 
     ate = evaluate_evo(
@@ -127,9 +123,7 @@ def eval_rendering(
     img_pred, img_gt, saved_frame_idx = [], [], []
     end_idx = len(frames) - 1 if iteration == "final" or "before_opt" else iteration
     psnr_array, ssim_array, lpips_array = [], [], []
-    cal_lpips = LearnedPerceptualImagePatchSimilarity(
-        net_type="alex", normalize=True
-    ).to("cuda")
+    cal_lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to("cuda")
     for idx in range(0, end_idx, interval):
         if idx in kf_indices:
             continue
@@ -141,9 +135,7 @@ def eval_rendering(
         image = torch.clamp(rendering, 0.0, 1.0)
 
         gt = (gt_image.cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
-        pred = (image.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(
-            np.uint8
-        )
+        pred = (image.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
         gt = cv2.cvtColor(gt, cv2.COLOR_BGR2RGB)
         pred = cv2.cvtColor(pred, cv2.COLOR_BGR2RGB)
         img_pred.append(pred)
@@ -186,7 +178,5 @@ def save_gaussians(gaussians, name, iteration, final=False):
     if final:
         point_cloud_path = os.path.join(name, "point_cloud/final")
     else:
-        point_cloud_path = os.path.join(
-            name, "point_cloud/iteration_{}".format(str(iteration))
-        )
+        point_cloud_path = os.path.join(name, "point_cloud/iteration_{}".format(str(iteration)))
     gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))

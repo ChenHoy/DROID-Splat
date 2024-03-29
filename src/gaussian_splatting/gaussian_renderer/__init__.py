@@ -17,8 +17,8 @@ from diff_gaussian_rasterization import (
     GaussianRasterizer,
 )
 
-from gaussian_splatting.scene.gaussian_model import GaussianModel
-from gaussian_splatting.utils.sh_utils import eval_sh
+from ..scene.gaussian_model import GaussianModel
+from ..utils.sh_utils import eval_sh
 
 
 def render(
@@ -40,12 +40,7 @@ def render(
     if pc.get_xyz.shape[0] == 0:
         return None
 
-    screenspace_points = (
-        torch.zeros_like(
-            pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda"
-        )
-        + 0
-    )
+    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
         screenspace_points.retain_grad()
     except Exception:
@@ -98,12 +93,8 @@ def render(
     colors_precomp = None
     if colors_precomp is None:
         if pipe.convert_SHs_python:
-            shs_view = pc.get_features.transpose(1, 2).view(
-                -1, 3, (pc.max_sh_degree + 1) ** 2
-            )
-            dir_pp = pc.get_xyz - viewpoint_camera.camera_center.repeat(
-                pc.get_features.shape[0], 1
-            )
+            shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree + 1) ** 2)
+            dir_pp = pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1)
             dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
             sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
