@@ -14,12 +14,11 @@ from evo.tools.settings import SETTINGS
 from matplotlib import pyplot as plt
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
-import wandb
-from gaussian_splatting.gaussian_renderer import render
-from gaussian_splatting.utils.image_utils import psnr
-from gaussian_splatting.utils.loss_utils import ssim
-from gaussian_splatting.utils.system_utils import mkdir_p
-from utils.logging_utils import Log
+from .gaussian_renderer import render
+from .utils.image_utils import psnr
+from .utils.loss_utils import ssim
+from .utils.system_utils import mkdir_p
+from .logging_utils import Log
 
 
 def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):

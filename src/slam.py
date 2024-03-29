@@ -21,22 +21,10 @@ from .motion_filter import MotionFilter
 from .multiview_filter import MultiviewFilter
 from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
-<<<<<<< HEAD
 from .gaussian_mapping import GaussianMapper
 from .gaussian_splatting.eval_utils import eval_ate, eval_rendering, save_gaussians
 import pandas as pd
-=======
-from .mapping import Mapper
-# old splatam mapper
-from .gaussian_mapping import GaussianMapper
 from .render import Renderer
-from .mesher import Mesher
-from .InstantNeuS import InstantNeuS
-from utils.eval_utils import eval_ate, eval_rendering, save_gaussians
-import pandas as pd
-from .InstantNeuS import InstantNeuS
-from .gaussian_mapping import GaussianMapper
->>>>>>> 1eae659bd77863bc28f35e6bae036ffe2269ac85
 
 class Tracker(nn.Module):
     def __init__(self, cfg, args, slam):
@@ -166,16 +154,9 @@ class SLAM:
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
-<<<<<<< HEAD
         # self.evaluate = cfg["evaluate"]
         self.evaluate = True
         self.dataset = None
-=======
-
-        self.gaussian_mapper = GaussianMapper(cfg, args, self)
-
-
->>>>>>> 1eae659bd77863bc28f35e6bae036ffe2269ac85
 
     def set_dataset(self, dataset):
         self.dataset = dataset
@@ -326,59 +307,6 @@ class SLAM:
 
             print("Evaluation complete")
 
-<<<<<<< HEAD
-=======
-
-
-      
-
-    def gaussian_visualizing(self, rank, dont_run=False, visualization_queue=None):
-        print("Gaussian visualization Triggered!")
-        self.all_trigered += 1
-        if visualization_queue is None:
-            print("No queue for Gaussian visualization")
-            return
-        
-        vis = o3d.visualization.Visualizer()
-        vis.create_window()
-        point_cloud = o3d.geometry.PointCloud()
-        point_cloud.points = o3d.utility.Vector3dVector(np.random.rand(10, 3))
-        point_cloud.colors = o3d.utility.Vector3dVector(np.random.rand(10, 3))
-        vis.add_geometry(point_cloud)
-
-        while (self.gaussian_mapping_finished < 1) and (
-            not dont_run
-        ):
-            if not visualization_queue.empty():
-                print("Point cloud updated")
-                params = visualization_queue.get()
-                means3D = params["means3D"].detach().cpu().numpy()
-                rgb_colors = params["rgb_colors"].detach().cpu().numpy()  
-                n_gaussians = means3D.shape[0]
-                idxs = np.random.choice(np.arange(n_gaussians), n_gaussians//10, replace=False)
-                point_cloud.points = o3d.utility.Vector3dVector(means3D[idxs, :]) 
-                point_cloud.colors = o3d.utility.Vector3dVector(rgb_colors[idxs, :]) 
-                vis.update_geometry(point_cloud)
-                vis.poll_events()
-                vis.update_renderer()
-
-
-        self.gaussian_visualizing_finished += 1
-        print("Gaussian Visualization done!")
-
-    def meshing(self, rank, dont_run=False):
-        print("Meshing Triggered!")
-        self.all_trigered += 1
-        while self.mapping_finished < 1 and (not dont_run):
-            while self.hang_on < 1 and self.mapping_finished < 1 and self.make_video:
-                sleep(1.0)
-            self.mesher()
-            self.hang_on[:] = 0
-
-        self.meshing_finished += 1
-        print("Meshing Done!")
-    
->>>>>>> 1eae659bd77863bc28f35e6bae036ffe2269ac85
     def visualizing(self, rank, dont_run=False):
         print("Visualization triggered!")
         self.all_trigered += 1
