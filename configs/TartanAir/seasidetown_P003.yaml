@@ -1,9 +1,9 @@
-inherit_from: configs/Replica/replica.yaml
-mode: rgbd
+inherit_from: configs/TartanAir/tartanair.yaml
+mode: mono
 mapping:
   bound: [[-5.0, 5.0], [-5.0, 5.0], [-5.0, 5.0]]
 meshing:
   gt_mesh_path: /media/data/Replica/cull_replica_meshv2/office0.ply
 data:
-  input_folder: /media/data/Replica/office0
+  input_folder: /media/data/TartanAir/seasidetown/Easy/P003
   output: /home/leon/go-slam-tests

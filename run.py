@@ -137,7 +137,7 @@ if __name__ == "__main__":
 
     torch.multiprocessing.set_start_method("spawn")
 
-    cfg = config.load_config(args.config, "./configs/go_slam.yaml")
+    cfg = config.load_config(args.config, "./configs/go_gaussian_slam.yaml")
     output_dir, cfg = set_args(args, cfg)
     cfg = typecheck_cfg(cfg)
 
