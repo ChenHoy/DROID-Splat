@@ -2,6 +2,7 @@ import argparse
 import shutil
 import ipdb
 import os
+import random
 
 import numpy as np
 import torch
@@ -9,9 +10,6 @@ import torch
 from src import config
 from src.slam import SLAM
 from src.datasets import get_dataset
-
-
-import random
 
 
 def parse_args():
@@ -113,6 +111,7 @@ def set_args(args, cfg):
         output_dir = cfg["data"]["output"]
     else:
         output_dir = args.output
+        cfg["data"]["output"] = output_dir
     return output_dir, cfg
 
 

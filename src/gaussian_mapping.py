@@ -1,6 +1,7 @@
 from munch import munchify
 import torch
 import time
+import os
 import numpy as np
 import torch.multiprocessing as mp
 import open3d as o3d
@@ -72,6 +73,8 @@ class GaussianMapper(object):
         self.pipeline_params = munchify(config["pipeline_params"])
         self.training_params = munchify(config["Training"])
         self.setup = munchify(config["Setup"])
+        self.setup.mesh_path = os.path.join(config["data"]["output"], "mesh")
+        self.setup.render_path = os.path.join(config["data"]["output"], "render")
 
         self.use_spherical_harmonics = False
         self.model_params.sh_degree = 3 if self.use_spherical_harmonics else 0
@@ -208,18 +211,24 @@ class GaussianMapper(object):
 
         return torch.optim.Adam(opt_params)
 
+    # FIXME this can fail when dirty index is empty
+    # TODO chen: why does this even depend on dirty index, when we call it with last_idx?!
     def depth_filter(self, idx: int):
         """
         Gets the video and the time idex and returns the mask.
         """
-        # TODO why doesnt it work only with one index?
         with self.video.get_lock():
             (dirty_index,) = torch.where(self.video.dirty.clone())
             dirty_index = dirty_index
 
+        # Do not filter anything when dirty index is empty
+        if dirty_index.numel() == 0:
+            return torch.ones_like(self.video.disps[0], device=self.video.device)
+
         device = self.video.device
         poses = torch.index_select(self.video.poses, 0, dirty_index)
         disps = torch.index_select(self.video.disps_up, 0, dirty_index)
+        # TODO chen: is this a good heuristic?
         thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
         intrinsics = self.video.intrinsics[0] * self.video.scale_factor
         count = droid_backends.depth_filter(poses, disps, intrinsics, dirty_index, thresh)
@@ -364,11 +373,6 @@ class GaussianMapper(object):
 
         if self.last_idx + 2 < cur_idx and cur_idx > self.setup.warmup:
             self.last_idx += 1
-
-            # if self.last_idx == 45: #BUG at this frame, all depths are 0 (but not always)
-            #     self.show_filtered = True
-            #     print("frame skipped")
-            #     return
 
             # Add camera of the last frame
             cam = self.camera_from_video(self.last_idx)

@@ -5,50 +5,12 @@ mode: "mono"  # 'mono', 'stereo', 'rgbd'
 stride: 2
 only_tracking: False
 
-mapping:
-  device: "cuda:0"
-  bound: [[-10.0, 10.0], [-10.0, 10.0], [-10.0, 10.0]]
-  BA: True
-  BA_cam_lr: 0.001
-  net_lr: 0.001
-  grid_lr: 0.01
-  w_color_loss: 2.0
-  w_sdf_smooth_loss: 1.0
-  w_sdf_loss: 2.0
-  w_eikonal_loss: 0.1
-  uncertainty_weight_loss: True
-  mapping_window_size: 22
-  pixels: 4400
-  iters: 2
-  post_processing_iters: 10
-  decay: 0.8
-  model:
-    sdf_smooth_std: 0.005
-    sdf_sparse_factor: 5
-    sdf_truncation: 0.16
-    sdf_random_weight: 0.04
-
-    sdf_network:
-      d_in: 3
-      d_out: 32  # remember also modify the d_feat in color_network
-
-    color_network:
-      d_in: 3
-      d_feat: 31  # d_out-1 in sdf_network
-      d_hidden: 64
-      n_layers: 2
-
-    variance_network:
-      init_val: 0.2
-      scale_factor: 10.0
-
-
 tracking:
   device: "cuda:0"
   pretrained: ./pretrained/droid.pth
   # pretrained: ./../droidcalib/droid.pth # Sanity check
   buffer: 1024
-  # TODO this is in stark contrast to demo where beta is 0.3
+  # TODO this is in stark contrast to DROID SLAM where beta is 0.3
   beta: 0.75  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
   warmup: 8
   upsample: True
@@ -104,6 +66,15 @@ data:
   output: ''
   video_length: ''
 
+Dataset:
+  sensor_type: 'depth'
+  pcd_downsample: 64
+  pcd_downsample_init: 32
+  adaptive_pointsize: True
+  point_size: 0.05
+  type: 'replica'
+
+
 meshing:
   level_set: 0
   resolution: 512  # change to 512 for higher resolution geometry
@@ -145,15 +116,6 @@ pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False
 
-Dataset:
-  sensor_type: 'depth'
-  pcd_downsample: 64
-  pcd_downsample_init: 32
-  adaptive_pointsize: True
-  point_size: 0.05
-  type: 'replica'
-
-
 Training:
   prune_every: 10
   rgb_boundary_threshold: 0.01
@@ -181,5 +143,3 @@ Setup:
   update_frames: True
   filter_depth: True
   save_renders: True
-  render_path: "/home/leon/results/monogs/renders"
-  mesh_path: "/home/leon/results/monogs/meshes"
