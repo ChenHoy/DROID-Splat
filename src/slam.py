@@ -563,7 +563,7 @@ class SLAM:
                 )
 
                 ## TODO: change this for depth videos
-                result_ate = eval_ate(self.gaussian_mapper.cameras,kf_ids=kf_indices,save_dir=eval_save_path,iterations=-1,final=True,monocular=True)
+                # result_ate = eval_ate(self.gaussian_mapper.cameras,kf_ids=kf_indices,save_dir=eval_save_path,iterations=-1,final=True,monocular=True)
             
                 
                 out_path = os.path.join(self.output, "metrics_traj.txt")
