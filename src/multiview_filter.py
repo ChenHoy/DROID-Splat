@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import droid_backends
+from termcolor import colored
 from lietorch import SE3
 from colorama import Fore, Style
 import torch.nn.functional as F
@@ -19,23 +20,15 @@ class MultiviewFilter(nn.Module):
         # points viewed by at least 3 cameras
         self.filter_visible_num = cfg["tracking"]["multiview_filter"]["visible_num"]
         self.kernel_size = cfg["tracking"]["multiview_filter"]["kernel_size"]  # 3
-        self.bound_enlarge_scale = cfg["tracking"]["multiview_filter"][
-            "bound_enlarge_scale"
-        ]
+        self.bound_enlarge_scale = cfg["tracking"]["multiview_filter"]["bound_enlarge_scale"]
         self.net = slam.net
         self.video = slam.video
         self.verbose = slam.verbose
         self.mode = slam.mode
 
-        self.H, self.W, self.fx, self.fy, self.cx, self.cy = (
-            slam.H,
-            slam.W,
-            slam.fx,
-            slam.fy,
-            slam.cx,
-            slam.cy,
-        )
+        self.H, self.W, self.fx, self.fy, self.cx, self.cy = slam.H, slam.W, slam.fx, slam.fy, slam.cx, slam.cy
 
+    # NOTE chen: This distance can already be computed with a single function call in Lietorch
     def pose_dist(self, Tquad0, Tquad1):
         # Tquad with shape [batch_size, 7]
         def quat_to_euler(Tquad):
@@ -75,10 +68,11 @@ class MultiviewFilter(nn.Module):
     def in_bound(self, pts, bound):
         """
         Args:
-            pts:                        (Tensor), 3d points
-                                        [n_points, 3]
-            bound:                      (Tensor), bound
-                                        [3, 2]
+        ---
+            pts:    (Tensor), 3d points
+                    [n_points, 3]
+            bound:  (Tensor), bound
+                    [3, 2]
         """
         # mask for points out of bound
         bound = bound.to(pts.device)
@@ -92,64 +86,52 @@ class MultiviewFilter(nn.Module):
     @torch.no_grad()
     def get_bound_from_pointcloud(self, pts, enlarge_scale=1.0):
         bound = torch.stack(
-            [
-                torch.min(pts, dim=0, keepdim=False).values,
-                torch.max(pts, dim=0, keepdim=False).values,
-            ],
-            dim=-1,
+            [torch.min(pts, dim=0, keepdim=False).values, torch.max(pts, dim=0, keepdim=False).values], dim=-1
         )  # [3, 2]
         enlarge_bound_length = (bound[:, 1] - bound[:, 0]) * (enlarge_scale - 1.0)
         # extend max 1.0m on boundary
         # enlarge_bound_length = torch.min(enlarge_bound_length, torch.ones_like(enlarge_bound_length) * 1.0)
-        bound_edge = torch.stack(
-            [
-                -enlarge_bound_length / 2.0,
-                enlarge_bound_length / 2.0,
-            ],
-            dim=-1,
-        )
+        bound_edge = torch.stack([-enlarge_bound_length / 2.0, enlarge_bound_length / 2.0], dim=-1)
         bound = bound + bound_edge
 
         return bound
 
+    def info(self, bound, masks, filtered_t, cur_t):
+        prefix = "Bound: ["
+        bd = bound.tolist()
+        prefix += f"[{bd[0][0]:.1f}, {bd[0][1]:.1f}], "
+        prefix += f"[{bd[1][0]:.1f}, {bd[1][1]:.1f}], "
+        prefix += f"[{bd[2][0]:.1f}, {bd[2][1]:.1f}]]!"
+
+        msg = "\n\n Multiview filtering: previous at {}, now at {}, {} valid points found! {}\n".format(
+            filtered_t, cur_t, masks.sum(), prefix
+        )
+        print(colored("[Multiview Filter]: " + msg, "cyan"))
+
+    # TODO chen: docstr to really explain the necessity of this filter
     def forward(self):
+        """Filter out occluded and low density points using multiview consistency"""
+
         cur_t = self.video.counter.value
         filtered_t = int(self.video.filtered_id.item())
         if filtered_t < cur_t and cur_t > self.warmup:
             with self.video.get_lock():
                 dirty_index = torch.arange(0, cur_t).long().to(self.device)
-                poses = torch.index_select(
-                    self.video.poses.detach(), dim=0, index=dirty_index
-                )
-                disps = torch.index_select(
-                    self.video.disps_up.detach(), dim=0, index=dirty_index
-                )
-                common_intrinsic_id = (
-                    0  # we assume the intrinsics are the same within one scene
-                )
-                intrinsic = (
-                    self.video.intrinsics[common_intrinsic_id].detach()
-                    * self.video.scale_factor
-                )
-                w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(
-                    self.device
-                )
+                poses = torch.index_select(self.video.poses.detach(), dim=0, index=dirty_index)
+                disps = torch.index_select(self.video.disps_up.detach(), dim=0, index=dirty_index)
+                common_intrinsic_id = 0  # we assume the intrinsics are the same within one scene
+                intrinsic = self.video.intrinsics[common_intrinsic_id].detach() * self.video.scale_factor
+                w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(self.device)
 
-            points = droid_backends.iproj(
-                (w2w * SE3(poses).inv()).data, disps, intrinsic
-            ).cpu()  # [b, h, w 3]
+            points = droid_backends.iproj((w2w * SE3(poses).inv()).data, disps, intrinsic).cpu()  # [b, h, w 3]
             thresh = self.filter_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
-            count = droid_backends.depth_filter(
-                poses, disps, intrinsic, dirty_index, thresh
-            )  # [b, h, w]
+            count = droid_backends.depth_filter(poses, disps, intrinsic, dirty_index, thresh)  # [b, h, w]
 
             count = count.cpu()
             disps = disps.cpu()
 
             masks = count >= self.filter_visible_num
-            masks = masks & (
-                disps > 0.01 * disps.mean(dim=[1, 2], keepdim=True)
-            )  # filter out far points, [b, h, w]
+            masks = masks & (disps > 0.01 * disps.mean(dim=[1, 2], keepdim=True))  # filter out far points, [b, h, w]
             if masks.sum() < 100:
                 return
             sel_points = points.reshape(-1, 3)[masks.reshape(-1)]
@@ -166,9 +148,7 @@ class MultiviewFilter(nn.Module):
                 extended_masks = (
                     F.conv2d(
                         masks.unsqueeze(dim=1).float(),
-                        weight=torch.ones(
-                            1, 1, kernel, kernel, dtype=torch.float, device=masks.device
-                        ),
+                        weight=torch.ones(1, 1, kernel, kernel, dtype=torch.float, device=masks.device),
                         stride=1,
                         padding=kernel // 2,
                         bias=None,
@@ -181,7 +161,7 @@ class MultiviewFilter(nn.Module):
                 return
             sel_points = points.reshape(-1, 3)[extended_masks.reshape(-1)]
             in_bound_mask = self.in_bound(sel_points, bound)  # N'
-            # FIXME This triggeres a bug when doing mapping, filtering, visualizing, optimizing, etc. together
+            # FIXME chen: This triggeres a bug when doing mapping, filtering, visualizing, optimizing, etc. together
             # RuntimeError: out_ptr == out_accessor[thread_count_nonzero[tid + 1]].data()
             # INTERNAL ASSERT FAILED at "/opt/conda/conda-bld/pytorch_1702400430266/work/aten/src/ATen/native/TensorAdvancedIndexing.cpp":2336, please report a bug to PyTorch
             extended_masks[extended_masks.clone()] = in_bound_mask
@@ -189,6 +169,9 @@ class MultiviewFilter(nn.Module):
             sel_points = points.reshape(-1, 3)[extended_masks.reshape(-1)]
             bound = self.get_bound_from_pointcloud(sel_points)  # [3, 2]
 
+            # cur_t is the current last visited frame in the video
+            # this computes the distance between this pose and all previous poses
+            # TODO chen: what happens with this priority? How is this used in mapping?
             priority = self.pose_dist(self.video.poses_filtered[:cur_t].detach(), poses)
 
             with self.video.mapping.get_lock():
@@ -200,15 +183,6 @@ class MultiviewFilter(nn.Module):
                 self.video.filtered_id[0] = cur_t
                 self.video.bound[0] = bound
 
-            prefix = "Bound: ["
-            bd = bound.tolist()
-            prefix += f"[{bd[0][0]:.1f}, {bd[0][1]:.1f}], "
-            prefix += f"[{bd[1][0]:.1f}, {bd[1][1]:.1f}], "
-            prefix += f"[{bd[2][0]:.1f}, {bd[2][1]:.1f}]]!"
-            print(Fore.CYAN)
-            print(
-                f"\n\n Multiview filtering: previous at {filtered_t}, now at {cur_t}, {masks.sum()} valid points found! {prefix}\n"
-            )
-            print(Style.RESET_ALL)
+            self.info(bound, masks, filtered_t, cur_t)
             del points, masks, poses, disps
             torch.cuda.empty_cache()
