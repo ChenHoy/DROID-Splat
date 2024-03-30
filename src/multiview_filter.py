@@ -109,6 +109,7 @@ class MultiviewFilter(nn.Module):
         print(colored("[Multiview Filter]: " + msg, "cyan"))
 
     # TODO chen: docstr to really explain the necessity of this filter
+    # FIXME chen: this function triggers malloc errors and ruins the Gaussian mapper as a result
     def forward(self):
         """Filter out occluded and low density points using multiview consistency"""
 
