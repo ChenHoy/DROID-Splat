@@ -3,6 +3,7 @@ import argparse
 import numpy as np
 from typing import Dict, Optional
 import ipdb
+from termcolor import colored
 from pathlib import Path
 from tqdm import tqdm
 import os
@@ -336,7 +337,7 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
     param = vis.get_view_control().convert_to_pinhole_camera_parameters()
 
     ### Store the geometry and trajectory visualizaton for later inspection when done
-    print("Saving the visualization for later usage ...")
+    print(colored("[Visu] Saving the visualization for later usage ...!", "grey"))
     try:
         o3d.io.write_pinhole_camera_parameters("final_viewpoint.json", param)
         pcl_path = str(Path(save_root) / "pointclouds")
@@ -344,7 +345,7 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
         write_pointclouds(droid_visualization.points, pcl_path, ext="xyzrgb")
         write_linesets(droid_visualization.cameras, cam_path)
     except Exception as e:
-        print("Something went wrong when saving the visualization")
-        print(e)
+        print(colored("[Visu] Something went wrong when saving the visualization ...!", "red"))
+        print(colored(e, "red"))
 
     vis.destroy_window()

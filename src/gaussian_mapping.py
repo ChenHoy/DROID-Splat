@@ -1,5 +1,6 @@
 from munch import munchify
 import torch
+from termcolor import colored
 import time
 import os
 import numpy as np
@@ -107,7 +108,7 @@ class GaussianMapper(object):
             )
             gui_process = mp.Process(target=slam_gui.run, args=(self.params_gui,))
             gui_process.start()
-            print("GUI process started")
+            self.info("GUI process started")
 
         self.cameras = []
         self.loss_list = []
@@ -115,6 +116,9 @@ class GaussianMapper(object):
         self.initialized = False
 
         self.show_filtered = False
+
+    def info(self, msg: str) -> None:
+        print(colored("[Gaussian Mapper]: " + msg, "magenta"))
 
     def camera_from_gt(self):
         idx, image, depth, intrinsic, gt_pose = self.mapping_queue.get()
@@ -136,7 +140,8 @@ class GaussianMapper(object):
 
         if self.setup.filter_depth:
             mask = self.depth_filter(idx)
-            print(f"Filtered {100*(1 - mask.sum() / mask.numel()):.2f}% of the points")
+            msg = "Filtered {}% of the points".format(100 * (1 - mask.sum() / mask.numel()))
+            self.info(msg)
 
             if self.show_filtered:
                 filt_col = color * mask
@@ -232,7 +237,7 @@ class GaussianMapper(object):
 
         # Do not filter anything when dirty index is empty
         if dirty_index.numel() == 0:
-            return torch.ones_like(self.video.disps[0], device=self.video.device)
+            return None
 
         device = self.video.device
         poses = torch.index_select(self.video.poses, 0, dirty_index)
@@ -243,8 +248,7 @@ class GaussianMapper(object):
         count = droid_backends.depth_filter(poses, disps, intrinsics, dirty_index, thresh)
 
         mask = ((count >= 1) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True)))[idx]
-
-        # print(f"Valid points:{mask.sum()}/{mask.numel()}")
+        # self.info(f"Valid points:{mask.sum()}/{mask.numel()}")
 
         return mask
 
@@ -396,7 +400,8 @@ class GaussianMapper(object):
             else:
                 n_g = self.gaussians.get_xyz.shape[0]
                 self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=False)
-                print(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians for the new view")
+                msg = "Added {} gaussian for the new view".format(self.gaussians.get_xyz.shape[0] - n_g)
+                self.info(msg)
 
             # Optimze gaussians
             for iter in range(self.setup.mapping_iters):
@@ -424,14 +429,15 @@ class GaussianMapper(object):
                     )
                 )
 
-            print(f"Frame: {cam.uid}. Gaussians: {self.gaussians.get_xyz.shape[0]}. Video at {cur_idx}")
+            msg = "Frame: {}. Gaussians: {}. Video at {}".format(cam.uid, self.gaussians.get_xyz.shape[0], cur_idx)
+            self.info(msg)
 
             # Save renders
             if self.setup.save_renders and cam.uid % 5 == 0:
                 self.save_render(cam, f"{self.setup.render_path}/mapping/{cam.uid}.png")
 
         if the_end and self.last_idx + 2 == cur_idx:
-            print("Mapping refinement starting")
+            self.info("Mapping refinement starting")
 
             for iter in range(self.setup.refinement_iters):
                 loss = self.mapping_step(
@@ -450,10 +456,9 @@ class GaussianMapper(object):
                             keyframes=self.cameras,
                         )
                     )
-            print("Mapping refinement finished")
-
+            self.info("Mapping refinement finished")
             self.gaussians.save_ply(f"{self.setup.mesh_path}/final.ply")
-            print("Mesh saved")
+            self.info(f"Mesh saved at {self.setup.mesh_path}/final.ply")
 
             if self.setup.save_renders:
                 for cam in self.cameras:

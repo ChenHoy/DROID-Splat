@@ -149,6 +149,9 @@ class SLAM:
 
         self.gaussian_mapper = GaussianMapper(cfg, args, self)
 
+    def info(self, msg) -> None:
+        print(colored("[Main]: " + msg, "green"))
+
     def update_cam(self, cfg):
         """
         Update the camera intrinsics according to the pre-processing config,
@@ -194,7 +197,7 @@ class SLAM:
         self.net.load_state_dict(state_dict)
 
     def tracking(self, rank, stream, input_queue=mp.Queue):
-        print(colored("[Main] Tracking thread started!", "green"))
+        self.info("Tracking thread started!")
         self.all_trigered += 1
         # Wait up for other threads to start
         while self.all_trigered < self.num_running_thread:
@@ -216,10 +219,10 @@ class SLAM:
                 sleep(1.0)
 
         self.tracking_finished += 1
-        print(colored("[Main] Tracking done!", "green"))
+        self.info("Tracking done!")
 
     def optimizing(self, rank, dont_run=False):
-        print(colored("[Main] Full Bundle Adjustment thread started!", "green"))
+        self.info("Full Bundle Adjustment thread started!")
         self.all_trigered += 1
 
         while self.tracking_finished < 1 and not dont_run:
@@ -232,10 +235,10 @@ class SLAM:
             self.ba()
         self.optimizing_finished += 1
 
-        print(colored("[Main] Full Bundle Adjustment done!", "green"))
+        self.info("Full Bundle Adjustment done!")
 
     def multiview_filtering(self, rank, dont_run=False):
-        print(colored("[Main] Multiview Filtering thread started!", "green"))
+        self.info("Multiview Filtering thread started!")
         self.all_trigered += 1
 
         while (self.tracking_finished < 1 or self.optimizing_finished < 1) and not dont_run:
@@ -243,10 +246,10 @@ class SLAM:
                 sleep(1.0)
             self.multiview_filter()
 
-        print(colored("[Main] Multiview Filtering done!", "green"))
+        self.info("Multiview Filtering done!")
 
     def gaussian_mapping(self, rank, dont_run=False):
-        print(colored("[Main] Gaussian Mapping thread started!", "green"))
+        self.info("Gaussian Mapping thread started!")
         self.all_trigered += 1
 
         while self.tracking_finished < 1 and not dont_run:
@@ -259,20 +262,20 @@ class SLAM:
                 finished = self.gaussian_mapper(the_end=True)
 
         self.gaussian_mapping_finished += 1
-        print(colored("[Main] Gaussian Mapping done!", "green"))
+        self.info("Gaussian Mapping done!")
 
     def visualizing(self, rank, dont_run=False):
-        print(colored("[Main] Visualization thread started!", "green"))
+        self.info("Visualization thread started!")
         self.all_trigered += 1
 
         while (self.tracking_finished < 1 or self.optimizing_finished < 1) and (not dont_run):
             droid_visualization(self.video, device=self.device, save_root=self.output)
 
         self.visualizing_finished += 1
-        print(colored("[Main] Visualization done!", "green"))
+        self.info("Visualization done!")
 
     def show_stream(self, rank, input_queue: mp.Queue) -> None:
-        print(colored("[Main] OpenCV Image stream thread started!", "green"))
+        self.info("OpenCV Image stream thread started!")
         self.all_trigered += 1
 
         while self.tracking_finished < 1 or self.optimizing_finished < 1:
@@ -293,7 +296,7 @@ class SLAM:
                     print(colored(e, "red"))
                     print(colored("Continue ..", "red"))
 
-        print(colored("[Main] Input stream done!", "green"))
+        self.info("Input data stream done!")
 
     def terminate(self, rank, stream=None):
         """fill poses for non-keyframe images and evaluate"""
@@ -319,9 +322,10 @@ class SLAM:
             from evo.core.trajectory import PosePath3D
             import numpy as np
 
-            print(colored("[Main] Start evaluating ...", "green"))
-            print(colored("#" * 20 + f" [Main] Results for {stream.input_folder} ...", "green"))
+            self.info("Start evaluating ...")
+            self.info("#" * 20 + f" Results for {stream.input_folder} ...")
 
+            self.info("Filling/Interpolating poses for non-keyframes ...")
             timestamps = [i for i in range(len(stream))]
             camera_trajectory = self.traj_filler(stream)  # w2cs
             w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
@@ -343,7 +347,7 @@ class SLAM:
                             for ps in pos:  # timestamp tx ty tz qx qy qz qw
                                 str += f" {ps:.14f}"
                             fp.write(str + "\n")
-                    print(colored("[Main] Poses are saved to {}!".format(submission_txt), "green"))
+                    self.info(f"Poses are saved to {submission_txt}!")
 
                 print(colored("[Main] Terminate: no GT poses found!", "red"))
                 trans_init = None
@@ -382,7 +386,7 @@ class SLAM:
                     fp.write(result.pretty_str())
                 trans_init = result.np_arrays["alignment_transformation_sim3"]
 
-        print(colored("[Main] Terminate done!", "green"))
+        self.info("Terminate done!")
 
     def run(self, stream):
         # TODO visualizing and guassian mapping cannot be run at the same time, because they both access the dirty_index
