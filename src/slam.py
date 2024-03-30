@@ -1,6 +1,7 @@
 import os
 import ipdb
-from colorama import Fore, Style
+from termcolor import colored
+
 from collections import OrderedDict
 from tqdm import tqdm
 from time import gmtime, strftime, time, sleep
@@ -21,7 +22,6 @@ from .motion_filter import MotionFilter
 from .multiview_filter import MultiviewFilter
 from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
-from .InstantNeuS import InstantNeuS
 from .gaussian_mapping import GaussianMapper
 
 
@@ -38,9 +38,7 @@ class Tracker(nn.Module):
         # filter incoming frames so that there is enough motion
         self.frontend_window = cfg["tracking"]["frontend"]["window"]
         filter_thresh = cfg["tracking"]["motion_filter"]["thresh"]
-        self.motion_filter = MotionFilter(
-            self.net, self.video, thresh=filter_thresh, device=self.device
-        )
+        self.motion_filter = MotionFilter(self.net, self.video, thresh=filter_thresh, device=self.device)
 
         # frontend process
         self.frontend = Frontend(self.net, self.video, self.args, self.cfg)
@@ -48,9 +46,7 @@ class Tracker(nn.Module):
     def forward(self, timestamp, image, depth, intrinsic, gt_pose=None):
         with torch.no_grad():
             ### check there is enough motion
-            self.motion_filter.track(
-                timestamp, image, depth, intrinsic, gt_pose=gt_pose
-            )
+            self.motion_filter.track(timestamp, image, depth, intrinsic, gt_pose=gt_pose)
 
             # local bundle adjustment
             self.frontend()
@@ -72,10 +68,12 @@ class BundleAdjustment(nn.Module):
         # backend process
         self.backend = Backend(self.net, self.video, self.args, self.cfg)
 
-    def info(self, msg):
-        print(Fore.GREEN)
-        print(msg)
-        print(Style.RESET_ALL)
+    def info(self, t_start, t_end, cur_t):
+        now = "[Backend] {} - Full BA".format(strftime("%Y-%m-%d %H:%M:%S", gmtime()))
+        msg = "\n {} : [{}, {}]; Current Keyframe is {}, last is {}. \n".format(
+            now, t_start, t_end, cur_t, self.last_t
+        )
+        print(colored(msg, "blue"))
 
     def forward(self):
         cur_t = self.video.counter.value
@@ -83,12 +81,9 @@ class BundleAdjustment(nn.Module):
 
         if cur_t > self.frontend_window:
             t_start = 0
-            now = f'{strftime("%Y-%m-%d %H:%M:%S", gmtime())} - Full BA'
-            msg = f"\n\n {now} : [{t_start}, {t}]; Current Keyframe is {cur_t}, last is {self.last_t}."
-
             self.backend.dense_ba(t_start=t_start, t_end=t, steps=6, motion_only=False)
-            self.info(msg + "\n")
 
+            self.info(t_start, t, cur_t)
             self.last_t = cur_t
 
 
@@ -112,7 +107,6 @@ class SLAM:
 
         self.update_cam(cfg)
         self.load_bound(cfg)
-
 
         self.net = DroidNet()
 
@@ -148,15 +142,12 @@ class SLAM:
         self.multiview_filter = MultiviewFilter(cfg, args, self)
 
         # post processor - fill in poses for non-keyframes
-        self.traj_filler = PoseTrajectoryFiller(
-            net=self.net, video=self.video, device=self.device
-        )
+        self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
 
         self.gaussian_mapper = GaussianMapper(cfg, args, self)
-
 
     def update_cam(self, cfg):
         """
@@ -191,11 +182,9 @@ class SLAM:
         self.bound = torch.from_numpy(np.array(cfg["mapping"]["bound"])).float()
 
     def load_pretrained(self, pretrained):
-        print(f"INFO: load pretrained checkpiont from {pretrained}!")
+        print(colored("[Main]: load pretrained checkpoint from {}!".format(pretrained), "green"))
 
-        state_dict = OrderedDict(
-            [(k.replace("module.", ""), v) for (k, v) in torch.load(pretrained).items()]
-        )
+        state_dict = OrderedDict([(k.replace("module.", ""), v) for (k, v) in torch.load(pretrained).items()])
 
         state_dict["update.weight.2.weight"] = state_dict["update.weight.2.weight"][:2]
         state_dict["update.weight.2.bias"] = state_dict["update.weight.2.bias"][:2]
@@ -205,7 +194,7 @@ class SLAM:
         self.net.load_state_dict(state_dict)
 
     def tracking(self, rank, stream, input_queue=mp.Queue):
-        print("Tracking Triggered!")
+        print(colored("[Main] Tracking thread started!", "green"))
         self.all_trigered += 1
         # Wait up for other threads to start
         while self.all_trigered < self.num_running_thread:
@@ -215,11 +204,10 @@ class SLAM:
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
-            # input_queue.put(image)
-            # input_queue.put(depth)
+            input_queue.put(image)
+            input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
-
 
             # predict mesh every 50 frames for video making
             if timestamp % 50 == 0 and timestamp > 0 and self.make_video:
@@ -227,19 +215,13 @@ class SLAM:
             while self.hang_on > 0:
                 sleep(1.0)
 
-
         self.tracking_finished += 1
-        print("Tracking Done!")
-
-    # We need some signal that the rendering works
-    # i) Use mp.Queue from rendering/mapping to visualization/show_stream
-    # ii) Render the key frame image from the Gaussians and send this into the queue
-    # iii) In visu thread: Take renderings and output them
-    # Nerfstudio has like a 3D volume with the colors that you can fly through
+        print(colored("[Main] Tracking done!", "green"))
 
     def optimizing(self, rank, dont_run=False):
-        print("Full Bundle Adjustment Triggered!")
+        print(colored("[Main] Full Bundle Adjustment thread started!", "green"))
         self.all_trigered += 1
+
         while self.tracking_finished < 1 and not dont_run:
             while self.hang_on > 0 and self.make_video:
                 sleep(1.0)
@@ -250,23 +232,23 @@ class SLAM:
             self.ba()
         self.optimizing_finished += 1
 
-        print("Full Bundle Adjustment Done!")
+        print(colored("[Main] Full Bundle Adjustment done!", "green"))
 
     def multiview_filtering(self, rank, dont_run=False):
-        print("Multiview Filtering Triggered!")
+        print(colored("[Main] Multiview Filtering thread started!", "green"))
         self.all_trigered += 1
-        while (
-            self.tracking_finished < 1 or self.optimizing_finished < 1
-        ) and not dont_run:
+
+        while (self.tracking_finished < 1 or self.optimizing_finished < 1) and not dont_run:
             while self.hang_on > 0 and self.make_video:
                 sleep(1.0)
             self.multiview_filter()
 
-        print("Multiview Filtering Done!")
+        print(colored("[Main] Multiview Filtering done!", "green"))
 
     def gaussian_mapping(self, rank, dont_run=False):
-        print("Gaussian Mapping Triggered!")
+        print(colored("[Main] Gaussian Mapping thread started!", "green"))
         self.all_trigered += 1
+
         while self.tracking_finished < 1 and not dont_run:
             while self.hang_on > 0 and self.make_video:
                 sleep(1.0)
@@ -275,24 +257,24 @@ class SLAM:
         if not dont_run:
             while not finished:
                 finished = self.gaussian_mapper(the_end=True)
-            
+
         self.gaussian_mapping_finished += 1
-        print("Gaussian Mapping Done!")
-    
+        print(colored("[Main] Gaussian Mapping done!", "green"))
+
     def visualizing(self, rank, dont_run=False):
-        print("Visualization triggered!")
+        print(colored("[Main] Visualization thread started!", "green"))
         self.all_trigered += 1
-        while (self.tracking_finished < 1 or self.optimizing_finished < 1) and (
-            not dont_run
-        ):
+
+        while (self.tracking_finished < 1 or self.optimizing_finished < 1) and (not dont_run):
             droid_visualization(self.video, device=self.device, save_root=self.output)
 
         self.visualizing_finished += 1
-        print("Visualization Done!")
+        print(colored("[Main] Visualization done!", "green"))
 
     def show_stream(self, rank, input_queue: mp.Queue) -> None:
-        print("OpenCV Image stream triggered!")
+        print(colored("[Main] OpenCV Image stream thread started!", "green"))
         self.all_trigered += 1
+
         while self.tracking_finished < 1 or self.optimizing_finished < 1:
             if not input_queue.empty():
                 try:
@@ -308,9 +290,10 @@ class SLAM:
                         cv2.imshow("depth", depth_image[..., ::-1])
                     cv2.waitKey(1)
                 except Exception as e:
-                    print(e)
-                    print("Continuing...")
-                    pass
+                    print(colored(e, "red"))
+                    print(colored("Continue ..", "red"))
+
+        print(colored("[Main] Input stream done!", "green"))
 
     def terminate(self, rank, stream=None):
         """fill poses for non-keyframe images and evaluate"""
@@ -336,18 +319,16 @@ class SLAM:
             from evo.core.trajectory import PosePath3D
             import numpy as np
 
-            print("#" * 20 + f" Results for {stream.input_folder} ...")
+            print(colored("[Main] Start evaluating ...", "green"))
+            print(colored("#" * 20 + f" [Main] Results for {stream.input_folder} ...", "green"))
 
             timestamps = [i for i in range(len(stream))]
             camera_trajectory = self.traj_filler(stream)  # w2cs
-            w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(
-                camera_trajectory.device
-            )
+            w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
             camera_trajectory = w2w * camera_trajectory.inv()
             traj_est = camera_trajectory.data.cpu().numpy()
             estimate_c2w_list = camera_trajectory.matrix().data.cpu()
 
-            
             out_path = os.path.join(self.output, "checkpoints/est_poses.npy")
             np.save(out_path, estimate_c2w_list.numpy())  # c2ws
 
@@ -362,16 +343,16 @@ class SLAM:
                             for ps in pos:  # timestamp tx ty tz qx qy qz qw
                                 str += f" {ps:.14f}"
                             fp.write(str + "\n")
-                    print("Poses are save to {}!".format(submission_txt))
+                    print(colored("[Main] Poses are saved to {}!".format(submission_txt), "green"))
 
-                print("Terminate: no GT poses found!")
+                print(colored("[Main] Terminate: no GT poses found!", "red"))
                 trans_init = None
                 gt_c2w_list = None
             else:
                 for i in range(len(stream.poses)):
                     val = stream.poses[i].sum()
                     if np.isnan(val) or np.isinf(val):
-                        print(f"Nan or Inf found in gt poses, skipping {i}th pose!")
+                        print(colored(f"[Main] Nan or Inf found in gt poses, skipping {i}th pose!", "red"))
                         continue
                     traj_est_select.append(traj_est[i])
                     traj_ref.append(stream.poses[i])
@@ -401,19 +382,19 @@ class SLAM:
                     fp.write(result.pretty_str())
                 trans_init = result.np_arrays["alignment_transformation_sim3"]
 
-
-        print("Terminate: Done!")
+        print(colored("[Main] Terminate done!", "green"))
 
     def run(self, stream):
-        # TODO why exactly does our open3d visualization look so unclean compared to the droidcalib one?
+        # TODO visualizing and guassian mapping cannot be run at the same time, because they both access the dirty_index
+        # -> introduce multiple indices so we can keep track of what we already visualized and what we already put into the renderer
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
-            mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
+            # mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
             mp.Process(target=self.optimizing, args=(2, False)),
             mp.Process(target=self.multiview_filtering, args=(3, False)),
-            mp.Process(target=self.visualizing, args=(4, True)),
-            mp.Process(target=self.gaussian_mapping, args=(7, False)),
+            # mp.Process(target=self.visualizing, args=(4, False)),
+            mp.Process(target=self.gaussian_mapping, args=(5, False)),
         ]
 
         self.num_running_thread[0] += len(processes)
