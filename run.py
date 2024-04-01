@@ -30,6 +30,9 @@ def parse_args():
         "--output", type=str, help="output folder, this have higher priority, can overwrite the one in config file"
     )
     parser.add_argument(
+        "--mode", type=str, help="slam mode: mono, prgbd, rgbd or stereo", choices=["mono", "prgbd", "rgbd", "stereo"]
+    )
+    parser.add_argument(
         "--image_size",
         nargs="+",
         default=None,
@@ -49,9 +52,6 @@ def parse_args():
         type=str,
         default=None,
         help="calibration parameters: fx, fy, cx, cy, this have higher priority, can overwrite the one in config file",
-    )
-    parser.add_argument(
-        "--mode", type=str, help="slam mode: mono, prgbd, rgbd or stereo", choices=["mono", "prgbd", "rgbd", "stereo"]
     )
     return parser.parse_args()
 

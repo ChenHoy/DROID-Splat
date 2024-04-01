@@ -5,10 +5,7 @@ import numpy as np
 import open3d as o3d
 import torch
 
-from gaussian_splatting.utils.general_utils import (
-    build_scaling_rotation,
-    strip_symmetric,
-)
+from ..utils.general_utils import build_scaling_rotation, strip_symmetric
 
 cv_gl = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
 
@@ -128,13 +125,9 @@ class GaussianPacket:
         return img.squeeze(0)
 
     def get_covariance(self, scaling_modifier=1):
-        return self.build_covariance_from_scaling_rotation(
-            self.get_scaling, scaling_modifier, self._rotation
-        )
+        return self.build_covariance_from_scaling_rotation(self.get_scaling, scaling_modifier, self._rotation)
 
-    def build_covariance_from_scaling_rotation(
-        self, scaling, scaling_modifier, rotation
-    ):
+    def build_covariance_from_scaling_rotation(self, scaling, scaling_modifier, rotation):
         L = build_scaling_rotation(scaling_modifier * scaling, rotation)
         actual_covariance = L @ L.transpose(1, 2)
         symm = strip_symmetric(actual_covariance)
