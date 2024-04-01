@@ -63,18 +63,20 @@ def plot_3d(rgb: torch.Tensor, depth: torch.Tensor):
 
 
 class GaussianMapper(object):
-    def __init__(self, config, args, slam, mapping_queue = None):
+    def __init__(self, config, args, slam):
         self.config = config
         self.args = args
         self.slam = slam
         self.video = slam.video
         self.device = args.device
         self.mode = args.mode
+        self.output = slam.output
         self.model_params = munchify(config["model_params"])
         self.opt_params = munchify(config["opt_params"])
         self.pipeline_params = munchify(config["pipeline_params"])
         self.training_params = munchify(config["Training"])
         self.setup = munchify(config["Setup"])
+        self.delay = 3 # Delay between tracking and mapping
 
         
         self.use_spherical_harmonics = False
@@ -103,17 +105,12 @@ class GaussianMapper(object):
 
         self.cameras = []
         self.loss_list = []
-        self.last_idx = -1
+        self.last_idx = 0
         self.initialized = False
 
 
         self.show_filtered = False
 
-
-    def camera_from_gt(self):
-        idx, image, depth, intrinsic, gt_pose = self.mapping_queue.get()
-        image, depth, intrinsic, gt_pose = image.squeeze().to(self.device), depth.to(self.device), intrinsic.to(self.device), gt_pose.to(self.device)
-        return self.camera_from_frame(idx, image, depth, intrinsic, gt_pose)
 
     def camera_from_video(self, idx: int):
         """
@@ -122,7 +119,6 @@ class GaussianMapper(object):
         color, depth, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
         color = color.permute(2, 0, 1)
         intrinsics = self.video.intrinsics[0]*self.video.scale_factor
-        print(depth.mean())
         if self.setup.filter_depth:
             mask = self.depth_filter(idx)
             print(f"Filtered {100*(1 - mask.sum() / mask.numel()):.2f}% of the points")
@@ -347,7 +343,7 @@ class GaussianMapper(object):
         cur_idx = int(self.video.filtered_id.item()) 
 
         
-        if self.last_idx+2 < cur_idx and cur_idx > self.setup.warmup:
+        if self.last_idx + self.delay < cur_idx and cur_idx > self.setup.warmup:
             self.last_idx += 1
             
             print(f"\n      Starting frame: {self.last_idx}. Gaussians: {self.gaussians.get_xyz.shape[0]}. Video at {cur_idx}")
@@ -391,9 +387,9 @@ class GaussianMapper(object):
             if self.setup.use_gui:
                 self.q_main2vis.put(
                         gui_utils.GaussianPacket(
-                            #gaussians=clone_obj(self.gaussians),
-                            #current_frame=cam,
-                            #keyframes=self.cameras,
+                            gaussians=clone_obj(self.gaussians),
+                            current_frame=cam,
+                            keyframes=self.cameras,
                             #keyframe = cam,
                             kf_window=None,
                             gtcolor=cam.original_image,        
@@ -408,7 +404,7 @@ class GaussianMapper(object):
                 self.save_render(cam, f"{self.slam.output}/renders/mapping/{cam.uid}.png")
 
 
-        elif the_end and self.last_idx+2 == cur_idx:
+        elif the_end and self.last_idx + self.delay == cur_idx:
             print("Mapping refinement starting")
 
 
