@@ -4,6 +4,9 @@
 [submodule "thirdparty/eigen"]
 	path = thirdparty/eigen
 	url = https://gitlab.com/libeigen/eigen.git
+[submodule "thirdparty/simple-knn"]
+	path = thirdparty/simple-knn
+	url = https://github.com/camenduru/simple-knn.git
 [submodule "ext/Depth-Anything"]
 	path = ext/Depth-Anything
 	url = https://github.com/ChenHoy/Depth-Anything.git
