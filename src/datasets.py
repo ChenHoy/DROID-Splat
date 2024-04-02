@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from kornia.geometry.linalg import compose_transformations
 
+
 def readEXR_onlydepth(filename):
     """
     Read depth data from EXR image file.
@@ -237,14 +238,12 @@ class Replica(BaseDataset):
         self.load_poses(os.path.join(self.input_folder, "traj.txt"))
         self.poses = self.poses[::stride]
 
-
-        relative_poses = True # True to test the gt stream mapping
+        relative_poses = True  # True to test the gt stream mapping
         if relative_poses:
             self.poses = torch.from_numpy(np.array(self.poses))
             trans_10 = torch.inverse(self.poses[0].unsqueeze(0).repeat(self.poses.shape[0], 1, 1))
             self.poses = compose_transformations(trans_10, self.poses).numpy()
-        
-        
+
         # Adjust number of images according to strides
         self.n_img = len(self.color_paths)
 
@@ -258,24 +257,21 @@ class Replica(BaseDataset):
             self.poses.append(c2w)
 
 
-
 class TartanAir(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(TartanAir, self).__init__(cfg, args, device)
         stride = cfg["stride"]
-        self.color_paths = sorted(
-            glob.glob(os.path.join(self.input_folder, "image_left/*.png"))
-        )
+        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_left/*.png")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         print("found {} images".format(self.n_img))
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg["mode"] == "prgbd":
             self.depth_paths = sorted(
-                # glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
+                # glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy")) # Use ZoeDepth predictions
                 glob.glob(
-                    os.path.join(self.input_folder, "depthany-vitl-indoor/*.npy")
-                )
+                    os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy")
+                )  # Use DepthAnything predictions
             )
             assert (
                 len(self.depth_paths) == self.n_img
@@ -289,14 +285,12 @@ class TartanAir(BaseDataset):
         self.load_poses(os.path.join(self.input_folder, "pose_left.txt"))
         self.poses = self.poses[::stride]
 
-
-        relative_poses = True # True to test the gt stream mapping
+        relative_poses = True  # True to test the gt stream mapping
         if relative_poses:
             self.poses = torch.from_numpy(np.array(self.poses))
             trans_10 = torch.inverse(self.poses[0].unsqueeze(0).repeat(self.poses.shape[0], 1, 1))
             self.poses = compose_transformations(trans_10, self.poses).numpy()
-        
-        
+
         # Adjust number of images according to strides
         self.n_img = len(self.color_paths)
 
@@ -312,7 +306,6 @@ class TartanAir(BaseDataset):
             c2w[:3, 3] = line[:3]
 
             self.poses.append(c2w)
-
 
 
 class Azure(BaseDataset):
@@ -845,5 +838,5 @@ dataset_dict = {
     "tumrgbd": TUM_RGBD,
     "eth3d": ETH3D,
     "euroc": EuRoC,
-    "tartanair": TartanAir
+    "tartanair": TartanAir,
 }
