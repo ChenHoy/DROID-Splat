@@ -8,7 +8,7 @@
 	path = ext/Depth-Anything
 	url = https://github.com/ChenHoy/Depth-Anything.git
 [submodule "ext/Zoedepth"]
-	path = ext/Zoedepth
+	path = ext/ZoeDepth
 	url = https://github.com/ChenHoy/ZoeDepth.git
 [submodule "thirdparty/diff-gaussian-rasterization-w-pose"]
 	path = thirdparty/diff-gaussian-rasterization-w-pose
