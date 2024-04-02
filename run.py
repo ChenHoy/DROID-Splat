@@ -107,6 +107,9 @@ def set_args(args, cfg):
 
     assert cfg["mode"] in ["rgbd", "prgbd", "mono", "stereo"], "Unknown mode: {}".format(cfg["mode"])
     cfg["stride"] = args.stride if args.stride is not None else cfg["stride"]
+
+    # Overwrite directory from cli manually
+    cfg["data"]["input_folder"] = args.input_folder if args.input_folder is not None else cfg["data"]["input_folder"]
     if args.output is None:
         output_dir = cfg["data"]["output"]
     else:
