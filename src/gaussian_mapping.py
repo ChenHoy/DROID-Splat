@@ -72,6 +72,7 @@ class GaussianMapper(object):
         self.pipeline_params = munchify(config["pipeline_params"])
         self.training_params = munchify(config["Training"])
         self.setup = munchify(config["Setup"])
+        print(self.setup.warmup)
         self.delay = 3 # Delay between tracking and mapping
 
         
@@ -223,8 +224,8 @@ class GaussianMapper(object):
         device = self.video.device
         poses = torch.index_select(self.video.poses, 0, dirty_index)
         disps = torch.index_select(self.video.disps_up, 0, dirty_index)
-        # thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
-        thresh = 0.005
+        thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
+        #thresh = 0.005
         intrinsics = self.video.intrinsics[0] * self.video.scale_factor
         count = droid_backends.depth_filter(poses, disps, intrinsics, dirty_index, thresh)
 
@@ -365,8 +366,8 @@ class GaussianMapper(object):
         return keyframes
 
     def __call__(self, the_end=False):
-
         cur_idx = int(self.video.filtered_id.item()) 
+        print(cur_idx, self.setup.warmup)
 
         
         if self.last_idx + self.delay < cur_idx and cur_idx > self.setup.warmup:
@@ -408,8 +409,8 @@ class GaussianMapper(object):
                     gui_utils.GaussianPacket(
                         gaussians=clone_obj(self.gaussians),
                         current_frame=cam,
-                        # keyframes=self.cameras,
-                        keyframe=cam,
+                        keyframes=self.cameras, # TODO: only pass cameras that got updated
+                        # keyframe=cam,
                         kf_window=None,
                         gtcolor=cam.original_image,
                         gtdepth=cam.depth.detach().cpu().numpy(),
@@ -420,7 +421,7 @@ class GaussianMapper(object):
 
             # Save renders
             if self.setup.save_renders and cam.uid % 5 == 0:
-                self.save_render(cam, f"{self.slam.output}/renders/mapping/{cam.uid}.png")
+                self.save_render(cam, f"{self.output}/renders/mapping/{cam.uid}.png")
 
 
         elif the_end and self.last_idx + self.delay == cur_idx:
@@ -445,12 +446,12 @@ class GaussianMapper(object):
                     )
             print("Mapping refinement finished")
             
-            self.gaussians.save_ply(f"{self.slam.output}/mesh/final.ply")
+            self.gaussians.save_ply(f"{self.output}/mesh/final.ply")
             print("Mesh saved")
 
             if self.setup.save_renders:
                 for cam in self.cameras:
-                    self.save_render(cam, f"{self.slam.output}/renders/final/{cam.uid}.png")
+                    self.save_render(cam, f"{self.output}/renders/final/{cam.uid}.png")
 
             fig, ax = plt.subplots()
             ax.set_title("Loss per frame evolution")

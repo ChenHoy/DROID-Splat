@@ -102,11 +102,10 @@ class SLAM:
             self.output = cfg["data"]["output"]
         else:
             self.output = args.output
-        #os.makedirs(self.output, exist_ok=True)
         os.makedirs(f"{self.output}/logs/", exist_ok=True)
-        #os.makedirs(f"{self.output}/renders/", exist_ok=True)
         os.makedirs(f"{self.output}/renders/mapping/", exist_ok=True)
         os.makedirs(f"{self.output}/renders/final", exist_ok=True)
+        os.makedirs(f"{self.output}/mesh", exist_ok=True)
 
         self.update_cam(cfg)
         self.load_bound(cfg)
@@ -116,8 +115,6 @@ class SLAM:
         self.load_pretrained(cfg["tracking"]["pretrained"])
         self.net.to(self.device).eval()
         self.net.share_memory()
-
-        self.renderer = Renderer(cfg, args, self)
 
         self.num_running_thread = torch.zeros((1)).int()
         self.num_running_thread.share_memory_()
@@ -149,8 +146,7 @@ class SLAM:
         # post processor - fill in poses for non-keyframes
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
 
-        self.mapping_queue = mp.Queue()
-        self.gaussian_mapper = GaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
+        self.gaussian_mapper = GaussianMapper(cfg, args, self)
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
@@ -210,8 +206,8 @@ class SLAM:
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
-            input_queue.put(image)
-            input_queue.put(depth)
+            # input_queue.put(image)
+            # input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 

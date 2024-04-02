@@ -173,8 +173,8 @@ Training:
 
 
 Setup:
-  warmup: 30 # Wait until tracking gets to this frame
-  mapping_iters: 20 # At each new frame, 10 views
+  warmup: 13 # Wait until tracking gets to this frame
+  mapping_iters: 5 # At each new frame, 10 views
   refinement_iters: 100 # Once at the end, all views
   use_gui: True
   optimize_poses: False
