@@ -10,6 +10,10 @@
 	path = thirdparty/simple-knn
 	branch = main
 	url = https://github.com/camenduru/simple-knn.git
+[submodule "thirdparty/diff-gaussian-rasterization-w-pose"]
+	path = thirdparty/diff-gaussian-rasterization-w-pose
+	branch = main
+	url = https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose.git
 [submodule "ext/Depth-Anything"]
 	path = ext/Depth-Anything
 	branch = main
