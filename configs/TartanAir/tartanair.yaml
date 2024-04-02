@@ -4,6 +4,7 @@ mode: 'mono'
 stride: 1
 mapping:
   device: "cuda:0"
+  bound: [[-10.0, 10.0], [-10.0, 10.0], [-10.0, 10.0]]
 
 tracking:
   device: "cuda:0"
@@ -25,17 +26,16 @@ tracking:
 
 cam:
   ### original camera parameters
-  H: 680
-  W: 1200
-  fx: 600.0
-  fy: 600.0
-  cx: 599.5
-  cy: 339.5
-  png_depth_scale: 6553.5 #for depth image in png format
+  H: 480
+  W: 640
+  fx: 320.0
+  fy: 320.0
+  cx: 320.0
+  cy: 240.0
   ### target/output camera settings, camera_size -> resize -> crop -> target_size
   H_edge: 0
   W_edge: 0
-  H_out: 320
+  H_out: 480
   W_out: 640
 
 rendering:
@@ -50,3 +50,8 @@ meshing:
   n_points_to_eval: 200000
   mesh_threshold_to_eval: 0.05
   forecast_radius: 25
+
+
+data:
+  input_folder: /media/data/TartanAir/seasidetown/Easy/P000
+  output: ""
