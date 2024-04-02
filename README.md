@@ -188,6 +188,12 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
   - [x] Implement Gauss-Newton updates in Python on combined objective of Reprojection error and Depth prior loss with fixed pose graph
   - [x] Use a mixed residual objective in a true least-squares objective
 - [x] FIX bug in ellipsoid renderer
+- [ ] FIX bug in Gaussian Mapper and Multiview filter
+    - [ ] Which array creates the memory access error?
+    - [ ] How can we resolve this?
+- [ ] FIX bug in scale optimization / Python BA on outdoor scenes
+    - [ ] Optimization turns instable over longer windows and large scenes. What is the source?
+    - [ ] Fix scale parameters after optimizing them once?
 - [ ] Backpropagate the pose loss from the Rendering objective into the SLAM tracking
     - [ ] Optimize poses with additional optimizer
     - [ ] Setup synchronization between mapping and frontend/backend
