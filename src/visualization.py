@@ -42,7 +42,7 @@ CAM_POINTS = np.array(
 CAM_LINES = np.array([[1, 2], [2, 3], [3, 4], [4, 1], [1, 0], [0, 2], [3, 0], [0, 4], [5, 7], [7, 6]])
 
 
-def depth2rgb(depths: torch.Tensor) -> np.ndarray:
+def depth2rgb(depths: torch.Tensor, min_depth: float = 0.0, max_depth: float = 5.0) -> np.ndarray:
     """Convert a depth array to a color representation.
 
     args:
@@ -55,7 +55,7 @@ def depth2rgb(depths: torch.Tensor) -> np.ndarray:
     depths = depths.cpu().numpy()
     rgb = []
     for depth in depths:
-        rgb.append(get_clipped_depth_visualization(depth))
+        rgb.append(get_clipped_depth_visualization(depth, min_depth, max_depth))
     return np.asarray(rgb)[..., :3]
 
 
@@ -245,80 +245,79 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
     def start_stop_view_resetting(vis):
         droid_visualization.do_reset = not droid_visualization.do_reset
 
+    @torch.no_grad()
     def animation_callback(vis):
         cam_params = vis.get_view_control().convert_to_pinhole_camera_parameters()
 
-        with torch.no_grad():
+        with video.get_lock():
+            t = video.counter.value
+            (dirty_index,) = torch.where(video.dirty.clone())
+            dirty_index = dirty_index
 
-            with video.get_lock():
-                t = video.counter.value
-                (dirty_index,) = torch.where(video.dirty.clone())
-                dirty_index = dirty_index
+        if len(dirty_index) == 0:
+            return
 
-            if len(dirty_index) == 0:
-                return
+        video.dirty[dirty_index] = False
 
-            video.dirty[dirty_index] = False
+        # convert poses to 4x4 matrix
+        poses = torch.index_select(video.poses, 0, dirty_index)
+        disps = torch.index_select(video.disps, 0, dirty_index)
+        Ps = SE3(poses).inv().matrix().cpu().numpy()
 
-            # convert poses to 4x4 matrix
-            poses = torch.index_select(video.poses, 0, dirty_index)
-            disps = torch.index_select(video.disps, 0, dirty_index)
-            Ps = SE3(poses).inv().matrix().cpu().numpy()
+        images = torch.index_select(video.images, 0, dirty_index)
+        # images = images.cpu()[:, [2, 1, 0], 3::8, 3::8].permute(0, 2, 3, 1)
+        images = images.cpu()[:, ..., 3::8, 3::8].permute(0, 2, 3, 1)
+        points = droid_backends.iproj(SE3(poses).inv().data, disps, video.intrinsics[0]).cpu()
 
-            images = torch.index_select(video.images, 0, dirty_index)
-            # images = images.cpu()[:, [2, 1, 0], 3::8, 3::8].permute(0, 2, 3, 1)
-            images = images.cpu()[:, ..., 3::8, 3::8].permute(0, 2, 3, 1)
-            points = droid_backends.iproj(SE3(poses).inv().data, disps, video.intrinsics[0]).cpu()
+        thresh = droid_visualization.filter_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
 
-            thresh = droid_visualization.filter_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
+        count = droid_backends.depth_filter(video.poses, video.disps, video.intrinsics[0], dirty_index, thresh)
 
-            count = droid_backends.depth_filter(video.poses, video.disps, video.intrinsics[0], dirty_index, thresh)
+        count, disps = count.cpu(), disps.cpu()
+        masks = (count >= 2) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
 
-            count, disps = count.cpu(), disps.cpu()
-            masks = (count >= 2) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
+        for i in range(len(dirty_index)):
+            pose = Ps[i]
+            ix = dirty_index[i].item()
 
-            for i in range(len(dirty_index)):
-                pose = Ps[i]
-                ix = dirty_index[i].item()
+            if ix in droid_visualization.cameras:
+                vis.remove_geometry(
+                    droid_visualization.cameras[ix],
+                    reset_bounding_box=droid_visualization.do_reset,
+                )
+                del droid_visualization.cameras[ix]
 
-                if ix in droid_visualization.cameras:
-                    vis.remove_geometry(
-                        droid_visualization.cameras[ix],
-                        reset_bounding_box=droid_visualization.do_reset,
-                    )
-                    del droid_visualization.cameras[ix]
+            if ix in droid_visualization.points:
+                vis.remove_geometry(
+                    droid_visualization.points[ix],
+                    reset_bounding_box=droid_visualization.do_reset,
+                )
+                del droid_visualization.points[ix]
 
-                if ix in droid_visualization.points:
-                    vis.remove_geometry(
-                        droid_visualization.points[ix],
-                        reset_bounding_box=droid_visualization.do_reset,
-                    )
-                    del droid_visualization.points[ix]
+            ### add camera actor ###
+            cam_actor = create_camera_actor(True, droid_visualization.camera_scale)
+            cam_actor.transform(pose)
+            vis.add_geometry(cam_actor, reset_bounding_box=droid_visualization.do_reset)
+            droid_visualization.cameras[ix] = cam_actor
 
-                ### add camera actor ###
-                cam_actor = create_camera_actor(True, droid_visualization.camera_scale)
-                cam_actor.transform(pose)
-                vis.add_geometry(cam_actor, reset_bounding_box=droid_visualization.do_reset)
-                droid_visualization.cameras[ix] = cam_actor
+            mask = masks[i].reshape(-1)
+            pts = points[i].reshape(-1, 3)[mask].cpu().numpy()
+            clr = images[i].reshape(-1, 3)[mask].cpu().numpy()
 
-                mask = masks[i].reshape(-1)
-                pts = points[i].reshape(-1, 3)[mask].cpu().numpy()
-                clr = images[i].reshape(-1, 3)[mask].cpu().numpy()
+            ## add point actor ###
+            point_actor = create_point_actor(pts, clr)
+            vis.add_geometry(point_actor, reset_bounding_box=droid_visualization.do_reset)
+            droid_visualization.points[ix] = point_actor
 
-                ## add point actor ###
-                point_actor = create_point_actor(pts, clr)
-                vis.add_geometry(point_actor, reset_bounding_box=droid_visualization.do_reset)
-                droid_visualization.points[ix] = point_actor
+        # hack to allow interacting with vizualization during inference
+        # if len(droid_visualization.cameras) >= droid_visualization.warmup:
+        #     cam = vis.get_view_control().convert_from_pinhole_camera_parameters(cam)
 
-            # hack to allow interacting with vizualization during inference
-            # if len(droid_visualization.cameras) >= droid_visualization.warmup:
-            #     cam = vis.get_view_control().convert_from_pinhole_camera_parameters(cam)
+        droid_visualization.ix += 1
 
-            droid_visualization.ix += 1
-
-            cam = vis.get_view_control().convert_from_pinhole_camera_parameters(cam_params, True)
-            vis.poll_events()
-            vis.update_renderer()
+        cam = vis.get_view_control().convert_from_pinhole_camera_parameters(cam_params, True)
+        vis.poll_events()
+        vis.update_renderer()
 
     ### create Open3D visualization ###
     vis = o3d.visualization.VisualizerWithKeyCallback()
