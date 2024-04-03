@@ -103,18 +103,11 @@ class GaussianMapper(object):
 
         self.show_filtered = False
 
-    def camera_from_gt(self):
-        idx, image, depth, intrinsic, gt_pose = self.mapping_queue.get()
-        image, depth, intrinsic, gt_pose = (
-            image.squeeze().to(self.device),
-            depth.to(self.device),
-            intrinsic.to(self.device),
-            gt_pose.to(self.device),
-        )
-        return self.camera_from_frame(idx, image, depth, intrinsic, gt_pose)
+        self.mapping_queue = mapping_queue
+
 
     # TODO only take object here if dirty_index is set to see if this is a new updated frame
-    def camera_from_video(self, idx: int):
+    def camera_from_video(self, idx):
         """
         Takes the frame data from the video and returns a Camera object.
         """
@@ -211,21 +204,43 @@ class GaussianMapper(object):
     def depth_filter(self, idx: int):
         """
         Gets the video and the time idex and returns the mask.
+        
+        
+        Tried:
+        -setting the cuda device to 1
+        -set the debug flags in bashrc
+        -using clone_obj
+        -checked the locking for dirty_index
+        -if you access poses or disps_up or poses directly you get the error
+        -setting torch.backends.cudnn.benmark = False
+        -tried running it on cpu (got another error Input type (c10::Half) and bias type (float) should be the same)
         """
+        
+
         # TODO why doesnt it work only with one index?
         with self.video.get_lock():
             (dirty_index,) = torch.where(self.video.dirty.clone())
             dirty_index = dirty_index
 
+
         device = self.video.device
-        poses = torch.index_select(self.video.poses, 0, dirty_index)
-        disps = torch.index_select(self.video.disps_up, 0, dirty_index)
+        poses = torch.index_select(clone_obj(self.video.poses), 0, dirty_index) ## BUG same here
+        print(self.video.disps_up.shape) ## half of it is empty
+        print("Dirty index:",dirty_index)
+        disps = torch.index_select(clone_obj(self.video.disps_up), 0, dirty_index) ## BUG here
         # thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
-        thresh = 0.005
+        thresh = torch.tensor(0.005).unsqueeze(0)
         intrinsics = self.video.intrinsics[0] * self.video.scale_factor
         count = droid_backends.depth_filter(poses, disps, intrinsics, dirty_index, thresh)
 
-        mask = (count >= 1) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
+        # mask = (count >= 1) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
+        print("poses shape: {}".format(poses.shape))
+        mean_disps = disps.mean(dim=[1, 2], keepdim=True)
+        half_mean_disps = 0.5 * mean_disps
+        disps_greater_than_half_mean = disps > half_mean_disps
+        count_greater_than_or_equal_to_one = count >= 1
+        mask = count_greater_than_or_equal_to_one & disps_greater_than_half_mean
+
         if len(mask) > 0:
             mask = mask[idx]
 
@@ -448,6 +463,14 @@ class GaussianMapper(object):
                 for cam in self.cameras:
                     self.save_render(cam, f"{self.setup.render_path}/final/{cam.uid}.png")
 
+
+            ## export the cameras and gaussians to the terminate process
+            self.mapping_queue.put(gui_utils.EvaluatePacket(
+                pipeline_params=self.pipeline_params,
+                cameras=self.cameras,
+                gaussians=clone_obj(self.gaussians),
+                background=self.background
+            ))
 
             # fig, ax = plt.subplots()
             # ax.set_title("Loss per frame evolution")

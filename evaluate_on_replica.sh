@@ -3,7 +3,7 @@
 MODE=$1
 EXPNAME=$2
 
-OUT_DIR=/home/andrei/go-slam-tests
+OUT_DIR=/home/andrei/Go-Droid-SLAM-full/evaluation_results
 
 scenes="office0"
 
@@ -29,15 +29,15 @@ for sc in ${scenes}
 do
   echo
   echo For ${sc}:
-  cat ${OUT_DIR}/${sc}/${EXPNAME}/metrics_traj.txt
+  cat ${OUT_DIR}/${sc}/${EXPNAME}/combined_results.csv
   echo
-  cat ${OUT_DIR}/${sc}/${EXPNAME}/metrics_mesh.txt
+  # cat ${OUT_DIR}/${sc}/${EXPNAME}/metrics_mesh.txt
 
   echo >> $SUMMARY
   echo For ${sc}: >> $SUMMARY
-  cat ${OUT_DIR}/${sc}/${EXPNAME}/metrics_traj.txt >> $SUMMARY
+  cat ${OUT_DIR}/${sc}/${EXPNAME}/combined_results.csv >> $SUMMARY
   echo >> SUMMARY
-  cat ${OUT_DIR}/${sc}/${EXPNAME}/metrics_mesh.txt >> $SUMMARY
+  # cat ${OUT_DIR}/${sc}/${EXPNAME}/metrics_mesh.txt >> $SUMMARY
 done
 
 echo All Done!

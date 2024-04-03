@@ -25,6 +25,8 @@ from .gaussian_mapping import GaussianMapper
 from .gaussian_splatting.eval_utils import eval_ate, eval_rendering, save_gaussians
 import pandas as pd
 from .render import Renderer
+from multiprocessing import Manager
+
 
 class Tracker(nn.Module):
     def __init__(self, cfg, args, slam):
@@ -149,6 +151,7 @@ class SLAM:
         # post processor - fill in poses for non-keyframes
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
 
+        ## Used to share packeets for evaluation from the gaussian mapper
         self.mapping_queue = mp.Queue()
         self.gaussian_mapper = GaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
 
@@ -157,6 +160,8 @@ class SLAM:
         # self.evaluate = cfg["evaluate"]
         self.evaluate = True
         self.dataset = None
+
+
 
     def set_dataset(self, dataset):
         self.dataset = dataset
@@ -254,6 +259,7 @@ class SLAM:
 
         print("Multiview Filtering Done!")
 
+    ## BUG: gaussian_mapping is not ending
     def gaussian_mapping(self, rank, dont_run=False):
         print("Gaussian Mapping Triggered!")
         self.all_trigered += 1
@@ -262,50 +268,17 @@ class SLAM:
                 sleep(1.0)
             self.gaussian_mapper()
         finished = False
+        print("got here ----------------------------------") ## BUG: never reached
         if not dont_run:
-            print("Last run")
+            print("Last run") ## BUG: this is never reached
             while not finished:
                 finished = self.gaussian_mapper(the_end=True)
 
         self.gaussian_mapping_finished += 1
+        # self.shared_space['gaussian_mapper'] = self.gaussian_mapper
         print("Gaussian Mapping Done!")
 
-        ### -------------- to be moved in termination thread -------------------
-        if self.evaluate:
-            print("Initialize my evaluation")
-
-            eval_save_path = "results_imgs/"
-
-            _, kf_indices = self.gaussian_mapper.select_keyframes() 
-            print("Selected keyframe indices:", kf_indices)
-            rendering_result = eval_rendering(
-                self.gaussian_mapper.cameras,
-                self.gaussian_mapper.gaussians,
-                self.dataset,
-                eval_save_path,
-                self.gaussian_mapper.pipeline_params,
-                self.gaussian_mapper.background,
-                kf_indices=kf_indices,
-                iteration="final",
-            )
-
-            print("Rendering evaluation result:", rendering_result)
-
-            ## TODO: add ATE from the other part
-            columns = ["tag", "psnr", "ssim", "lpips"]
-            data = [
-                [
-                    "final",
-                    rendering_result["mean_psnr"],
-                    rendering_result["mean_ssim"],
-                    rendering_result["mean_lpips"],
-                ]
-            ]
-
-            df = pd.DataFrame(data, columns=columns)
-            df.to_csv(os.path.join(eval_save_path,"metrics.csv"), index=False)
-
-            print("Evaluation complete")
+     
 
     def visualizing(self, rank, dont_run=False):
         print("Visualization triggered!")
@@ -368,23 +341,33 @@ class SLAM:
 
 
             ### -------------- to be moved in termination thread -------------------
-            print("Initialize my evaluation")
+            print("Initialize my evaluation in the termination method")
+            print("Shape of images:",self.video.images.shape)
+            print("Shape of poses:",self.video.poses.shape)
+            print("Shape of ground truth poses:",self.video.poses_gt.shape)
+            print("Check that gt poses are not empty:",self.video.poses_gt[25])
+            # rendering_packet = self.mapping_queue.get() 
+            # print("The eval packet is:",rendering_packet) ## Andrei BUG: doesn't reach this
 
-            eval_save_path = "results_imgs/"
-            print("Number of cameras / frames:",len(self.gaussian_mapper.cameras)) ## BUG: why is number of camera 0 here?
-            _, kf_indices = self.gaussian_mapper.select_keyframes()
-            print("Selected keyframe indices:", kf_indices)
+            eval_save_path = "evaluation_results/"
+            # retrieved_mapper = self.shared_data['gaussian_mapper']
+            # print("Number of cameras / frames:",len(self.gaussian_mapper.cameras)) ## BUG: why is number of camera 0 here?
+            # print("Last index of gaussian_mapper:",self.gaussian_mapper.last_idx)
 
-            rendering_result = eval_rendering(
-                self.gaussian_mapper.cameras,
-                self.gaussian_mapper.gaussians,
-                self.dataset,
-                eval_save_path,
-                self.gaussian_mapper.pipeline_params,
-                self.gaussian_mapper.background,
-                kf_indices=kf_indices,
-                iteration="final",
-            )
+            # # print("Retrieved mapper camera {}. Retrieved mapper last idx {}".format(retrieved_mapper.cameras,retrieved_mapper.last_idx)) 
+            # _, kf_indices = self.gaussian_mapper.select_keyframes()
+            # print("Selected keyframe indices:", kf_indices)
+
+            # rendering_result = eval_rendering(
+            #     self.gaussian_mapper.cameras,
+            #     self.gaussian_mapper.gaussians,
+            #     self.dataset,
+            #     eval_save_path,
+            #     self.gaussian_mapper.pipeline_params,
+            #     self.gaussian_mapper.background,
+            #     kf_indices=kf_indices,
+            #     iteration="final",
+            # )
 
             print("#" * 20 + f" Results for {stream.input_folder} ...")
 
@@ -444,36 +427,56 @@ class SLAM:
                     correct_scale=True,
                 )
 
-                ## TODO: change this for depth videos
-                # result_ate = eval_ate(self.gaussian_mapper.cameras,kf_ids=kf_indices,save_dir=eval_save_path,iterations=-1,final=True,monocular=True)
-            
+                ## QUESTION: shouldnt the two APEs be identical then? They should
                 
-                out_path = os.path.join(self.output, "metrics_traj.txt")
 
-                print("Rendering evaluation result:", rendering_result)
-                print("ATE result: ", result_ape.info,result_ape.stats)
+                ## TODO: change this for depth videos
+                '''
+                Set keyframes_only to True to compute the APE and plots on keyframes only.
+                '''
+                result_ate = eval_ate(self.video,kf_ids=list(range(len(self.video.images)))
+                                      ,save_dir=eval_save_path,iterations=-1,
+                                      final=True,monocular=True,
+                                      keyframes_only=False,
+                                      camera_trajectory=camera_trajectory,
+                                      stream=stream)
+                    
+                out_path = os.path.join(eval_save_path, "metrics_traj.txt")
 
-                ## TODO: add ATE
-                columns = ["tag", "psnr", "ssim", "lpips","ape"]
-                data = [
-                    [
-                        "optimizing + multiview ",
-                        rendering_result["mean_psnr"],
-                        rendering_result["mean_ssim"],
-                        rendering_result["mean_lpips"],
-                        result_ape.stats['mean']
-                    ]
-                ]
+                # print("Rendering evaluation result:", rendering_result)
+                ## I can just use the ape from up which is correct and
+                ## fix the figure from the second one
+                print("APE result: ", result_ape.info,result_ape.stats)
+                print("ATE result: ", result_ate)
 
-                df = pd.DataFrame(data, columns=columns)
-                df.to_csv(os.path.join(eval_save_path,"metrics.csv"), index=False)
+                result_ate['method'] = 'monogs evaluation'
+
+                # with open(out_path, "a") as fp:
+                #     fp.write(result_ape.pretty_str())
+                # trans_init = result_ape.np_arrays["alignment_transformation_sim3"]
+
+                result_ape.stats['method'] = 'GO SLAM evaluation'
+
+                trajectory_df = pd.DataFrame([result_ate,result_ape.stats])
+                trajectory_df.to_csv(os.path.join(eval_save_path,"combined_ape_trajectory_results.csv"),index=False)
+                # ## TODO: add ATE
+                # columns = ["tag", "psnr", "ssim", "lpips","ape"]
+                # data = [
+                #     [
+                #         "optimizing + multiview ",
+                #         rendering_result["mean_psnr"],
+                #         rendering_result["mean_ssim"],
+                #         rendering_result["mean_lpips"],
+                #         result_ape.stats['mean']
+                #     ]
+                # ]
+
+                # df = pd.DataFrame(data, columns=columns)
+                # df.to_csv(os.path.join(eval_save_path,"metrics.csv"), index=False)
 
                 print("Evaluation complete")
 
-                with open(out_path, "a") as fp:
-                    fp.write(result_ape.pretty_str())
-                trans_init = result_ape.np_arrays["alignment_transformation_sim3"]
-
+                
 
 
         print("Terminate: Done!")
@@ -486,7 +489,7 @@ class SLAM:
             mp.Process(target=self.optimizing, args=(2, False)),
             mp.Process(target=self.multiview_filtering, args=(3, False)),
             mp.Process(target=self.visualizing, args=(4, True)),
-            mp.Process(target=self.gaussian_mapping, args=(5, False)),
+            mp.Process(target=self.gaussian_mapping, args=(5, True)),
         ]
 
         self.num_running_thread[0] += len(processes)
