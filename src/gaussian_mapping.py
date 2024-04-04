@@ -72,9 +72,8 @@ class GaussianMapper(object):
         self.pipeline_params = munchify(config["pipeline_params"])
         self.training_params = munchify(config["Training"])
         self.setup = munchify(config["Setup"])
-        print(self.setup.warmup)
         self.delay = 3 # Delay between tracking and mapping
-
+        print(self.setup)
         
         self.use_spherical_harmonics = False
         self.model_params.sh_degree = 3 if self.use_spherical_harmonics else 0
@@ -104,6 +103,9 @@ class GaussianMapper(object):
         self.loss_list = []
         self.last_idx = 0
         self.initialized = False
+
+        self.n_last_frames = 10
+        self.n_rand_frames = 5
 
         self.show_filtered = False
 
@@ -225,11 +227,11 @@ class GaussianMapper(object):
         poses = torch.index_select(self.video.poses, 0, dirty_index)
         disps = torch.index_select(self.video.disps_up, 0, dirty_index)
         thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
-        #thresh = 0.005
+        #thresh = 0.01 * torch.ones_like(disps.mean(dim=[1, 2]))
         intrinsics = self.video.intrinsics[0] * self.video.scale_factor
         count = droid_backends.depth_filter(poses, disps, intrinsics, dirty_index, thresh)
 
-        mask = (count >= 1) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
+        mask = (count >= 1) & (disps > 0.05 * disps.mean(dim=[1, 2], keepdim=True))
         if len(mask) > 0:
             mask = mask[idx]
 
@@ -278,6 +280,7 @@ class GaussianMapper(object):
         if self.setup.optimize_poses:
             pose_optimizer = self.pose_optimizer(self.cameras)
         loss = 0
+        self.occ_aware_visibility = {}
         for view in frames:
 
             render_pkg = render(view, self.gaussians, self.pipeline_params, self.background)
@@ -301,10 +304,12 @@ class GaussianMapper(object):
             )
 
             loss += self.mapping_loss(image, depth, view)
+            if self.last_idx - view.uid < self.n_last_frames:
+                self.occ_aware_visibility[view.uid] = (n_touched > 0).long()
 
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-        loss += len(frames) * isotropic_loss.mean()
+        loss += 5 * len(frames) * isotropic_loss.mean()
         loss.backward()
 
         with torch.no_grad():
@@ -316,13 +321,16 @@ class GaussianMapper(object):
             if densify:
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-            if self.last_idx > 0 and (iter + 1) % self.training_params.prune_every == 0:
-                self.gaussians.densify_and_prune(
-                    self.opt_params.densify_grad_threshold,
-                    pruning_params.gaussian_th,
-                    pruning_params.gaussian_extent,
-                    pruning_params.size_threshold,
+            if self.last_idx > self.n_last_frames and (iter + 1) % self.training_params.prune_every == 0:
+                self.prune_gaussians() # Covisibility based pruning for recently added gaussians 
+                self.gaussians.densify_and_prune( # General pruning based on opacity and size + densification
+                self.opt_params.densify_grad_threshold,
+                pruning_params.gaussian_th,
+                pruning_params.gaussian_extent,
+                pruning_params.size_threshold,
                 )
+
+
             self.gaussians.optimizer.step()
             self.gaussians.optimizer.zero_grad()
             self.gaussians.update_learning_rate(self.last_idx)
@@ -354,26 +362,56 @@ class GaussianMapper(object):
         l1_depth = torch.abs(depth * depth_pixel_mask - gt_depth * depth_pixel_mask)
 
         return alpha * l1_rgb.mean() + (1 - alpha) * l1_depth.mean()
+    
+    def prune_gaussians(self):
+        """
+        Covisibility based pruning
+        """
+
+        # TODO: add both parameters to the config
+        prune_coviz = 3 # Visibility threshold
+
+
+        new_frames = self.cameras[-self.n_last_frames:]
+        new_idx = [view.uid for view in new_frames]
+        sorted_frames = sorted(new_idx, reverse=True)
+
+        self.gaussians.n_obs.fill_(0)
+        for _, visibility in self.occ_aware_visibility.items():
+            self.gaussians.n_obs += visibility.cpu()
+
+        mask = self.gaussians.unique_kfIDs >= sorted_frames[2] # Gaussians added on the last 3 frames
+
+        to_prune = torch.logical_and(
+            self.gaussians.n_obs <= prune_coviz, mask
+        )
+        self.gaussians.prune_points(to_prune.cuda())
+        for idx in new_idx:
+            self.occ_aware_visibility[idx] = (
+                self.occ_aware_visibility[idx][~to_prune]
+            )
+        print(f"Covisibility based pruning removed {to_prune.sum()} gaussians")
+
+
+
 
     def select_keyframes(self):
-        # Select last 5 frames and other 5 random frames
-        if len(self.cameras) <= 10:
+        # Select n_last_frames and other n_rand_frames
+        if len(self.cameras) <= self.n_last_frames + self.n_rand_frames:
             keyframes = self.cameras
         else:
-            keyframes = self.cameras[-5:] + [
-                self.cameras[i] for i in np.random.choice(len(self.cameras) - 5, 5, replace=False)
+            keyframes = self.cameras[-self.n_last_frames:] + [
+                self.cameras[i] for i in np.random.choice(len(self.cameras) - self.n_last_frames, self.n_rand_frames, replace=False)
             ]
         return keyframes
 
     def __call__(self, the_end=False):
         cur_idx = int(self.video.filtered_id.item()) 
-        print(cur_idx, self.setup.warmup)
-
         
         if self.last_idx + self.delay < cur_idx and cur_idx > self.setup.warmup:
             self.last_idx += 1
             
-            print(f"\n      Starting frame: {self.last_idx}. Gaussians: {self.gaussians.get_xyz.shape[0]}. Video at {cur_idx}")
+            print(f"\nStarting frame: {self.last_idx}. Gaussians: {self.gaussians.get_xyz.shape[0]}. Video at {cur_idx}")
 
 
             # Add camera of the last frame
@@ -399,7 +437,7 @@ class GaussianMapper(object):
                     self.frame_updater(frames)
 
                 loss = self.mapping_step(
-                    iter, frames, self.training_params, densify=True, optimize_poses=self.setup.optimize_poses
+                    iter, frames, self.training_params, densify=True, optimize_poses=False
                 )
                 self.loss_list.append(loss / len(frames))
 
@@ -425,7 +463,7 @@ class GaussianMapper(object):
 
 
         elif the_end and self.last_idx + self.delay == cur_idx:
-            print("Mapping refinement starting")
+            print("\nMapping refinement starting")
 
             for iter in range(self.setup.refinement_iters):
                 loss = self.mapping_step(
@@ -446,7 +484,7 @@ class GaussianMapper(object):
                     )
             print("Mapping refinement finished")
             
-            self.gaussians.save_ply(f"{self.output}/mesh/final.ply")
+            self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
             print("Mesh saved")
 
             if self.setup.save_renders:
@@ -467,3 +505,4 @@ class GaussianMapper(object):
             plt.show()
 
             return True
+        

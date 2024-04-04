@@ -53,7 +53,7 @@ tracking:
   warmup: 8
   upsample: True
   motion_filter:
-    thresh: 5.0  # add as keyframe if avg flow >:  4.0 pixels
+    thresh: 3.0  # add as keyframe if avg flow >:  4.0 pixels
   multiview_filter:
     thresh: 0.01  # depth error < 0.01m
     visible_num: 2  # points viewed by at least 2 cameras
@@ -155,7 +155,7 @@ Dataset:
 
 
 Training:
-  prune_every: 10
+  prune_every: 20
   rgb_boundary_threshold: 0.01
   alpha: 0.95
   gaussian_th: 0.005
@@ -173,8 +173,8 @@ Training:
 
 
 Setup:
-  warmup: 13 # Wait until tracking gets to this frame
-  mapping_iters: 5 # At each new frame, 10 views
+  warmup: 30 # Wait until tracking gets to this frame
+  mapping_iters: 50 # At each new frame, 10 views
   refinement_iters: 100 # Once at the end, all views
   use_gui: True
   optimize_poses: False

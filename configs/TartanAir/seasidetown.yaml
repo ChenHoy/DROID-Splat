@@ -1,0 +1,7 @@
+inherit_from: configs/TartanAir/tartanair.yaml
+mode: mono
+mapping:
+  bound: [[-10.0, 10.0], [-10.0, 10.0], [-10.0, 10.0]]
+data:
+  input_folder: /media/data/TartanAir/seasidetown/Easy/P000
+  output: ""

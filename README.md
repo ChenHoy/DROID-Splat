@@ -188,6 +188,9 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
   - [x] Implement Gauss-Newton updates in Python on combined objective of Reprojection error and Depth prior loss with fixed pose graph
   - [x] Use a mixed residual objective in a true least-squares objective
 - [x] FIX bug in ellipsoid renderer
+- [ ] Improve gaussian based mapping
+    - [ ] Add monoGS pruning based on co-visibility
+    - [ ] Optimize all incomming frames at the same time
 - [ ] Backpropagate the pose loss from the Rendering objective into the SLAM tracking
     - [ ] Optimize poses with additional optimizer
     - [ ] Setup synchronization between mapping and frontend/backend

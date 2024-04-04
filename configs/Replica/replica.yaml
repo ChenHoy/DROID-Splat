@@ -85,5 +85,4 @@ Setup:
   update_frames: True
   filter_depth: True
   save_renders: True
-  render_path: ""
-  mesh_path: ""
+
