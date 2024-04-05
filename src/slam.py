@@ -25,22 +25,21 @@ from .gaussian_mapping import GaussianMapper
 
 
 class Tracker(nn.Module):
-    def __init__(self, cfg, args, slam):
+    def __init__(self, cfg, slam):
         super(Tracker, self).__init__()
-        self.args = args
         self.cfg = cfg
-        self.device = args.device
+        self.device = cfg.slam.device
         self.net = slam.net
         self.video = slam.video
         self.verbose = slam.verbose
 
         # filter incoming frames so that there is enough motion
-        self.frontend_window = cfg["tracking"]["frontend"]["window"]
-        filter_thresh = cfg["tracking"]["motion_filter"]["thresh"]
+        self.frontend_window = cfg.tracking.frontend.window
+        filter_thresh = cfg.tracking.motion_filter.thresh
         self.motion_filter = MotionFilter(self.net, self.video, thresh=filter_thresh, device=self.device)
 
         # frontend process
-        self.frontend = Frontend(self.net, self.video, self.args, self.cfg)
+        self.frontend = Frontend(self.net, self.video, self.cfg)
 
     def forward(self, timestamp, image, depth, intrinsic, gt_pose=None):
         with torch.no_grad():
@@ -52,11 +51,10 @@ class Tracker(nn.Module):
 
 
 class BundleAdjustment(nn.Module):
-    def __init__(self, cfg, args, slam):
+    def __init__(self, cfg, slam):
         super(BundleAdjustment, self).__init__()
-        self.args = args
         self.cfg = cfg
-        self.device = args.device
+        self.device = cfg.slam.device
         self.net = slam.net
         self.video = slam.video
         self.verbose = slam.verbose
@@ -65,7 +63,7 @@ class BundleAdjustment(nn.Module):
         self.ba_counter = -1
 
         # backend process
-        self.backend = Backend(self.net, self.video, self.args, self.cfg)
+        self.backend = Backend(self.net, self.video, self.cfg)
 
     def info(self, msg):
         print(Fore.GREEN)
@@ -88,20 +86,17 @@ class BundleAdjustment(nn.Module):
 
 
 class SLAM:
-    def __init__(self, args, cfg):
+    def __init__(self, cfg):
         super(SLAM, self).__init__()
-        self.args = args
         self.cfg = cfg
-        self.device = args.device
-        self.verbose = cfg["verbose"]
-        self.mode = cfg["mode"]
-        self.only_tracking = cfg["only_tracking"]
-        self.make_video = args.make_video
+        self.device = cfg.slam.device
+        self.verbose = cfg.slam.verbose
+        self.mode = cfg.slam.mode
+        self.only_tracking = cfg.slam.only_tracking
+        self.make_video = cfg.slam.make_video
 
-        if args.output is None:
-            self.output = cfg["data"]["output"]
-        else:
-            self.output = args.output
+        self.output = cfg.slam.output_folder
+
         os.makedirs(f"{self.output}/logs/", exist_ok=True)
         os.makedirs(f"{self.output}/renders/mapping/", exist_ok=True)
         os.makedirs(f"{self.output}/renders/final", exist_ok=True)
@@ -112,7 +107,7 @@ class SLAM:
 
         self.net = DroidNet()
 
-        self.load_pretrained(cfg["tracking"]["pretrained"])
+        self.load_pretrained(cfg.tracking.pretrained)
         self.net.to(self.device).eval()
         self.net.share_memory()
 
@@ -136,17 +131,17 @@ class SLAM:
         self.reload_map.share_memory_()
 
         # store images, depth, poses, intrinsics (shared between process)
-        self.video = DepthVideo(cfg, args)
+        self.video = DepthVideo(cfg)
 
-        self.tracker = Tracker(cfg, args, self)
-        self.ba = BundleAdjustment(cfg, args, self)
+        self.tracker = Tracker(cfg, self)
+        self.ba = BundleAdjustment(cfg, self)
 
-        self.multiview_filter = MultiviewFilter(cfg, args, self)
+        self.multiview_filter = MultiviewFilter(cfg, self)
 
         # post processor - fill in poses for non-keyframes
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
 
-        self.gaussian_mapper = GaussianMapper(cfg, args, self)
+        self.gaussian_mapper = GaussianMapper(cfg, self)
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
@@ -157,12 +152,12 @@ class SLAM:
         such as resize or edge crop
         """
         # resize the input images to crop_size(variable name used in lietorch)
-        H, W = float(cfg["cam"]["H"]), float(cfg["cam"]["W"])
-        fx, fy = cfg["cam"]["fx"], cfg["cam"]["fy"]
-        cx, cy = cfg["cam"]["cx"], cfg["cam"]["cy"]
+        H, W = float(cfg.data.cam.H), float(cfg.data.cam.W)
+        fx, fy = cfg.data.cam.fx, cfg.data.cam.fy
+        cx, cy = cfg.data.cam.cx, cfg.data.cam.cy
 
-        h_edge, w_edge = cfg["cam"]["H_edge"], cfg["cam"]["W_edge"]
-        H_out, W_out = cfg["cam"]["H_out"], cfg["cam"]["W_out"]
+        h_edge, w_edge = cfg.data.cam.H_edge, cfg.data.cam.W_edge
+        H_out, W_out = cfg.data.cam.H_out, cfg.data.cam.W_out
 
         self.fx = fx * (W_out + w_edge * 2) / W
         self.fy = fy * (H_out + h_edge * 2) / H
@@ -181,7 +176,7 @@ class SLAM:
 
         """
         # scale the bound if there is a global scaling factor
-        self.bound = torch.from_numpy(np.array(cfg["mapping"]["bound"])).float()
+        self.bound = torch.from_numpy(np.array(cfg.data.bound)).float()
 
     def load_pretrained(self, pretrained):
         print(f"INFO: load pretrained checkpiont from {pretrained}!")
@@ -206,8 +201,8 @@ class SLAM:
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
-            # input_queue.put(image)
-            # input_queue.put(depth)
+            #input_queue.put(image)
+            #input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 

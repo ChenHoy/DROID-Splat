@@ -1,9 +1,0 @@
-inherit_from: configs/Replica/replica_mono.yaml
-mode: mono
-mapping:
-  bound: [[-2.0, 2.0], [-2.0, 2.0], [-2.0, 2.0]]
-meshing:
-  gt_mesh_path: /media/data/Replica/cull_replica_meshv2/office1.ply
-data:
-  input_folder: /media/data/Replica/office1
-  output: /media/data/Replica/office1/goslam/mono

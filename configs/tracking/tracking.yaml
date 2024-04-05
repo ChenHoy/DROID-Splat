@@ -1,0 +1,37 @@
+pretrained: ./pretrained/droid.pth
+# pretrained: ./../droidcalib/droid.pth # Sanity check
+buffer: 1024
+# TODO this is in stark contrast to demo where beta is 0.3
+beta: 0.75  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
+warmup: 8
+upsample: True
+motion_filter:
+  thresh: 3.0  # add as keyframe if avg flow >:  4.0 pixels
+
+
+multiview_filter:
+  thresh: 0.01  # depth error < 0.01m
+  visible_num: 2  # points viewed by at least 2 cameras
+  kernel_size: inf
+  bound_enlarge_scale: 1.20
+
+
+frontend:
+  enable_loop: True
+  keyframe_thresh: 6.0  # remove keyframe if avg flow < 4.0 pixels
+  thresh: 16.0  # only consider edge with avg flow < 16.0 pixels
+  window: 25  # local ba window size
+  radius: 2
+  nms: 1
+  max_factors: 100  # num of edges within local ba
+
+  
+backend:
+  thresh: 25.0  # only consider edge with avg flow < 25.0 pixels
+  radius: 1
+  nms: 5
+  # used for loop detection
+  loop_window: 25
+  loop_thresh: 50.0  # only consider edge with avg flow < 50.0 pixels
+  loop_radius: 1
+  loop_nms: 12

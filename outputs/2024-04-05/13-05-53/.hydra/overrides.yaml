@@ -1,0 +1,3 @@
+- data.cam.H_out=272
+- data.cam.W_out=480
+- slam.output_folder=/home/leon/go-slam-tests/test

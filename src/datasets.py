@@ -77,17 +77,17 @@ def quaternion_to_matrix(quaternions: torch.Tensor) -> torch.Tensor:
     return o.reshape(quaternions.shape[:-1] + (3, 3))
 
 
-def get_dataset(cfg, args, device="cuda:0"):
-    return dataset_dict[cfg["dataset"]](cfg, args, device=device)
+def get_dataset(cfg, device="cuda:0"):
+    return dataset_dict[cfg.data.dataset](cfg, device=device)
 
 
 class BaseDataset(Dataset):
-    def __init__(self, cfg, args, device="cuda:0"):
+    def __init__(self, cfg, device="cuda:0"):
         super(BaseDataset, self).__init__()
-        self.name = cfg["dataset"]
-        self.stereo = cfg["mode"] == "stereo"
+        self.name = cfg.data.dataset
+        self.stereo = cfg.slam.mode == "stereo"
         self.device = device
-        self.png_depth_scale = cfg["cam"]["png_depth_scale"]
+        self.png_depth_scale = cfg.data.cam.png_depth_scale
         self.n_img = -1
         self.depth_paths = None
         self.color_paths = None
@@ -95,22 +95,20 @@ class BaseDataset(Dataset):
         self.image_timestamps = None
 
         self.H, self.W, self.fx, self.fy, self.cx, self.cy = (
-            int(cfg["cam"]["H"]),
-            int(cfg["cam"]["W"]),
-            float(cfg["cam"]["fx"]),
-            float(cfg["cam"]["fy"]),
-            float(cfg["cam"]["cx"]),
-            float(cfg["cam"]["cy"]),
+            int(cfg.data.cam.H),
+            int(cfg.data.cam.W),
+            float(cfg.data.cam.fx),
+            float(cfg.data.cam.fy),
+            float(cfg.data.cam.cx),
+            float(cfg.data.cam.cy),
         )
-        self.H_out, self.W_out = int(cfg["cam"]["H_out"]), int(cfg["cam"]["W_out"])
-        self.H_edge, self.W_edge = int(cfg["cam"]["H_edge"]), int(cfg["cam"]["W_edge"])
+        self.H_out, self.W_out = int(cfg.data.cam.H_out), int(cfg.data.cam.W_out)
+        self.H_edge, self.W_edge = int(cfg.data.cam.H_edge), int(cfg.data.cam.W_edge)
 
-        self.distortion = np.array(cfg["cam"]["distortion"]) if "distortion" in cfg["cam"] else None
+        self.distortion = np.array(cfg.data.cam.distortion) if "distortion" in cfg.data.cam else None
 
-        if args.input_folder is None:
-            self.input_folder = cfg["data"]["input_folder"]
-        else:
-            self.input_folder = args.input_folder
+
+        self.input_folder = cfg.data.input_folder
 
     def __len__(self):
         return self.n_img
@@ -215,14 +213,14 @@ class ImageFolder(BaseDataset):
 
 
 class Replica(BaseDataset):
-    def __init__(self, cfg, args, device="cuda:0"):
-        super(Replica, self).__init__(cfg, args, device)
-        stride = cfg["stride"]
+    def __init__(self, cfg, device="cuda:0"):
+        super(Replica, self).__init__(cfg, device)
+        stride = cfg.slam.stride
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/frame*.jpg")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
-        if cfg["mode"] == "prgbd":
+        if cfg.slam.mode == "prgbd":
             self.depth_paths = sorted(
                 # glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
                 glob.glob(os.path.join(self.input_folder, "depthany-vitl-indoor/frame*.npy"))
@@ -258,15 +256,15 @@ class Replica(BaseDataset):
 
 
 class TartanAir(BaseDataset):
-    def __init__(self, cfg, args, device="cuda:0"):
-        super(TartanAir, self).__init__(cfg, args, device)
-        stride = cfg["stride"]
+    def __init__(self, cfg, device="cuda:0"):
+        super(TartanAir, self).__init__(cfg, device)
+        stride = cfg.slam.stride
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_left/*.png")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         print("found {} images".format(self.n_img))
         # For Pseudo RGBD, we use monocular depth predictions in another folder
-        if cfg["mode"] == "prgbd":
+        if cfg.slam.mode == "prgbd":
             self.depth_paths = sorted(
                 glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy")) # Use ZoeDepth predictions
                 # glob.glob(

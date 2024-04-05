@@ -1,4 +1,3 @@
-from munch import munchify
 import torch
 import time
 import numpy as np
@@ -59,33 +58,32 @@ def plot_3d(rgb: torch.Tensor, depth: torch.Tensor):
 
 
 class GaussianMapper(object):
-    def __init__(self, config, args, slam):
-        self.config = config
-        self.args = args
+    def __init__(self, cfg, slam):
+        self.cfg = cfg
         self.slam = slam
         self.video = slam.video
-        self.device = args.device
-        self.mode = args.mode
+        self.device = cfg.slam.device
+        self.mode = cfg.slam.mode
         self.output = slam.output
-        self.model_params = munchify(config["model_params"])
-        self.opt_params = munchify(config["opt_params"])
-        self.pipeline_params = munchify(config["pipeline_params"])
-        self.training_params = munchify(config["Training"])
-        self.setup = munchify(config["Setup"])
+        self.model_params = cfg.mapping.model_params
+        self.opt_params = cfg.mapping.opt_params
+        self.pipeline_params = cfg.mapping.pipeline_params
+        self.pruning_params = cfg.mapping.pruning
+        self.mapping_params = cfg.mapping
+        self.loss_params = cfg.mapping.loss
         self.delay = 3 # Delay between tracking and mapping
-        print(self.setup)
         
         self.use_spherical_harmonics = False
         self.model_params.sh_degree = 3 if self.use_spherical_harmonics else 0
 
-        self.gaussians = GaussianModel(self.model_params.sh_degree, config=self.config)
+        self.gaussians = GaussianModel(self.model_params.sh_degree, config=self.cfg.data)
         self.gaussians.init_lr(6.0)
         self.gaussians.training_setup(self.opt_params)
 
         bg_color = [1, 1, 1]
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        if self.setup.use_gui:
+        if self.mapping_params.use_gui:
             self.q_main2vis = mp.Queue()
             self.q_vis2main = mp.Queue()
             self.params_gui = gui_utils.ParamsGUI(
@@ -128,7 +126,7 @@ class GaussianMapper(object):
         color = color.permute(2, 0, 1)
         intrinsics = self.video.intrinsics[0] * self.video.scale_factor
 
-        if self.setup.filter_depth:
+        if self.mapping_params.filter_depth:
             mask = self.depth_filter(idx)
             print(f"Filtered {100*(1 - mask.sum() / mask.numel()):.2f}% of the points")
 
@@ -186,14 +184,14 @@ class GaussianMapper(object):
             opt_params.append(
                 {
                     "params": [cam.cam_rot_delta],
-                    "lr": self.config["Training"]["lr"]["cam_rot_delta"],
+                    "lr": self.opt_params.cam_rot_delta,
                     "name": "rot_{}".format(cam.uid),
                 }
             )
             opt_params.append(
                 {
                     "params": [cam.cam_trans_delta],
-                    "lr": self.config["Training"]["lr"]["cam_trans_delta"],
+                    "lr": self.opt_params.cam_trans_delta,
                     "name": "trans_{}".format(cam.uid),
                 }
             )
@@ -246,7 +244,7 @@ class GaussianMapper(object):
         with torch.no_grad():
             for cam in frames:
                 _, depth, c2w, _, _ = self.video.get_mapping_item(cam.uid, self.video.device)
-                if self.setup.filter_depth:
+                if self.mapping_params.filter_depth:
                     mask = self.depth_filter(cam.uid)
                     depth = depth * mask
 
@@ -277,7 +275,7 @@ class GaussianMapper(object):
         """
         Takes the list of selected keyframes to optimize and performs one step of the mapping optimization.
         """
-        if self.setup.optimize_poses:
+        if self.mapping_params.optimize_poses:
             pose_optimizer = self.pose_optimizer(self.cameras)
         loss = 0
         self.occ_aware_visibility = {}
@@ -321,10 +319,10 @@ class GaussianMapper(object):
             if densify:
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-            if self.last_idx > self.n_last_frames and (iter + 1) % self.training_params.prune_every == 0:
+            if self.last_idx > self.n_last_frames and (iter + 1) % self.pruning_params.prune_every == 0:
                 self.prune_gaussians() # Covisibility based pruning for recently added gaussians 
                 self.gaussians.densify_and_prune( # General pruning based on opacity and size + densification
-                self.opt_params.densify_grad_threshold,
+                pruning_params.densify_grad_threshold,
                 pruning_params.gaussian_th,
                 pruning_params.gaussian_extent,
                 pruning_params.size_threshold,
@@ -344,12 +342,8 @@ class GaussianMapper(object):
             return loss.item()
 
     def mapping_loss(self, image: torch.Tensor, depth: torch.Tensor, cam: Camera):
-        alpha = self.config["Training"]["alpha"] if "alpha" in self.config["Training"] else 0.95
-        rgb_boundary_threshold = (
-            self.config["Training"]["rgb_boundary_threshold"]
-            if "rgb_boundary_threshold" in self.config["Training"]
-            else 0.01
-        )
+        alpha = self.loss_params.alpha
+        rgb_boundary_threshold = self.loss_params.rgb_boundary_threshold
 
         gt_image = cam.original_image
         gt_depth = cam.depth
@@ -368,7 +362,7 @@ class GaussianMapper(object):
         Covisibility based pruning
         """
 
-        # TODO: add both parameters to the config
+        # TODO: add both parameters to the cfg
         prune_coviz = 3 # Visibility threshold
 
 
@@ -408,7 +402,7 @@ class GaussianMapper(object):
     def __call__(self, the_end=False):
         cur_idx = int(self.video.filtered_id.item()) 
         
-        if self.last_idx + self.delay < cur_idx and cur_idx > self.setup.warmup:
+        if self.last_idx + self.delay < cur_idx and cur_idx > self.mapping_params.warmup:
             self.last_idx += 1
             
             print(f"\nStarting frame: {self.last_idx}. Gaussians: {self.gaussians.get_xyz.shape[0]}. Video at {cur_idx}")
@@ -430,19 +424,19 @@ class GaussianMapper(object):
                 print(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians for the new view")
 
             # Optimze gaussians
-            for iter in range(self.setup.mapping_iters):
+            for iter in range(self.mapping_params.mapping_iters):
                 frames = self.select_keyframes()
 
-                if self.setup.update_frames and not the_end:  # Tracking finished, no need to update frames
+                if self.mapping_params.update_frames and not the_end:  # Tracking finished, no need to update frames
                     self.frame_updater(frames)
 
                 loss = self.mapping_step(
-                    iter, frames, self.training_params, densify=True, optimize_poses=False
+                    iter, frames, self.pruning_params.mapping, densify=True, optimize_poses=False
                 )
                 self.loss_list.append(loss / len(frames))
 
             # Update visualization
-            if self.setup.use_gui:
+            if self.mapping_params.use_gui:
                 self.q_main2vis.put(
                     gui_utils.GaussianPacket(
                         gaussians=clone_obj(self.gaussians),
@@ -458,24 +452,24 @@ class GaussianMapper(object):
             
 
             # Save renders
-            if self.setup.save_renders and cam.uid % 5 == 0:
+            if self.mapping_params.save_renders and cam.uid % 5 == 0:
                 self.save_render(cam, f"{self.output}/renders/mapping/{cam.uid}.png")
 
 
         elif the_end and self.last_idx + self.delay == cur_idx:
             print("\nMapping refinement starting")
 
-            for iter in range(self.setup.refinement_iters):
+            for iter in range(self.mapping_params.refinement_iters):
                 loss = self.mapping_step(
                     iter,
                     self.cameras,
-                    self.training_params.refinement,
+                    self.pruning_params.refinement,
                     densify=False,
-                    optimize_poses=self.setup.optimize_poses,
+                    optimize_poses=self.mapping_params.optimize_poses,
                 )
                 self.loss_list.append(loss / len(self.cameras))
 
-                if self.setup.use_gui:
+                if self.mapping_params.use_gui:
                     self.q_main2vis.put(
                         gui_utils.GaussianPacket(
                             gaussians=clone_obj(self.gaussians),
@@ -487,7 +481,7 @@ class GaussianMapper(object):
             self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
             print("Mesh saved")
 
-            if self.setup.save_renders:
+            if self.mapping_params.save_renders:
                 for cam in self.cameras:
                     self.save_render(cam, f"{self.output}/renders/final/{cam.uid}.png")
 
@@ -499,8 +493,8 @@ class GaussianMapper(object):
 
             fig, ax = plt.subplots()
             ax.set_yscale("log")
-            ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.setup.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
-            ax.plot(self.loss_list[-self.setup.refinement_iters:])
+            ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.mapping_params.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
+            ax.plot(self.loss_list[-self.mapping_params.refinement_iters:])
             plt.savefig(f"{self.output}/loss_{self.mode}.png")
             plt.show()
 

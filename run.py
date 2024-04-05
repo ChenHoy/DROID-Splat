@@ -5,6 +5,7 @@ import os
 
 import numpy as np
 import torch
+import hydra
 
 from src import config
 from src.slam import SLAM
@@ -131,26 +132,39 @@ def typecheck_cfg(cfg):
     return cfg
 
 
+@hydra.main(version_base = None, config_path="./configs/", config_name="slam")
+def run_slam(cfg):
+
+    print(f"\n\n** Running {cfg.data.input_folder} in {cfg.slam.mode} mode!!! **\n\n")
+
+    # Save state for reproducibility
+    backup_source_code(os.path.join(cfg.slam.output_folder, "code"))
+    config.save_config(cfg, f"{cfg.slam.output_folder}/cfg.yaml")
+
+    # Load dataset
+    dataset = get_dataset(cfg, device=cfg.slam.device)
+
+    # Run SLAM 
+    slam = SLAM(cfg)
+    slam.run(dataset)
+    slam.terminate(rank=-1, stream=dataset)
+    print("Done!")
+
+
+
+
 if __name__ == "__main__":
     setup_seed(43)
-    args = parse_args()
+    #args = parse_args()
 
     torch.multiprocessing.set_start_method("spawn")
 
-    cfg = config.load_config(args.config, "./configs/go_gaussian_slam.yaml")
-    output_dir, cfg = set_args(args, cfg)
-    cfg = typecheck_cfg(cfg)
+    run_slam()
 
-    print(f"\n\n** Running {cfg['data']['input_folder']} in {cfg['mode']} mode!!! **\n\n")
-    print(args)
-    # Save state for reproducibility
-    backup_source_code(os.path.join(output_dir, "code"))
-    config.save_config(cfg, f"{output_dir}/cfg.yaml")
+    #cfg = config.load_config(args.config, "./configs/go_gaussian_slam.yaml")
+    #output_dir, cfg = set_args(args, cfg)
+    #print(load_config())
+    #print(cfg)
+    #cfg = typecheck_cfg(cfg)
 
-    # Run SLAM
-    dataset = get_dataset(cfg, args, device=args.device)
-    slam = SLAM(args, cfg)
-    slam.run(dataset)
-    slam.terminate(rank=-1, stream=dataset)
 
-    print("Done!")

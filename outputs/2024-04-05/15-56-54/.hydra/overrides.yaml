@@ -1,0 +1,6 @@
+- data.cam.H_out=272
+- data.cam.W_out=480
+- slam.mode=rgbd
+- data=Replica/replica
+- tracking=tracking_replica
+- slam.output_folder=/home/leon/go-slam-tests/test

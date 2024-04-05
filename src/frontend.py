@@ -6,13 +6,13 @@ from .factor_graph import FactorGraph
 
 
 class Frontend:
-    def __init__(self, net, video, args, cfg):
+    def __init__(self, net, video, cfg):
         self.video = video
         self.update_op = net.update
         self.warmup = cfg["tracking"]["warmup"]
         self.upsample = cfg["tracking"]["upsample"]
         self.beta = cfg["tracking"]["beta"]
-        self.verbose = cfg["verbose"]
+        self.verbose = cfg.slam.verbose
 
         self.frontend_max_factors = cfg["tracking"]["frontend"]["max_factors"]
         self.frontend_nms = cfg["tracking"]["frontend"]["nms"]
@@ -26,7 +26,7 @@ class Frontend:
         self.graph = FactorGraph(
             video,
             net.update,
-            device=args.device,
+            device=cfg.slam.device,
             corr_impl="volume",
             max_factors=self.frontend_max_factors,
             upsample=self.upsample,
@@ -214,6 +214,6 @@ class Frontend:
         # do update
         elif self.is_initialized and self.t1 < self.video.counter.value:
             self.__update()
-
+            
         else:
             pass

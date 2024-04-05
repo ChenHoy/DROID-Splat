@@ -1,0 +1,112 @@
+slam:
+  output_folder: /home/leon/go-slam-tests/test
+  device: cuda:0
+  sync_method: strict
+  verbose: true
+  mode: prgbd
+  stride: 2
+  only_tracking: false
+  opt_intr: true
+  make_video: false
+mapping:
+  warmup: 20
+  mapping_iters: 20
+  refinement_iters: 100
+  use_gui: true
+  optimize_poses: false
+  update_frames: true
+  filter_depth: true
+  save_renders: true
+  opt_params:
+    position_lr_init: 0.00016
+    position_lr_final: 1.6e-06
+    position_lr_delay_mult: 0.01
+    position_lr_max_steps: 30000
+    feature_lr: 0.0025
+    opacity_lr: 0.05
+    scaling_lr: 0.001
+    rotation_lr: 0.001
+    percent_dense: 0.01
+    cam_rot_delta: 0.0003
+    cam_trans_delta: 0.0001
+  model_params:
+    sh_degree: 0
+  pipeline_params:
+    convert_SHs_python: false
+    compute_cov3D_python: false
+  loss:
+    alpha: 0.95
+    rgb_boundary_threshold: 0.01
+  pruning:
+    prune_every: 20
+    mapping:
+      densify_grad_threshold: 0.0002
+      size_threshold: 20
+      gaussian_th: 0.005
+      gaussian_extent: 10
+    refinement:
+      densify_grad_threshold: 0.0002
+      size_threshold: 20
+      gaussian_th: 0.3
+      gaussian_extent: 2
+tracking:
+  pretrained: ./pretrained/droid.pth
+  buffer: 250
+  beta: 0.75
+  warmup: 12
+  upsample: true
+  motion_filter:
+    thresh: 4.0
+  multiview_filter:
+    thresh: 0.01
+    visible_num: 2
+    kernel_size: 'inf'
+    bound_enlarge_scale: 1.2
+  frontend:
+    radius: 1
+    nms: 0
+    thresh: 25.0
+    enable_loop: true
+    keyframe_thresh: 6.0
+    window: 25
+    max_factors: 100
+  backend:
+    thresh: 25.0
+    radius: 1
+    nms: 5
+    loop_window: 25
+    loop_thresh: 50.0
+    loop_radius: 1
+    loop_nms: 12
+data:
+  verbose: false
+  dataset: replica
+  mode: rgbd
+  input_folder: /media/data/Replica/office0
+  bound:
+  - - -5.0
+    - 5.0
+  - - -5.0
+    - 5.0
+  - - -5.0
+    - 5.0
+  cam:
+    H: 680
+    W: 1200
+    H_out: 272
+    W_out: 480
+    H_edge: 0
+    W_edge: 0
+    fx: 600.0
+    fy: 600.0
+    cx: 599.5
+    cy: 339.5
+    png_depth_scale: 6553.5
+    camera_model: pinhole
+  Dataset:
+    sensor_type: depth
+    pcd_downsample: 64
+    pcd_downsample_init: 32
+    adaptive_pointsize: true
+    point_size: 0.05
+    type: replica
