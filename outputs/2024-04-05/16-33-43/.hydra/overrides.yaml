@@ -1,6 +1,0 @@
-- data.cam.H_out=272
-- data.cam.W_out=480
-- slam.mode=prgbd
-- data=Replica/replica_mono
-- tracking=tracking_replica
-- slam.output_folder=/home/leon/go-slam-tests/test
