@@ -157,8 +157,7 @@ class SLAM:
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
-        # self.evaluate = cfg["evaluate"]
-        self.evaluate = True
+        self.evaluate = cfg["evaluate"]
         self.dataset = None
 
 
@@ -329,18 +328,18 @@ class SLAM:
             os.path.join(self.output, "checkpoints/go.ckpt"),
         )
 
-        do_evaluation = self.evaluate
         print("Doing evaluation!")
-        if do_evaluation:
+        if self.evaluate:
             from evo.core.trajectory import PoseTrajectory3D
             import evo.main_ape as main_ape
             from evo.core.metrics import PoseRelation
             from evo.core.trajectory import PosePath3D
             import numpy as np
             import pandas as pd
+            eval_save_path = "evaluation_results/"
+            
 
-
-            ### -------------- to be moved in termination thread -------------------
+            #### Rendering evaluation ####
             print("Initialize my evaluation in the termination method")
             print("Shape of images:",self.video.images.shape)
             print("Shape of poses:",self.video.poses.shape)
@@ -349,7 +348,6 @@ class SLAM:
             # rendering_packet = self.mapping_queue.get() 
             # print("The eval packet is:",rendering_packet) ## Andrei BUG: doesn't reach this
 
-            eval_save_path = "evaluation_results/"
             # retrieved_mapper = self.shared_data['gaussian_mapper']
             # print("Number of cameras / frames:",len(self.gaussian_mapper.cameras)) ## BUG: why is number of camera 0 here?
             # print("Last index of gaussian_mapper:",self.gaussian_mapper.last_idx)
@@ -369,6 +367,10 @@ class SLAM:
             #     iteration="final",
             # )
 
+            #### ------------------- ####
+
+            ### Trajectory evaluation ###
+
             print("#" * 20 + f" Results for {stream.input_folder} ...")
 
             timestamps = [i for i in range(len(stream))]
@@ -381,100 +383,44 @@ class SLAM:
             out_path = os.path.join(self.output, "checkpoints/est_poses.npy")
             np.save(out_path, estimate_c2w_list.numpy())  # c2ws
 
-            print("After trajectory filler.")
-            traj_ref = []
-            traj_est_select = []
-            if stream.poses is None:  # for eth3d submission
-                if stream.image_timestamps is not None:
-                    submission_txt = os.path.join(self.output, "submission.txt")
-                    with open(submission_txt, "w") as fp:
-                        for tm, pos in zip(stream.image_timestamps, traj_est.tolist()):
-                            str = f"{tm:.9f}"
-                            for ps in pos:  # timestamp tx ty tz qx qy qz qw
-                                str += f" {ps:.14f}"
-                            fp.write(str + "\n")
-                    print("Poses are save to {}!".format(submission_txt))
-
-                print("Terminate: no GT poses found!")
-                trans_init = None
-                gt_c2w_list = None
-            else:
-                for i in range(len(stream.poses)):
-                    val = stream.poses[i].sum()
-                    if np.isnan(val) or np.isinf(val):
-                        print(f"Nan or Inf found in gt poses, skipping {i}th pose!")
-                        continue
-                    traj_est_select.append(traj_est[i])
-                    traj_ref.append(stream.poses[i])
-
-                traj_est = np.stack(traj_est_select, axis=0)
-                gt_c2w_list = torch.from_numpy(np.stack(traj_ref, axis=0))
-
-                traj_est = PoseTrajectory3D(
-                    positions_xyz=traj_est[:, :3],
-                    orientations_quat_wxyz=traj_est[:, 3:],
-                    timestamps=np.array(timestamps),
-                )
-
-                traj_ref = PosePath3D(poses_se3=traj_ref)
-
-                result_ape = main_ape.ape(
-                    traj_ref,
-                    traj_est,
-                    est_name="traj",
-                    pose_relation=PoseRelation.translation_part,
-                    align=True,
-                    correct_scale=True,
-                )
-
-                ## QUESTION: shouldnt the two APEs be identical then? They should
+            ## TODO: change this for depth videos
+            '''
+            Set keyframes_only to True to compute the APE and plots on keyframes only.
+            '''
+            result_ate = eval_ate(self.video,kf_ids=list(range(len(self.video.images)))
+                                    ,save_dir=self.output,iterations=-1,
+                                    final=True,monocular=True,
+                                    keyframes_only=False,
+                                    camera_trajectory=camera_trajectory,
+                                    stream=stream)
                 
+            out_path = os.path.join(eval_save_path, "metrics_traj.txt")
 
-                ## TODO: change this for depth videos
-                '''
-                Set keyframes_only to True to compute the APE and plots on keyframes only.
-                '''
-                result_ate = eval_ate(self.video,kf_ids=list(range(len(self.video.images)))
-                                      ,save_dir=eval_save_path,iterations=-1,
-                                      final=True,monocular=True,
-                                      keyframes_only=False,
-                                      camera_trajectory=camera_trajectory,
-                                      stream=stream)
-                    
-                out_path = os.path.join(eval_save_path, "metrics_traj.txt")
+            print("ATE: ", result_ate)
 
-                # print("Rendering evaluation result:", rendering_result)
-                ## I can just use the ape from up which is correct and
-                ## fix the figure from the second one
-                print("APE result: ", result_ape.info,result_ape.stats)
-                print("ATE result: ", result_ate)
+            trajectory_df = pd.DataFrame([result_ate])
+            trajectory_df.to_csv(os.path.join(self.output,"trajectory_results.csv"),index=False)
+            
+            #### ------------------- ####
+            
+            ## Joint metrics file ##
 
-                result_ate['method'] = 'monogs evaluation'
+            # ## TODO: add ATE
+            # columns = ["tag", "psnr", "ssim", "lpips","ape"]
+            # data = [
+            #     [
+            #         "optimizing + multiview ",
+            #         rendering_result["mean_psnr"],
+            #         rendering_result["mean_ssim"],
+            #         rendering_result["mean_lpips"],
+            #         result_ape.stats['mean']
+            #     ]
+            # ]
 
-                # with open(out_path, "a") as fp:
-                #     fp.write(result_ape.pretty_str())
-                # trans_init = result_ape.np_arrays["alignment_transformation_sim3"]
+            # df = pd.DataFrame(data, columns=columns)
+            # df.to_csv(os.path.join(eval_save_path,"metrics.csv"), index=False)
 
-                result_ape.stats['method'] = 'GO SLAM evaluation'
-
-                trajectory_df = pd.DataFrame([result_ate,result_ape.stats])
-                trajectory_df.to_csv(os.path.join(eval_save_path,"combined_ape_trajectory_results.csv"),index=False)
-                # ## TODO: add ATE
-                # columns = ["tag", "psnr", "ssim", "lpips","ape"]
-                # data = [
-                #     [
-                #         "optimizing + multiview ",
-                #         rendering_result["mean_psnr"],
-                #         rendering_result["mean_ssim"],
-                #         rendering_result["mean_lpips"],
-                #         result_ape.stats['mean']
-                #     ]
-                # ]
-
-                # df = pd.DataFrame(data, columns=columns)
-                # df.to_csv(os.path.join(eval_save_path,"metrics.csv"), index=False)
-
-                print("Evaluation complete")
+            print("Evaluation complete")
 
                 
 

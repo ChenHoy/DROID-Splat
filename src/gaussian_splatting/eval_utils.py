@@ -92,8 +92,10 @@ def eval_ate(video, kf_ids, save_dir, iterations, final=False, monocular=False,
              stream=None):
     '''
     video: DepthVideo
-    kf_ids: list of keyframe indices | in case of video all of them are keyframes
+    kf_ids: list of keyframe indices | in case of the video object all of them are keyframes
     used poses_gt for gt and poses for estimated poses
+    stream: Dataset
+    camera_trajectory: poses after trajectory filler
     '''
     frames = video.images
 

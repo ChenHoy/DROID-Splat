@@ -53,6 +53,7 @@ def parse_args():
         default=None,
         help="calibration parameters: fx, fy, cx, cy, this have higher priority, can overwrite the one in config file",
     )
+    parser.add_argument("--evaluate", type=bool, default=False, help="Enter evaluation mode. Deactivate gui and visualization.")
     return parser.parse_args()
 
 
@@ -107,6 +108,8 @@ def set_args(args, cfg):
             args.calibration_txt
         ).tolist()
 
+    cfg['evaluate'] = args.evaluate
+    
     assert cfg["mode"] in ["rgbd", "prgbd", "mono", "stereo"], "Unknown mode: {}".format(cfg["mode"])
     cfg["stride"] = args.stride if args.stride is not None else cfg["stride"]
     if args.output is None:
