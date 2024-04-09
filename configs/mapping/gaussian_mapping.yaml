@@ -1,10 +1,10 @@
-warmup: 20 # Wait until tracking gets to this frame
+warmup: 0 # Wait until tracking gets to this frame
 mapping_iters: 20 # At each new frame, 10 views
 refinement_iters: 100 # Once at the end, all views
 use_gui: True
 optimize_poses: False
 update_frames: True
-filter_depth: True
+filter_depth: False
 save_renders: True
 
 opt_params:
@@ -38,6 +38,8 @@ loss:
 
 pruning:
   prune_every: 20
+  visibility_th: 5
+  prune_last: 5
 
   mapping:
     densify_grad_threshold: 0.0002
@@ -48,7 +50,7 @@ pruning:
   refinement:
     densify_grad_threshold: 0.0002
     size_threshold: 20
-    gaussian_th: 0.3
+    gaussian_th: 0.5
     gaussian_extent: 2
 
 
