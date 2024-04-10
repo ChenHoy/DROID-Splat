@@ -195,9 +195,15 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
     - [ ] Optimization turns instable over longer windows and large scenes. What is the source?
     - [ ] Fix scale parameters after optimizing them once?
 - [ ] Backpropagate the pose loss from the Rendering objective into the SLAM tracking
-    - [ ] Optimize poses with additional optimizer
+    - [x] Optimize poses with additional optimizer
+    - [ ] Evaluate optimized poses with new metrics
     - [ ] Setup synchronization between mapping and frontend/backend
     - [ ] Test stability and hyperparameter, e.g. when and how often to sync
+- [ ] Improvements for mapping thread
+    - [x] Add new views in batches
+    - [x] New dirty index to filter in mapping
+    - [ ] Fix covisibility based prunning
+    - [ ] Deph rendering loss is wrong in outdoor -> New loss?
 - [ ] Properly evaluate our new code base for standard metrics
     - [ ] ATE error, how does this change when using the new Renderer for mapping?
     - [ ] Rendering loss, can we achieve similar results like the paper?
