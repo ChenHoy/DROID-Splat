@@ -5,6 +5,7 @@ import os
 
 import numpy as np
 import torch
+import hydra
 
 from src import config
 from src.slam import SLAM
@@ -18,29 +19,19 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=str, help="Path to config file.")
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument(
-        "--max_frames",
-        type=int,
-        default=-1,
-        help="Only [0, max_frames] Frames will be run",
-    )
-    parser.add_argument(
-        "--only_tracking", action="store_true", help="Only tracking is triggered"
-    )
-    parser.add_argument(
-        "--make_video",
-        action="store_true",
-        help="to generate video as in our project page",
-    )
+    parser.add_argument("--max_frames", type=int, default=-1, help="Only [0, max_frames] Frames will be run")
+    parser.add_argument("--only_tracking", action="store_true", help="Only tracking is triggered")
+    parser.add_argument("--make_video", action="store_true", help="to generate video as in our project page")
     parser.add_argument(
         "--input_folder",
         type=str,
         help="input folder, this have higher priority, can overwrite the one in config file",
     )
     parser.add_argument(
-        "--output",
-        type=str,
-        help="output folder, this have higher priority, can overwrite the one in config file",
+        "--output", type=str, help="output folder, this have higher priority, can overwrite the one in config file"
+    )
+    parser.add_argument(
+        "--mode", type=str, help="slam mode: mono, prgbd, rgbd or stereo", choices=["mono", "prgbd", "rgbd", "stereo"]
     )
     parser.add_argument(
         "--image_size",
@@ -48,21 +39,8 @@ def parse_args():
         default=None,
         help="image height and width, this have higher priority, can overwrite the one in config file",
     )
-    parser.add_argument(
-<<<<<<< HEAD
-        "--calibration_txt",
-        type=str,
-        default=None,
-        help="calibration parameters: fx, fy, cx, cy, this have higher priority, can overwrite the one in config file",
-    )
-    parser.add_argument("--mode", type=str, help="slam mode: mono, rgbd or stereo")
-    parser.add_argument(
-=======
->>>>>>> 3ffc1b2e8b8d4f44ebdcd08ea9ae670cebc674ba
-        "--opt_intr",
-        action="store_true",
-        help="optimize intrinsics in bundle adjustment as well",
-    )
+    parser.add_argument("--stride", type=int, default=None, help="stride for frame sampling")
+    parser.add_argument("--opt_intr", action="store_true", help="optimize intrinsics in bundle adjustment as well")
     parser.add_argument(
         "--camera_model",
         type=str,
@@ -70,18 +48,13 @@ def parse_args():
         choices=["pinhole", "mei"],
         help="camera model used for projection",
     )
-<<<<<<< HEAD
-=======
     parser.add_argument(
         "--calibration_txt",
         type=str,
         default=None,
         help="calibration parameters: fx, fy, cx, cy, this have higher priority, can overwrite the one in config file",
     )
-    parser.add_argument(
-        "--mode", type=str, help="slam mode: mono, prgbd, rgbd or stereo"
-    )
->>>>>>> 3ffc1b2e8b8d4f44ebdcd08ea9ae670cebc674ba
+    parser.add_argument("--evaluate", type=bool, default=False, help="Enter evaluation mode. Deactivate gui and visualization.")
     return parser.parse_args()
 
 
@@ -132,15 +105,14 @@ def set_args(args, cfg):
     if args.image_size is not None:
         cfg["cam"]["H_out"], cfg["cam"]["W_out"] = args.image_size
     if args.calibration_txt is not None:
-        cfg["cam"]["fx"], cfg["cam"]["fy"], cfg["cam"]["cx"], cfg["cam"]["cy"] = (
-            np.loadtxt(args.calibration_txt).tolist()
-        )
+        cfg["cam"]["fx"], cfg["cam"]["fy"], cfg["cam"]["cx"], cfg["cam"]["cy"] = np.loadtxt(
+            args.calibration_txt
+        ).tolist()
 
-<<<<<<< HEAD
-    assert cfg["mode"] in ["rgbd", "mono", "stereo"], cfg["mode"]
-=======
-    assert cfg["mode"] in ["rgbd", "prgbd", "mono", "stereo"], cfg["mode"]
->>>>>>> 3ffc1b2e8b8d4f44ebdcd08ea9ae670cebc674ba
+    cfg['evaluate'] = args.evaluate
+    
+    assert cfg["mode"] in ["rgbd", "prgbd", "mono", "stereo"], "Unknown mode: {}".format(cfg["mode"])
+    cfg["stride"] = args.stride if args.stride is not None else cfg["stride"]
     if args.output is None:
         output_dir = cfg["data"]["output"]
     else:
@@ -159,34 +131,45 @@ def typecheck_cfg(cfg):
         elif k in ints:
             cfg["cam"][k] = int(v)
         else:
-            raise ValueError(
-                f"Unknown type {type(k)} for '{k}'. This should be either float or int"
-            )
+            raise ValueError(f"Unknown type {type(k)} for '{k}'. This should be either float or int")
     return cfg
 
 
-if __name__ == "__main__":
-    args = parse_args()
+@hydra.main(version_base = None, config_path="./configs/", config_name="slam")
+def run_slam(cfg):
 
+    print(f"\n\n** Running {cfg.data.input_folder} in {cfg.slam.mode} mode!!! **\n\n")
+
+    # Save state for reproducibility
+    # backup_source_code(os.path.join(cfg.slam.output_folder, "code"))
+    # config.save_config(cfg, f"{cfg.slam.output_folder}/cfg.yaml")
+
+    # Load dataset
+    dataset = get_dataset(cfg, device=cfg.slam.device)
+
+    # Run SLAM 
+    slam = SLAM(cfg)
+    slam.set_dataset(dataset)
+    slam.run(dataset)
+    print("Terminating SLAM...")
+    slam.terminate(rank=-1, stream=dataset)
+    print("Done!")
+
+
+
+
+if __name__ == "__main__":
     setup_seed(43)
+    #args = parse_args()
+
     torch.multiprocessing.set_start_method("spawn")
 
-    cfg = config.load_config(args.config, "./configs/go_slam.yaml")
-    print(args)
-    output_dir, cfg = set_args(args, cfg)
-    cfg = typecheck_cfg(cfg)
-    backup_source_code(os.path.join(output_dir, "code"))
-    config.save_config(cfg, f"{output_dir}/cfg.yaml")
+    run_slam()
 
-    ### Running SLAM
-    dataset = get_dataset(cfg, args, device=args.device)
+    #cfg = config.load_config(args.config, "./configs/go_gaussian_slam.yaml")
+    #output_dir, cfg = set_args(args, cfg)
+    #print(load_config())
+    #print(cfg)
+    #cfg = typecheck_cfg(cfg)
 
-    print(
-        f"\n\n** Running {cfg['data']['input_folder']} in {cfg['mode']} mode!!! **\n\n"
-    )
 
-    slam = SLAM(args, cfg)
-    slam.run(dataset)
-    slam.terminate(rank=-1, stream=dataset)
-
-    print("Done!")

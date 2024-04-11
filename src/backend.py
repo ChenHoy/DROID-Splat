@@ -9,9 +9,9 @@ from .factor_graph import FactorGraph
 
 
 class Backend:
-    def __init__(self, net, video, args, cfg):
+    def __init__(self, net, video, cfg):
         self.video = video
-        self.device = args.device
+        self.device = cfg.slam.device
         self.update_op = net.update
 
         self.upsample = cfg["tracking"]["upsample"]
