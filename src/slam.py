@@ -1,6 +1,7 @@
 import os
 import ipdb
 from colorama import Fore, Style
+from termcolor import colored
 from collections import OrderedDict
 from tqdm import tqdm
 from time import gmtime, strftime, time, sleep
@@ -69,10 +70,8 @@ class BundleAdjustment(nn.Module):
         # backend process
         self.backend = Backend(self.net, self.video, self.cfg)
 
-    def info(self, msg):
-        print(Fore.GREEN)
-        print(msg)
-        print(Style.RESET_ALL)
+    def info(self, msg: str) -> None:
+        print(colored("[Backend]" + msg, "blue"))
 
     def forward(self):
         cur_t = self.video.counter.value
@@ -119,8 +118,12 @@ class SLAM:
         self.num_running_thread.share_memory_()
         self.all_trigered = torch.zeros((1)).int()
         self.all_trigered.share_memory_()
+        self.all_finished = torch.zeros((1)).int()
+        self.all_finished.share_memory_()
         self.tracking_finished = torch.zeros((1)).int()
         self.tracking_finished.share_memory_()
+        self.multiview_filtering_finished = torch.zeros((1)).int()
+        self.multiview_filtering_finished.share_memory_()
         self.gaussian_mapping_finished = torch.zeros((1)).int()
         self.gaussian_mapping_finished.share_memory_()
         self.optimizing_finished = torch.zeros((1)).int()
@@ -145,18 +148,21 @@ class SLAM:
         # post processor - fill in poses for non-keyframes
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
 
-        ## Used to share packeets for evaluation from the gaussian mapper
+        ## Used to share packets for evaluation from the gaussian mapper
         self.gaussian_mapper = GaussianMapper(cfg, self)
+        self.mapping_queue = mp.Queue()
+        self.received_mapping = mp.Event()
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
         self.evaluate = cfg.slam.evaluate
         self.dataset = None
 
-
-
     def set_dataset(self, dataset):
         self.dataset = dataset
+
+    def info(self, msg: str) -> None:
+        print(colored("[Main]" + msg, "green"))
 
     def update_cam(self, cfg):
         """
@@ -191,7 +197,7 @@ class SLAM:
         self.bound = torch.from_numpy(np.array(cfg.data.bound)).float()
 
     def load_pretrained(self, pretrained):
-        print(f"INFO: load pretrained checkpiont from {pretrained}!")
+        self.info(f"INFO: load pretrained checkpiont from {pretrained}!")
 
         state_dict = OrderedDict([(k.replace("module.", ""), v) for (k, v) in torch.load(pretrained).items()])
 
@@ -202,8 +208,8 @@ class SLAM:
 
         self.net.load_state_dict(state_dict)
 
-    def tracking(self, rank, stream, input_queue:mp.Queue):
-        print("Tracking Triggered!")
+    def tracking(self, rank, stream, input_queue: mp.Queue):
+        self.info("Tracking Triggered!")
         self.all_trigered += 1
         # Wait up for other threads to start
         while self.all_trigered < self.num_running_thread:
@@ -213,8 +219,8 @@ class SLAM:
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
-            #input_queue.put(image)
-            #input_queue.put(depth)
+            input_queue.put(image)
+            input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
@@ -224,10 +230,11 @@ class SLAM:
                 sleep(1.0)
 
         self.tracking_finished += 1
-        print("Tracking Done!")
+        self.all_finished += 1
+        self.info("Tracking Done!")
 
     def optimizing(self, rank, dont_run=False):
-        print("Full Bundle Adjustment Triggered!")
+        self.info("Full Bundle Adjustment Triggered!")
         self.all_trigered += 1
         while self.tracking_finished < 1 and not dont_run:
             while self.hang_on > 0 and self.make_video:
@@ -237,51 +244,55 @@ class SLAM:
 
         if not dont_run:
             self.ba()
-        self.optimizing_finished += 1
 
-        print("Full Bundle Adjustment Done!")
+        self.optimizing_finished += 1
+        self.all_finished += 1
+        self.info("Full Bundle Adjustment Done!")
 
     def multiview_filtering(self, rank, dont_run=False):
-        print("Multiview Filtering Triggered!")
+        self.info("Multiview Filtering Triggered!")
         self.all_trigered += 1
         while (self.tracking_finished < 1 or self.optimizing_finished < 1) and not dont_run:
             while self.hang_on > 0 and self.make_video:
                 sleep(1.0)
             self.multiview_filter()
 
-        print("Multiview Filtering Done!")
+        self.multiview_filtering_finished += 1
+        self.all_finished += 1
+        self.info("Multiview Filtering Done!")
 
-    def gaussian_mapping(self, rank, dont_run, mapping_queue: mp.Queue):
-        print("Gaussian Mapping Triggered!")
+    # FIXME Gaussian mapper gets a different queue here than the one we originally passed
+    def gaussian_mapping(self, rank, dont_run, mapping_queue: mp.Queue, received_mapping: mp.Event):
+        self.info("Gaussian Mapping Triggered!")
         self.all_trigered += 1
         while self.tracking_finished < 1 and not dont_run:
             while self.hang_on > 0 and self.make_video:
                 sleep(1.0)
-            self.gaussian_mapper(mapping_queue=mapping_queue)
+            self.gaussian_mapper(mapping_queue, received_mapping)
+
         finished = False
-        print("got here ----------------------------------") ## BUG: never reached
         if not dont_run:
-            print("Last run") ## BUG: this is never reached
+            self.info("[Gaussian mapping] Last run")
             while not finished:
-                finished = self.gaussian_mapper(the_end=True,mapping_queue=mapping_queue)
+                finished = self.gaussian_mapper(mapping_queue, received_mapping, True)
 
         self.gaussian_mapping_finished += 1
+        self.all_finished += 1
         # self.shared_space['gaussian_mapper'] = self.gaussian_mapper
-        print("Gaussian Mapping Done!")
-
-     
+        self.info("Gaussian Mapping Done!")
 
     def visualizing(self, rank, dont_run=False):
-        print("Visualization triggered!")
+        self.info("Visualization triggered!")
         self.all_trigered += 1
         while (self.tracking_finished < 1 or self.optimizing_finished < 1) and (not dont_run):
             droid_visualization(self.video, device=self.device, save_root=self.output)
 
         self.visualizing_finished += 1
-        print("Visualization Done!")
+        self.all_finished += 1
+        self.info("Visualization Done!")
 
     def show_stream(self, rank, input_queue: mp.Queue) -> None:
-        print("OpenCV Image stream triggered!")
+        self.info("OpenCV Image stream triggered!")
         self.all_trigered += 1
         while self.tracking_finished < 1 or self.optimizing_finished < 1:
             if not input_queue.empty():
@@ -298,20 +309,23 @@ class SLAM:
                         cv2.imshow("depth", depth_image[..., ::-1])
                     cv2.waitKey(1)
                 except Exception as e:
-                    print(e)
-                    print("Continuing...")
+                    self.info(str(e))
+                    self.info("Continuing...")
                     pass
+
+        self.all_finished += 1
+        self.info("Show stream Done!")
 
     def terminate(self, rank, stream=None):
         """fill poses for non-keyframe images and evaluate"""
 
-        print("Initiating termination sequence!")
+        self.info("Initiating termination sequence!")
         while self.optimizing_finished < 1:
-            print("Waiting for the optimizing...")
+            self.info("Waiting for the optimizing...")
             if self.num_running_thread == 1 and self.tracking_finished > 0:
                 break
-        
-        print("Saving checkpoints...")
+
+        self.info("Saving checkpoints...")
         os.makedirs(os.path.join(self.output, "checkpoints/"), exist_ok=True)
         torch.save(
             {
@@ -321,7 +335,7 @@ class SLAM:
             os.path.join(self.output, "checkpoints/go.ckpt"),
         )
 
-        print("Doing evaluation!")
+        self.info("Doing evaluation!")
         if self.evaluate:
             from evo.core.trajectory import PoseTrajectory3D
             import evo.main_ape as main_ape
@@ -329,25 +343,26 @@ class SLAM:
             from evo.core.trajectory import PosePath3D
             import numpy as np
             import pandas as pd
+
             eval_save_path = "evaluation_results/"
-            
 
             #### Rendering evaluation ####
-            print("Initialize my evaluation in the termination method")
-            print("Shape of images:",self.video.images.shape)
-            print("Shape of poses:",self.video.poses.shape)
-            print("Shape of ground truth poses:",self.video.poses_gt.shape)
-            print("Check that gt poses are not empty:",self.video.poses_gt[25])
-            rendering_packet = self.mapping_queue.get() 
-            print("The eval packet is:",rendering_packet) ## Andrei BUG: doesn't reach this
+            self.info("Initialize my evaluation in the termination method")
+            self.info("Shape of images: {}".format(self.video.images.shape))
+            self.info("Shape of poses: {}".format(self.video.poses.shape))
+            self.info("Shape of ground truth poses: {}".format(self.video.poses_gt.shape))
+            self.info("Check that gt poses are not empty: {}".format(self.video.poses_gt[25]))
+
+            # rendering_packet = self.mapping_queue.get()
+            # self.info("The eval packet is: {}".format(rendering_packet))
 
             # retrieved_mapper = self.shared_data['gaussian_mapper']
-            # print("Number of cameras / frames:",len(self.gaussian_mapper.cameras)) ## BUG: why is number of camera 0 here?
-            # print("Last index of gaussian_mapper:",self.gaussian_mapper.last_idx)
+            # self.info("Number of cameras / frames:",len(self.gaussian_mapper.cameras)) ## BUG: why is number of camera 0 here?
+            # self.info("Last index of gaussian_mapper:",self.gaussian_mapper.last_idx)
 
-            # # print("Retrieved mapper camera {}. Retrieved mapper last idx {}".format(retrieved_mapper.cameras,retrieved_mapper.last_idx)) 
+            # # self.info("Retrieved mapper camera {}. Retrieved mapper last idx {}".format(retrieved_mapper.cameras,retrieved_mapper.last_idx))
             # _, kf_indices = self.gaussian_mapper.select_keyframes()
-            # print("Selected keyframe indices:", kf_indices)
+            # self.info("Selected keyframe indices:", kf_indices)
 
             # rendering_result = eval_rendering(
             #     self.gaussian_mapper.cameras,
@@ -364,7 +379,7 @@ class SLAM:
 
             ### Trajectory evaluation ###
 
-            print("#" * 20 + f" Results for {stream.input_folder} ...")
+            self.info("#" * 20 + f" Results for {stream.input_folder} ...")
 
             timestamps = [i for i in range(len(stream))]
             camera_trajectory = self.traj_filler(stream)  # w2cs
@@ -377,25 +392,30 @@ class SLAM:
             np.save(out_path, estimate_c2w_list.numpy())  # c2ws
 
             ## TODO: change this for depth videos
-            '''
+            """
             Set keyframes_only to True to compute the APE and plots on keyframes only.
-            '''
-            result_ate = eval_ate(self.video,kf_ids=list(range(len(self.video.images)))
-                                    ,save_dir=self.output,iterations=-1,
-                                    final=True,monocular=True,
-                                    keyframes_only=False,
-                                    camera_trajectory=camera_trajectory,
-                                    stream=stream)
-                
+            """
+            result_ate = eval_ate(
+                self.video,
+                kf_ids=list(range(len(self.video.images))),
+                save_dir=self.output,
+                iterations=-1,
+                final=True,
+                monocular=True,
+                keyframes_only=False,
+                camera_trajectory=camera_trajectory,
+                stream=stream,
+            )
+
             out_path = os.path.join(eval_save_path, "metrics_traj.txt")
 
-            print("ATE: ", result_ate)
+            self.info("ATE: {}".format(result_ate))
 
             trajectory_df = pd.DataFrame([result_ate])
-            trajectory_df.to_csv(os.path.join(self.output,"trajectory_results.csv"),index=False)
-            
+            trajectory_df.to_csv(os.path.join(self.output, "trajectory_results.csv"), index=False)
+
             #### ------------------- ####
-            
+
             ## Joint metrics file ##
 
             # ## TODO: add ATE
@@ -413,40 +433,52 @@ class SLAM:
             # df = pd.DataFrame(data, columns=columns)
             # df.to_csv(os.path.join(eval_save_path,"metrics.csv"), index=False)
 
-            print("Evaluation complete")
+            self.info("Evaluation complete")
+        self.info("Terminate: Done!")
 
-                
+    # NOTE communication between tracking and show_stream works based on input_pipe
+    # Tracking feeds objects into input_pipe and show_stream reads from it
 
-
-        print("Terminate: Done!")
-
+    # FIXME communication between gaussian_mapping and the main thread here does not work.
+    # Why is that the case?
     def run(self, stream):
-        mapping_queue = mp.Queue()
 
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
-            # mp.Process(target=self.show_stream, args=(0, self.input_pipe),name="OpenCV Stream"),
-            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe),name="Tracking"),
-            mp.Process(target=self.optimizing, args=(2, False),name="Optimizing"),
-            mp.Process(target=self.multiview_filtering, args=(3, False),name="Multiview Filtering"),
-            mp.Process(target=self.visualizing, args=(4, True),name="Visualizing"),
-            mp.Process(target=self.gaussian_mapping, args=(5, False,mapping_queue),name="Gaussian Mapping"),
+            mp.Process(target=self.show_stream, args=(0, self.input_pipe), name="OpenCV Stream"),
+            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Tracking"),
+            mp.Process(target=self.optimizing, args=(2, False), name="Optimizing"),
+            mp.Process(target=self.multiview_filtering, args=(3, False), name="Multiview Filtering"),
+            mp.Process(target=self.visualizing, args=(4, True), name="Visualizing"),
+            mp.Process(
+                target=self.gaussian_mapping,
+                args=(5, False, self.mapping_queue, self.received_mapping),
+                name="Gaussian Mapping",
+            ),
         ]
 
         self.num_running_thread[0] += len(processes)
         for p in processes:
             p.start()
 
-        # This will not be hit until all threads are finished
+        # Wait for final mapping update
+        while self.mapping_queue.empty():
+            pass
 
-        while not mapping_queue.empty():
-            a = mapping_queue.get()
-            print("From mapping queue: {}".format(a))
+        a = self.mapping_queue.get()
+        self.received_mapping.set()
+        # Do something with a
+        self.info("From mapping queue: {}".format(a))
+        del a
 
-        ## still waiting for a process which is not finished
-        for p in processes:
-            print("Joining process {}".format(p.name)) 
+        # Wait for all processes to have finished, so we can be sure that the mapping queue is not empty, i.e. the last item has been put in
+        while self.all_finished < self.num_running_thread:
+            pass
+
+        for i, p in enumerate(processes):
+            self.info("Joining process {}".format(p.name))
             p.join()
+            # FIXME we hang here for gaussian mapping
+            self.info("Joined process {}".format(p.name))
 
-
-        print("Run method is finished") ## BUG: doesnt get here
+        self.info("Run method is finished")  ## BUG: doesnt get here
