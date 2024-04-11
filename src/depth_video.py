@@ -12,20 +12,19 @@ from .geom.ba import BA_prior, MoBA, BA, bundle_adjustment
 
 
 class DepthVideo:
-    def __init__(self, cfg, args):
+    def __init__(self, cfg):
         self.cfg = cfg
-        self.args = args
 
         ### Intrinsics / Calibration ###
-        if args.camera_model == "pinhole":
+        if cfg.data.cam.camera_model == "pinhole":
             self.n_intr = 4
             self.model_id = 0
-        elif args.camera_model == "mei":
+        elif cfg.data.cam.camera_model == "mei":
             self.n_intr = 5
             self.model_id = 1
         else:
             raise Exception("Camera model not implemented! Choose either pinhole or mei model.")
-        self.opt_intr = args.opt_intr
+        self.opt_intr = cfg.slam.opt_intr
 
         # current keyframe count
         self.counter = Value("i", 0)
@@ -36,17 +35,17 @@ class DepthVideo:
             "loop": Value("i", 0),
         }
         self.global_ba_lock = Value("i", 0)
-        ht = cfg["cam"]["H_out"]
+        ht = cfg.data.cam.H_out
         self.ht = ht
-        wd = cfg["cam"]["W_out"]
+        wd = cfg.data.cam.W_out
         self.wd = wd
-        self.stereo = cfg["mode"] == "stereo"
-        device = args.device
+        self.stereo = cfg.slam.mode == "stereo"
+        device = cfg.slam.device
         self.device = device
         c = 1 if not self.stereo else 2
         self.scale_factor = 8
         s = self.scale_factor
-        buffer = cfg["tracking"]["buffer"]
+        buffer = cfg.tracking.buffer
 
         ### state attributes ###
         self.timestamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
@@ -59,7 +58,7 @@ class DepthVideo:
 
         self.disps_sens = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         # Scale and shift parameters for ambiguous monocular depth
-        self.optimize_scales = cfg["mode"] == "prgbd" # Optimze the scales and shifts for Pseudo-RGBD mode
+        self.optimize_scales = cfg.slam.mode == "prgbd" # Optimze the scales and shifts for Pseudo-RGBD mode
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
 

@@ -29,22 +29,21 @@ from multiprocessing import Manager
 
 
 class Tracker(nn.Module):
-    def __init__(self, cfg, args, slam):
+    def __init__(self, cfg, slam):
         super(Tracker, self).__init__()
-        self.args = args
         self.cfg = cfg
-        self.device = args.device
+        self.device = cfg.slam.device
         self.net = slam.net
         self.video = slam.video
         self.verbose = slam.verbose
 
         # filter incoming frames so that there is enough motion
-        self.frontend_window = cfg["tracking"]["frontend"]["window"]
-        filter_thresh = cfg["tracking"]["motion_filter"]["thresh"]
+        self.frontend_window = cfg.tracking.frontend.window
+        filter_thresh = cfg.tracking.motion_filter.thresh
         self.motion_filter = MotionFilter(self.net, self.video, thresh=filter_thresh, device=self.device)
 
         # frontend process
-        self.frontend = Frontend(self.net, self.video, self.args, self.cfg)
+        self.frontend = Frontend(self.net, self.video, self.cfg)
 
     def forward(self, timestamp, image, depth, intrinsic, gt_pose=None):
         with torch.no_grad():
@@ -56,11 +55,10 @@ class Tracker(nn.Module):
 
 
 class BundleAdjustment(nn.Module):
-    def __init__(self, cfg, args, slam):
+    def __init__(self, cfg, slam):
         super(BundleAdjustment, self).__init__()
-        self.args = args
         self.cfg = cfg
-        self.device = args.device
+        self.device = cfg.slam.device
         self.net = slam.net
         self.video = slam.video
         self.verbose = slam.verbose
@@ -69,7 +67,7 @@ class BundleAdjustment(nn.Module):
         self.ba_counter = -1
 
         # backend process
-        self.backend = Backend(self.net, self.video, self.args, self.cfg)
+        self.backend = Backend(self.net, self.video, self.cfg)
 
     def info(self, msg):
         print(Fore.GREEN)
@@ -92,33 +90,30 @@ class BundleAdjustment(nn.Module):
 
 
 class SLAM:
-    def __init__(self, args, cfg):
+    def __init__(self, cfg):
         super(SLAM, self).__init__()
-        self.args = args
         self.cfg = cfg
-        self.device = args.device
-        self.verbose = cfg["verbose"]
-        self.mode = cfg["mode"]
-        self.only_tracking = cfg["only_tracking"]
-        self.make_video = args.make_video
+        self.device = cfg.slam.device
+        self.verbose = cfg.slam.verbose
+        self.mode = cfg.slam.mode
+        self.only_tracking = cfg.slam.only_tracking
+        self.make_video = cfg.slam.make_video
 
-        if args.output is None:
-            self.output = cfg["data"]["output"]
-        else:
-            self.output = args.output
-        os.makedirs(self.output, exist_ok=True)
+        self.output = cfg.slam.output_folder
+
         os.makedirs(f"{self.output}/logs/", exist_ok=True)
+        os.makedirs(f"{self.output}/renders/mapping/", exist_ok=True)
+        os.makedirs(f"{self.output}/renders/final", exist_ok=True)
+        os.makedirs(f"{self.output}/mesh", exist_ok=True)
 
         self.update_cam(cfg)
         self.load_bound(cfg)
 
         self.net = DroidNet()
 
-        self.load_pretrained(cfg["tracking"]["pretrained"])
+        self.load_pretrained(cfg.tracking.pretrained)
         self.net.to(self.device).eval()
         self.net.share_memory()
-
-        self.renderer = Renderer(cfg, args, self)
 
         self.num_running_thread = torch.zeros((1)).int()
         self.num_running_thread.share_memory_()
@@ -140,24 +135,22 @@ class SLAM:
         self.reload_map.share_memory_()
 
         # store images, depth, poses, intrinsics (shared between process)
-        ### NOTE: use this for getting the gt and rendered images
-        self.video = DepthVideo(cfg, args)
+        self.video = DepthVideo(cfg)
 
-        self.tracker = Tracker(cfg, args, self)
-        self.ba = BundleAdjustment(cfg, args, self)
+        self.tracker = Tracker(cfg, self)
+        self.ba = BundleAdjustment(cfg, self)
 
-        self.multiview_filter = MultiviewFilter(cfg, args, self)
+        self.multiview_filter = MultiviewFilter(cfg, self)
 
         # post processor - fill in poses for non-keyframes
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
 
         ## Used to share packeets for evaluation from the gaussian mapper
-        self.mapping_queue = mp.Queue()
-        self.gaussian_mapper = GaussianMapper(cfg, args, self, mapping_queue=self.mapping_queue)
+        self.gaussian_mapper = GaussianMapper(cfg, self)
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
-        self.evaluate = cfg["evaluate"]
+        self.evaluate = cfg.slam.evaluate
         self.dataset = None
 
 
@@ -171,12 +164,12 @@ class SLAM:
         such as resize or edge crop
         """
         # resize the input images to crop_size(variable name used in lietorch)
-        H, W = float(cfg["cam"]["H"]), float(cfg["cam"]["W"])
-        fx, fy = cfg["cam"]["fx"], cfg["cam"]["fy"]
-        cx, cy = cfg["cam"]["cx"], cfg["cam"]["cy"]
+        H, W = float(cfg.data.cam.H), float(cfg.data.cam.W)
+        fx, fy = cfg.data.cam.fx, cfg.data.cam.fy
+        cx, cy = cfg.data.cam.cx, cfg.data.cam.cy
 
-        h_edge, w_edge = cfg["cam"]["H_edge"], cfg["cam"]["W_edge"]
-        H_out, W_out = cfg["cam"]["H_out"], cfg["cam"]["W_out"]
+        h_edge, w_edge = cfg.data.cam.H_edge, cfg.data.cam.W_edge
+        H_out, W_out = cfg.data.cam.H_out, cfg.data.cam.W_out
 
         self.fx = fx * (W_out + w_edge * 2) / W
         self.fy = fy * (H_out + h_edge * 2) / H
@@ -195,7 +188,7 @@ class SLAM:
 
         """
         # scale the bound if there is a global scaling factor
-        self.bound = torch.from_numpy(np.array(cfg["mapping"]["bound"])).float()
+        self.bound = torch.from_numpy(np.array(cfg.data.bound)).float()
 
     def load_pretrained(self, pretrained):
         print(f"INFO: load pretrained checkpiont from {pretrained}!")
@@ -209,7 +202,7 @@ class SLAM:
 
         self.net.load_state_dict(state_dict)
 
-    def tracking(self, rank, stream, input_queue=mp.Queue):
+    def tracking(self, rank, stream, input_queue:mp.Queue):
         print("Tracking Triggered!")
         self.all_trigered += 1
         # Wait up for other threads to start
@@ -220,8 +213,8 @@ class SLAM:
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
-            input_queue.put(image)
-            input_queue.put(depth)
+            #input_queue.put(image)
+            #input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
@@ -258,20 +251,19 @@ class SLAM:
 
         print("Multiview Filtering Done!")
 
-    ## BUG: gaussian_mapping is not ending
-    def gaussian_mapping(self, rank, dont_run=False):
+    def gaussian_mapping(self, rank, dont_run, mapping_queue: mp.Queue):
         print("Gaussian Mapping Triggered!")
         self.all_trigered += 1
         while self.tracking_finished < 1 and not dont_run:
             while self.hang_on > 0 and self.make_video:
                 sleep(1.0)
-            self.gaussian_mapper()
+            self.gaussian_mapper(mapping_queue=mapping_queue)
         finished = False
         print("got here ----------------------------------") ## BUG: never reached
         if not dont_run:
             print("Last run") ## BUG: this is never reached
             while not finished:
-                finished = self.gaussian_mapper(the_end=True)
+                finished = self.gaussian_mapper(the_end=True,mapping_queue=mapping_queue)
 
         self.gaussian_mapping_finished += 1
         # self.shared_space['gaussian_mapper'] = self.gaussian_mapper
@@ -315,6 +307,7 @@ class SLAM:
 
         print("Initiating termination sequence!")
         while self.optimizing_finished < 1:
+            print("Waiting for the optimizing...")
             if self.num_running_thread == 1 and self.tracking_finished > 0:
                 break
         
@@ -345,8 +338,8 @@ class SLAM:
             print("Shape of poses:",self.video.poses.shape)
             print("Shape of ground truth poses:",self.video.poses_gt.shape)
             print("Check that gt poses are not empty:",self.video.poses_gt[25])
-            # rendering_packet = self.mapping_queue.get() 
-            # print("The eval packet is:",rendering_packet) ## Andrei BUG: doesn't reach this
+            rendering_packet = self.mapping_queue.get() 
+            print("The eval packet is:",rendering_packet) ## Andrei BUG: doesn't reach this
 
             # retrieved_mapper = self.shared_data['gaussian_mapper']
             # print("Number of cameras / frames:",len(self.gaussian_mapper.cameras)) ## BUG: why is number of camera 0 here?
@@ -428,22 +421,32 @@ class SLAM:
         print("Terminate: Done!")
 
     def run(self, stream):
+        mapping_queue = mp.Queue()
+
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
-            mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
-            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
-            mp.Process(target=self.optimizing, args=(2, False)),
-            mp.Process(target=self.multiview_filtering, args=(3, False)),
-            mp.Process(target=self.visualizing, args=(4, True)),
-            mp.Process(target=self.gaussian_mapping, args=(5, True)),
+            # mp.Process(target=self.show_stream, args=(0, self.input_pipe),name="OpenCV Stream"),
+            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe),name="Tracking"),
+            mp.Process(target=self.optimizing, args=(2, False),name="Optimizing"),
+            mp.Process(target=self.multiview_filtering, args=(3, False),name="Multiview Filtering"),
+            mp.Process(target=self.visualizing, args=(4, True),name="Visualizing"),
+            mp.Process(target=self.gaussian_mapping, args=(5, False,mapping_queue),name="Gaussian Mapping"),
         ]
 
         self.num_running_thread[0] += len(processes)
         for p in processes:
-            
             p.start()
 
         # This will not be hit until all threads are finished
+
+        while not mapping_queue.empty():
+            a = mapping_queue.get()
+            print("From mapping queue: {}".format(a))
+
+        ## still waiting for a process which is not finished
         for p in processes:
+            print("Joining process {}".format(p.name)) 
             p.join()
 
+
+        print("Run method is finished") ## BUG: doesnt get here
