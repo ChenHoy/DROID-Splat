@@ -253,6 +253,8 @@ class SLAM:
 
     def gaussian_mapping(self, rank, dont_run, mapping_queue: mp.Queue):
         print("Gaussian Mapping Triggered!")
+
+        print("Hash of gaussian mapping slam: {}".format(mapping_queue))
         self.all_trigered += 1
         while self.tracking_finished < 1 and not dont_run:
             while self.hang_on > 0 and self.make_video:
@@ -338,12 +340,12 @@ class SLAM:
             print("Shape of poses:",self.video.poses.shape)
             print("Shape of ground truth poses:",self.video.poses_gt.shape)
             print("Check that gt poses are not empty:",self.video.poses_gt[25])
-            rendering_packet = self.mapping_queue.get() 
-            print("The eval packet is:",rendering_packet) ## Andrei BUG: doesn't reach this
+            # rendering_packet = self.mapping_queue.get() 
+            # print("The eval packet is:",rendering_packet) ## Andrei BUG: doesn't reach this
 
             # retrieved_mapper = self.shared_data['gaussian_mapper']
-            # print("Number of cameras / frames:",len(self.gaussian_mapper.cameras)) ## BUG: why is number of camera 0 here?
-            # print("Last index of gaussian_mapper:",self.gaussian_mapper.last_idx)
+            print("Number of cameras / frames:",len(self.gaussian_mapper.cameras)) ## BUG: why is number of camera 0 here?
+            print("Last index of gaussian_mapper:",self.gaussian_mapper.last_idx)
 
             # # print("Retrieved mapper camera {}. Retrieved mapper last idx {}".format(retrieved_mapper.cameras,retrieved_mapper.last_idx)) 
             # _, kf_indices = self.gaussian_mapper.select_keyframes()
@@ -423,6 +425,8 @@ class SLAM:
     def run(self, stream):
         mapping_queue = mp.Queue()
 
+        print("Hash of queue in run: {}".format(mapping_queue))
+
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             # mp.Process(target=self.show_stream, args=(0, self.input_pipe),name="OpenCV Stream"),
@@ -430,7 +434,7 @@ class SLAM:
             mp.Process(target=self.optimizing, args=(2, False),name="Optimizing"),
             mp.Process(target=self.multiview_filtering, args=(3, False),name="Multiview Filtering"),
             mp.Process(target=self.visualizing, args=(4, True),name="Visualizing"),
-            mp.Process(target=self.gaussian_mapping, args=(5, False,mapping_queue),name="Gaussian Mapping"),
+            mp.Process(target=self.gaussian_mapping, args=(5, False,mapping_queue),name="Gaussian Mapping"), ## mapping_queue has a different hash when passed here, but its the same in the method itself
         ]
 
         self.num_running_thread[0] += len(processes)
@@ -439,14 +443,18 @@ class SLAM:
 
         # This will not be hit until all threads are finished
 
-        while not mapping_queue.empty():
-            a = mapping_queue.get()
-            print("From mapping queue: {}".format(a))
 
         ## still waiting for a process which is not finished
         for p in processes:
-            print("Joining process {}".format(p.name)) 
+            print("Joining process {}".format(p.name))
+            if p.name == "Gaussian Mapping":
+
+                # while not mapping_queue.empty():
+                a = mapping_queue.get(timeout=30)
+                print("From mapping queue: {}".format(a))
+
             p.join()
+            print("Joined process {} succsesfully".format(p.name))
 
 
         print("Run method is finished") ## BUG: doesnt get here

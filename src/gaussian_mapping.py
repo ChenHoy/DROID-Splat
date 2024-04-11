@@ -465,41 +465,44 @@ class GaussianMapper(object):
         elif the_end and self.last_idx + self.delay == cur_idx:
             print("\nMapping refinement starting")
 
-            for iter in range(self.mapping_params.refinement_iters):
-                loss = self.mapping_step(
-                    iter,
-                    self.cameras,
-                    self.pruning_params.refinement,
-                    densify=False,
-                    optimize_poses=self.mapping_params.optimize_poses,
-                )
-                self.loss_list.append(loss / len(self.cameras))
+            # for iter in range(self.mapping_params.refinement_iters):
+            #     loss = self.mapping_step(
+            #         iter,
+            #         self.cameras,
+            #         self.pruning_params.refinement,
+            #         densify=False,
+            #         optimize_poses=self.mapping_params.optimize_poses,
+            #     )
+            #     self.loss_list.append(loss / len(self.cameras))
 
-                if self.mapping_params.use_gui:
-                    self.q_main2vis.put(
-                        gui_utils.GaussianPacket(
-                            gaussians=clone_obj(self.gaussians),
-                            keyframes=self.cameras,
-                        )
-                    )
-            print("Mapping refinement finished")
+            #     if self.mapping_params.use_gui:
+            #         self.q_main2vis.put(
+            #             gui_utils.GaussianPacket(
+            #                 gaussians=clone_obj(self.gaussians),
+            #                 keyframes=self.cameras,
+            #             )
+            #         )
+            # print("Mapping refinement finished")
             
-            self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
-            print("Mesh saved")
+            # self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
+            # print("Mesh saved")
 
-            if self.mapping_params.save_renders:
-                for cam in self.cameras:
-                    self.save_render(cam, f"{self.output}/renders/final/{cam.uid}.png")
+            # if self.mapping_params.save_renders:
+            #     for cam in self.cameras:
+            #         self.save_render(cam, f"{self.output}/renders/final/{cam.uid}.png")
 
 
             ## export the cameras and gaussians to the terminate process
             print("Sending the final state to the terminate process")
+            print("Hash of queue in gaussian mapping call: {}".format(mapping_queue))
+
             mapping_queue.put(gui_utils.EvaluatePacket(
                 pipeline_params=clone_obj(self.pipeline_params),
                 cameras=self.cameras[:],
                 gaussians=clone_obj(self.gaussians),
                 background=clone_obj(self.background)
             ))
+            mapping_queue.put("STOP")
             print("Sent the final state to the terminate process successfully")
 
             # fig, ax = plt.subplots()

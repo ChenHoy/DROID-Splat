@@ -50,7 +50,7 @@ class Frontend:
         self.loop_nms = cfg["tracking"]["backend"]["loop_nms"]
         self.loop_thresh = cfg["tracking"]["backend"]["loop_thresh"]
 
-        self.enable_loop = True
+        self.enable_loop = False
         self.last_loop_t = -1
 
     @torch.no_grad()

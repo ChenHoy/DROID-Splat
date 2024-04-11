@@ -15,6 +15,7 @@ slam:
   only_tracking: False
   opt_intr: True
   make_video: False
+  evaluate: True
 
 
 hydra:
