@@ -459,7 +459,7 @@ class GaussianModel:
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group["params"][0], None)
             if stored_state is not None:
-                # print(group["name"], stored_state["exp_avg"].shape, extension_tensor.shape)
+                # self.info(group["name"], stored_state["exp_avg"].shape, extension_tensor.shape)
                 stored_state["exp_avg"] = torch.cat(
                     (stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0
                 )

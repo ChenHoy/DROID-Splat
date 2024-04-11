@@ -166,3 +166,24 @@ class ParamsGUI:
         self.gaussians = gaussians
         self.q_main2vis = q_main2vis
         self.q_vis2main = q_vis2main
+
+
+class EvaluatePacket:
+    '''
+    This class is used to pass params from the gaussian_mapper to the terminate thread
+    for evaluation
+    '''
+    def __init__(
+        self,
+        pipeline_params=None,
+        background=None,
+        gaussians=None,
+        cameras=None,
+    ):
+        self.pipeline_params = pipeline_params
+        self.background = background
+        self.gaussians = gaussians
+        self.cameras = cameras
+
+    def __str__(self) -> str:
+        print("Im getting something: {} {}".format(self.pipeline_params, self.cameras.shape))

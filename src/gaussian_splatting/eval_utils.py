@@ -14,19 +14,24 @@ from evo.tools.settings import SETTINGS
 from matplotlib import pyplot as plt
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
-import wandb
 from .gaussian_renderer import render
 from .utils.image_utils import psnr
 from .utils.loss_utils import ssim
 from .utils.system_utils import mkdir_p
 from .logging_utils import Log
+from .multiprocessing_utils import clone_obj
 
 
 def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ## Plot
     traj_ref = PosePath3D(poses_se3=poses_gt)
     traj_est = PosePath3D(poses_se3=poses_est)
-    traj_est_aligned = trajectory.align_trajectory(traj_est, traj_ref, correct_scale=monocular)
+    # traj_est_aligned = trajectory.align_trajectory(
+    #     traj_est, traj_ref, correct_scale=monocular
+    # )
+    traj_est_aligned = clone_obj(traj_est)
+    traj_est_aligned.align(traj_ref, correct_scale=monocular)  ## throws
+    # traj_est_aligned.align_origin(traj_ref)
 
     ## RMSE
     pose_relation = metrics.PoseRelation.translation_part
@@ -60,10 +65,48 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ax.legend()
     plt.savefig(os.path.join(plot_dir, "evo_2dplot_{}.png".format(str(label))), dpi=90)
 
-    return ape_stat
+    return ape_stats
 
 
-def eval_ate(frames, kf_ids, save_dir, iterations, final=False, monocular=False):
+def get_c2w_list(camera_trajectory, stream):
+    """
+    Gets the camera trajectory and the stream of poses and returns the estimated and gt poses for
+    all frames after trajectory filler
+    """
+    estimate_c2w_list = camera_trajectory.matrix().data.cpu()
+    traj_ref = []
+    for i in range(len(stream.poses)):
+        val = stream.poses[i].sum()
+        if np.isnan(val) or np.isinf(val):
+            print(f"Nan or Inf found in gt poses, skipping {i}th pose!")
+            continue
+        traj_ref.append(stream.poses[i])
+
+    gt_c2w_list = torch.from_numpy(np.stack(traj_ref, axis=0))
+
+    return estimate_c2w_list, gt_c2w_list
+
+
+def eval_ate(
+    video,
+    kf_ids,
+    save_dir,
+    iterations,
+    final=False,
+    monocular=False,
+    keyframes_only=True,
+    camera_trajectory=None,
+    stream=None,
+):
+    """
+    video: DepthVideo
+    kf_ids: list of keyframe indices | in case of the video object all of them are keyframes
+    used poses_gt for gt and poses for estimated poses
+    stream: Dataset
+    camera_trajectory: poses after trajectory filler
+    """
+    frames = video.images
+
     trj_data = dict()
     latest_frame_idx = kf_ids[-1] + 2 if final else kf_ids[-1] + 1
     trj_id, trj_est, trj_gt = [], [], []
@@ -75,38 +118,99 @@ def eval_ate(frames, kf_ids, save_dir, iterations, final=False, monocular=False)
         pose[0:3, 3] = T.cpu().numpy()
         return pose
 
-    for kf_id in kf_ids:
-        kf = frames[kf_id]
-        pose_est = np.linalg.inv(gen_pose_matrix(kf.R, kf.T))
-        pose_gt = np.linalg.inv(gen_pose_matrix(kf.R_gt, kf.T_gt))
+    if keyframes_only:
 
-        trj_id.append(frames[kf_id].uid)
-        trj_est.append(pose_est.tolist())
-        trj_gt.append(pose_gt.tolist())
+        for kf_id in kf_ids:
+            kf = frames[kf_id]
 
-        trj_est_np.append(pose_est)
-        trj_gt_np.append(pose_gt)
+            _, _, c2w, _, _ = video.get_mapping_item(kf_id, video.device)
+            w2c = torch.inverse(c2w)
+            R_est = w2c[:3, :3].unsqueeze(0).detach()
+            T_est = w2c[:3, 3].detach()
 
-    trj_data["trj_id"] = trj_id
-    trj_data["trj_est"] = trj_est
-    trj_data["trj_gt"] = trj_gt
+            gt_c2w = video.poses_gt[kf_id].clone().to(video.device)  # [4, 4]
+            gt_w2c = torch.inverse(gt_c2w)
+            R_gt = gt_w2c[:3, :3].unsqueeze(0).detach()
+            T_gt = gt_w2c[:3, 3].detach()
 
-    plot_dir = os.path.join(save_dir, "plot")
-    mkdir_p(plot_dir)
+            pose_est = np.linalg.inv(gen_pose_matrix(R_est, T_est))
+            pose_gt = np.linalg.inv(gen_pose_matrix(R_gt, T_gt))
 
-    label_evo = "final" if final else "{:04}".format(iterations)
-    with open(os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8") as f:
-        json.dump(trj_data, f, indent=4)
+            # trj_id.append(frames[kf_id].uid)
+            trj_est.append(pose_est.tolist())
+            trj_gt.append(pose_gt.tolist())
 
-    ate = evaluate_evo(
-        poses_gt=trj_gt_np,
-        poses_est=trj_est_np,
-        plot_dir=plot_dir,
-        label=label_evo,
-        monocular=monocular,
-    )
-    wandb.log({"frame_idx": latest_frame_idx, "ate": ate})
-    return ate
+            trj_est_np.append(pose_est)
+            trj_gt_np.append(pose_gt)
+
+        # trj_data["trj_id"] = trj_id
+        trj_data["trj_est"] = trj_est
+        trj_data["trj_gt"] = trj_gt
+
+        plot_dir = os.path.join(save_dir, "plot")
+        mkdir_p(plot_dir)
+
+        label_evo = "final" if final else "{:04}".format(iterations)
+        with open(os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8") as f:
+            json.dump(trj_data, f, indent=4)
+
+        ate = evaluate_evo(
+            poses_gt=trj_gt_np,
+            poses_est=trj_est_np,
+            plot_dir=plot_dir,
+            label=label_evo,
+            monocular=monocular,
+        )
+        return ate
+
+    else:
+        estimate_c2w_list, gt_c2w_list = get_c2w_list(camera_trajectory, stream)
+
+        assert len(estimate_c2w_list) == len(gt_c2w_list), "Length of estimated and gt poses should be same"
+
+        no_poses = len(estimate_c2w_list)
+
+        for i in range(no_poses):
+            c2w_est = estimate_c2w_list[i]
+            c2w_gt = gt_c2w_list[i]
+
+            w2c_est = torch.inverse(c2w_est)
+            w2c_gt = torch.inverse(c2w_gt)
+
+            R_est = w2c_est[:3, :3].unsqueeze(0).detach()
+            T_est = w2c_est[:3, 3].detach()
+
+            R_gt = w2c_gt[:3, :3].unsqueeze(0).detach()
+            T_gt = w2c_gt[:3, 3].detach()
+
+            pose_est = np.linalg.inv(gen_pose_matrix(R_est, T_est))
+            pose_gt = np.linalg.inv(gen_pose_matrix(R_gt, T_gt))
+
+            # trj_id.append(frames[kf_id].uid)
+            trj_est.append(pose_est.tolist())
+            trj_gt.append(pose_gt.tolist())
+
+            trj_est_np.append(pose_est)
+            trj_gt_np.append(pose_gt)
+
+        trj_data["trj_est"] = trj_est
+        trj_data["trj_gt"] = trj_gt
+
+        plot_dir = os.path.join(save_dir, "plot")
+        mkdir_p(plot_dir)
+
+        label_evo = "final" if final else "{:04}".format(iterations)
+        with open(os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8") as f:
+            json.dump(trj_data, f, indent=4)
+
+        ate = evaluate_evo(
+            poses_gt=trj_gt_np,
+            poses_est=trj_est_np,
+            plot_dir=plot_dir,
+            label=label_evo,
+            monocular=monocular,
+        )
+        return ate
 
 
 def eval_rendering(
@@ -119,17 +223,33 @@ def eval_rendering(
     kf_indices,
     iteration="final",
 ):
+    """
+    mapper: GaussianMapper
+    """
     interval = 5
     img_pred, img_gt, saved_frame_idx = [], [], []
     end_idx = len(frames) - 1 if iteration == "final" or "before_opt" else iteration
     psnr_array, ssim_array, lpips_array = [], [], []
     cal_lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to("cuda")
+
+    """
+    Runs this only for frames that are not keyframes
+    """
+    print(
+        "Calculating metrics on non-keyframes. Total keyframes: ",
+        len(kf_indices),
+        "Step used for evaluation: ",
+        interval,
+    )
     for idx in range(0, end_idx, interval):
         if idx in kf_indices:
             continue
         saved_frame_idx.append(idx)
         frame = frames[idx]
-        gt_image, _, _ = dataset[idx]
+        ## gt_image is an rgb image no depth
+        _, gt_image, _, _, _ = dataset[idx]
+
+        gt_image = gt_image.squeeze(0)
 
         rendering = render(frame, gaussians, pipe, background)["render"]
         image = torch.clamp(rendering, 0.0, 1.0)
@@ -143,9 +263,9 @@ def eval_rendering(
 
         mask = gt_image > 0
 
-        psnr_score = psnr((image[mask]).unsqueeze(0), (gt_image[mask]).unsqueeze(0))
-        ssim_score = ssim((image).unsqueeze(0), (gt_image).unsqueeze(0))
-        lpips_score = cal_lpips((image).unsqueeze(0), (gt_image).unsqueeze(0))
+        psnr_score = psnr((image[mask]).unsqueeze(0).to("cuda"), (gt_image[mask]).unsqueeze(0).to("cuda"))
+        ssim_score = ssim((image).unsqueeze(0).to("cuda"), (gt_image).unsqueeze(0).to("cuda"))
+        lpips_score = cal_lpips((image).unsqueeze(0).to("cuda"), (gt_image).unsqueeze(0).to("cuda"))
 
         psnr_array.append(psnr_score.item())
         ssim_array.append(ssim_score.item())
@@ -157,7 +277,7 @@ def eval_rendering(
     output["mean_lpips"] = float(np.mean(lpips_array))
 
     Log(
-        f'mean psnr: {output["mean_psnr"]}, ssim: {output["mean_ssim"]}, lpips: {output["mean_ssim"]}',
+        f'mean psnr: {output["mean_psnr"]}, ssim: {output["mean_ssim"]}, lpips: {output["mean_lpips"]}',
         tag="Eval",
     )
 

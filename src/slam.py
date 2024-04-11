@@ -23,6 +23,10 @@ from .multiview_filter import MultiviewFilter
 from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .gaussian_mapping import GaussianMapper
+from .gaussian_splatting.eval_utils import eval_ate, eval_rendering, save_gaussians
+import pandas as pd
+from .render import Renderer
+from multiprocessing import Manager
 
 
 class Tracker(nn.Module):
@@ -114,6 +118,8 @@ class SLAM:
         self.net.to(self.device).eval()
         self.net.share_memory()
 
+        self.renderer = Renderer(cfg, args, self)
+
         self.num_running_thread = torch.zeros((1)).int()
         self.num_running_thread.share_memory_()
         self.all_trigered = torch.zeros((1)).int()
@@ -134,6 +140,7 @@ class SLAM:
         self.reload_map.share_memory_()
 
         # store images, depth, poses, intrinsics (shared between process)
+        ### NOTE: use this for getting the gt and rendered images
         self.video = DepthVideo(cfg, args)
 
         self.tracker = Tracker(cfg, args, self)
@@ -146,11 +153,14 @@ class SLAM:
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
-
-        self.gaussian_mapper = GaussianMapper(cfg, args, self)
+        self.evaluate = cfg["evaluate"]
+        self.dataset = None
 
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
+
+    def set_dataset(self, dataset):
+        self.dataset = dataset
 
     def update_cam(self, cfg):
         """
@@ -240,7 +250,6 @@ class SLAM:
     def multiview_filtering(self, rank, dont_run=False):
         self.info("Multiview Filtering thread started!")
         self.all_trigered += 1
-
         while (self.tracking_finished < 1 or self.optimizing_finished < 1) and not dont_run:
             while self.hang_on > 0 and self.make_video:
                 sleep(1.0)
@@ -248,6 +257,7 @@ class SLAM:
 
         self.info("Multiview Filtering done!")
 
+    ## BUG: gaussian_mapping is not ending
     def gaussian_mapping(self, rank, dont_run=False):
         self.info("Gaussian Mapping thread started!")
         self.all_trigered += 1
@@ -257,7 +267,9 @@ class SLAM:
                 sleep(1.0)
             self.gaussian_mapper()
         finished = False
+        print("got here ----------------------------------")  ## BUG: never reached
         if not dont_run:
+            print("Last run")  ## BUG: this is never reached
             while not finished:
                 finished = self.gaussian_mapper(the_end=True)
 
@@ -267,7 +279,6 @@ class SLAM:
     def visualizing(self, rank, dont_run=False):
         self.info("Visualization thread started!")
         self.all_trigered += 1
-
         while (self.tracking_finished < 1 or self.optimizing_finished < 1) and (not dont_run):
             droid_visualization(self.video, device=self.device, save_root=self.output)
 
@@ -301,10 +312,12 @@ class SLAM:
     def terminate(self, rank, stream=None):
         """fill poses for non-keyframe images and evaluate"""
 
+        print("Initiating termination sequence!")
         while self.optimizing_finished < 1:
             if self.num_running_thread == 1 and self.tracking_finished > 0:
                 break
 
+        print("Saving checkpoints...")
         os.makedirs(os.path.join(self.output, "checkpoints/"), exist_ok=True)
         torch.save(
             {
@@ -314,13 +327,48 @@ class SLAM:
             os.path.join(self.output, "checkpoints/go.ckpt"),
         )
 
-        do_evaluation = True
-        if do_evaluation:
+        print("Doing evaluation!")
+        if self.evaluate:
             from evo.core.trajectory import PoseTrajectory3D
             import evo.main_ape as main_ape
             from evo.core.metrics import PoseRelation
             from evo.core.trajectory import PosePath3D
             import numpy as np
+            import pandas as pd
+
+            eval_save_path = "evaluation_results/"
+
+            #### Rendering evaluation ####
+            print("Initialize my evaluation in the termination method")
+            print("Shape of images:", self.video.images.shape)
+            print("Shape of poses:", self.video.poses.shape)
+            print("Shape of ground truth poses:", self.video.poses_gt.shape)
+            print("Check that gt poses are not empty:", self.video.poses_gt[25])
+            # rendering_packet = self.mapping_queue.get()
+            # print("The eval packet is:",rendering_packet) ## Andrei BUG: doesn't reach this
+
+            # retrieved_mapper = self.shared_data['gaussian_mapper']
+            # print("Number of cameras / frames:",len(self.gaussian_mapper.cameras)) ## BUG: why is number of camera 0 here?
+            # print("Last index of gaussian_mapper:",self.gaussian_mapper.last_idx)
+
+            # # print("Retrieved mapper camera {}. Retrieved mapper last idx {}".format(retrieved_mapper.cameras,retrieved_mapper.last_idx))
+            # _, kf_indices = self.gaussian_mapper.select_keyframes()
+            # print("Selected keyframe indices:", kf_indices)
+
+            # rendering_result = eval_rendering(
+            #     self.gaussian_mapper.cameras,
+            #     self.gaussian_mapper.gaussians,
+            #     self.dataset,
+            #     eval_save_path,
+            #     self.gaussian_mapper.pipeline_params,
+            #     self.gaussian_mapper.background,
+            #     kf_indices=kf_indices,
+            #     iteration="final",
+            # )
+
+            #### ------------------- ####
+
+            ### Trajectory evaluation ###
 
             self.info("Start evaluating ...")
             self.info("#" * 20 + f" Results for {stream.input_folder} ...")
@@ -336,55 +384,49 @@ class SLAM:
             out_path = os.path.join(self.output, "checkpoints/est_poses.npy")
             np.save(out_path, estimate_c2w_list.numpy())  # c2ws
 
-            traj_ref = []
-            traj_est_select = []
-            if stream.poses is None:  # for eth3d submission
-                if stream.image_timestamps is not None:
-                    submission_txt = os.path.join(self.output, "submission.txt")
-                    with open(submission_txt, "w") as fp:
-                        for tm, pos in zip(stream.image_timestamps, traj_est.tolist()):
-                            str = f"{tm:.9f}"
-                            for ps in pos:  # timestamp tx ty tz qx qy qz qw
-                                str += f" {ps:.14f}"
-                            fp.write(str + "\n")
-                    self.info(f"Poses are saved to {submission_txt}!")
+            ## TODO: change this for depth videos
+            """
+            Set keyframes_only to True to compute the APE and plots on keyframes only.
+            """
+            result_ate = eval_ate(
+                self.video,
+                kf_ids=list(range(len(self.video.images))),
+                save_dir=self.output,
+                iterations=-1,
+                final=True,
+                monocular=True,
+                keyframes_only=False,
+                camera_trajectory=camera_trajectory,
+                stream=stream,
+            )
 
-                print(colored("[Main] Terminate: no GT poses found!", "red"))
-                trans_init = None
-                gt_c2w_list = None
-            else:
-                for i in range(len(stream.poses)):
-                    val = stream.poses[i].sum()
-                    if np.isnan(val) or np.isinf(val):
-                        print(colored(f"[Main] Nan or Inf found in gt poses, skipping {i}th pose!", "red"))
-                        continue
-                    traj_est_select.append(traj_est[i])
-                    traj_ref.append(stream.poses[i])
+            out_path = os.path.join(eval_save_path, "metrics_traj.txt")
 
-                traj_est = np.stack(traj_est_select, axis=0)
-                gt_c2w_list = torch.from_numpy(np.stack(traj_ref, axis=0))
+            self.info("ATE: ", result_ate)
 
-                traj_est = PoseTrajectory3D(
-                    positions_xyz=traj_est[:, :3],
-                    orientations_quat_wxyz=traj_est[:, 3:],
-                    timestamps=np.array(timestamps),
-                )
+            trajectory_df = pd.DataFrame([result_ate])
+            trajectory_df.to_csv(os.path.join(self.output, "trajectory_results.csv"), index=False)
 
-                traj_ref = PosePath3D(poses_se3=traj_ref)
+            #### ------------------- ####
 
-                result = main_ape.ape(
-                    traj_ref,
-                    traj_est,
-                    est_name="traj",
-                    pose_relation=PoseRelation.translation_part,
-                    align=True,
-                    correct_scale=True,
-                )
+            ## Joint metrics file ##
 
-                out_path = os.path.join(self.output, "metrics_traj.txt")
-                with open(out_path, "a") as fp:
-                    fp.write(result.pretty_str())
-                trans_init = result.np_arrays["alignment_transformation_sim3"]
+            # ## TODO: add ATE
+            # columns = ["tag", "psnr", "ssim", "lpips","ape"]
+            # data = [
+            #     [
+            #         "optimizing + multiview ",
+            #         rendering_result["mean_psnr"],
+            #         rendering_result["mean_ssim"],
+            #         rendering_result["mean_lpips"],
+            #         result_ape.stats['mean']
+            #     ]
+            # ]
+
+            # df = pd.DataFrame(data, columns=columns)
+            # df.to_csv(os.path.join(eval_save_path,"metrics.csv"), index=False)
+
+            self.info("Evaluation complete")
 
         self.info("Terminate done!")
 
@@ -403,6 +445,7 @@ class SLAM:
 
         self.num_running_thread[0] += len(processes)
         for p in processes:
+
             p.start()
 
         # This will not be hit until all threads are finished

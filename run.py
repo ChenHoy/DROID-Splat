@@ -28,6 +28,9 @@ def parse_args():
         "--output", type=str, help="output folder, this have higher priority, can overwrite the one in config file"
     )
     parser.add_argument(
+        "--mode", type=str, help="slam mode: mono, prgbd, rgbd or stereo", choices=["mono", "prgbd", "rgbd", "stereo"]
+    )
+    parser.add_argument(
         "--image_size",
         nargs="+",
         default=None,
@@ -48,9 +51,7 @@ def parse_args():
         default=None,
         help="calibration parameters: fx, fy, cx, cy, this have higher priority, can overwrite the one in config file",
     )
-    parser.add_argument(
-        "--mode", type=str, help="slam mode: mono, prgbd, rgbd or stereo", choices=["mono", "prgbd", "rgbd", "stereo"]
-    )
+    parser.add_argument("--evaluate", type=bool, default=False, help="Enter evaluation mode. Deactivate gui and visualization.")
     return parser.parse_args()
 
 
@@ -105,6 +106,8 @@ def set_args(args, cfg):
             args.calibration_txt
         ).tolist()
 
+    cfg['evaluate'] = args.evaluate
+    
     assert cfg["mode"] in ["rgbd", "prgbd", "mono", "stereo"], "Unknown mode: {}".format(cfg["mode"])
     cfg["stride"] = args.stride if args.stride is not None else cfg["stride"]
 
@@ -146,12 +149,19 @@ if __name__ == "__main__":
     print(f"\n\n** Running {cfg['data']['input_folder']} in {cfg['mode']} mode!!! **\n\n")
     print(args)
     # Save state for reproducibility
-    backup_source_code(os.path.join(output_dir, "code"))
-    config.save_config(cfg, f"{output_dir}/cfg.yaml")
+    # backup_source_code(os.path.join(output_dir, "code"))
+    # config.save_config(cfg, f"{output_dir}/cfg.yaml")
 
     # Run SLAM
+    ## index, color_data, depth_data, intrinsic, pose
+    ## color data is RGB image, depth_data is WxH depth image
     dataset = get_dataset(cfg, args, device=args.device)
+
+    # print(dataset)
+    # index, color_data, depth_data, intrinsic, pose = dataset[5]
+    # print(color_data.shape,depth_data.shape)
     slam = SLAM(args, cfg)
+    slam.set_dataset(dataset)
     slam.run(dataset)
     slam.terminate(rank=-1, stream=dataset)
 

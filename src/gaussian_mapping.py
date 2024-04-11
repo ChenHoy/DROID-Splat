@@ -75,17 +75,6 @@ class GaussianMapper(object):
         self.training_params = munchify(config["Training"])
         self.setup = munchify(config["Setup"])
 
-        # Saving dirs
-        self.setup.mesh_path = os.path.join(config["data"]["output"], "mesh")
-        self.setup.render_path = os.path.join(config["data"]["output"], "render")
-        # Create needed paths if non-existent
-        if not os.path.exists(self.setup.mesh_path):
-            os.makedirs(self.setup.mesh_path)
-        if not os.path.exists(self.setup.render_path):
-            os.makedirs(self.setup.render_path)
-            os.makedirs(os.path.join(self.setup.render_path, "mapping"))
-            os.makedirs(os.path.join(self.setup.render_path, "final"))
-
         self.use_spherical_harmonics = False
         self.model_params.sh_degree = 3 if self.use_spherical_harmonics else 0
 
@@ -96,7 +85,7 @@ class GaussianMapper(object):
         bg_color = [1, 1, 1]
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        if self.setup.use_gui:
+        if self.setup.use_gui and not config["evaluate"]:
             self.q_main2vis = mp.Queue()
             self.q_vis2main = mp.Queue()
             self.params_gui = gui_utils.ParamsGUI(
@@ -117,20 +106,13 @@ class GaussianMapper(object):
 
         self.show_filtered = False
 
-    def info(self, msg: str) -> None:
-        print(colored("[Gaussian Mapper]: " + msg, "magenta"))
+        self.mapping_queue = mapping_queue
 
-    def camera_from_gt(self):
-        idx, image, depth, intrinsic, gt_pose = self.mapping_queue.get()
-        image, depth, intrinsic, gt_pose = (
-            image.squeeze().to(self.device),
-            depth.to(self.device),
-            intrinsic.to(self.device),
-            gt_pose.to(self.device),
-        )
-        return self.camera_from_frame(idx, image, depth, intrinsic, gt_pose)
+    def info(self, msg: str):
+        print(colored("[Gaussian Mapper] " + msg, "magenta"))
 
-    def camera_from_video(self, idx: int):
+    # TODO only take object here if dirty_index is set to see if this is a new updated frame
+    def camera_from_video(self, idx):
         """
         Takes the frame data from the video and returns a Camera object.
         """
@@ -230,24 +212,44 @@ class GaussianMapper(object):
     def depth_filter(self, idx: int):
         """
         Gets the video and the time idex and returns the mask.
+
+
+        Tried:
+        -setting the cuda device to 1
+        -set the debug flags in bashrc
+        -using clone_obj
+        -checked the locking for dirty_index
+        -if you access poses or disps_up or poses directly you get the error
+        -setting torch.backends.cudnn.benmark = False
+        -tried running it on cpu (got another error Input type (c10::Half) and bias type (float) should be the same)
         """
+
+        # TODO why doesnt it work only with one index?
         with self.video.get_lock():
             (dirty_index,) = torch.where(self.video.dirty.clone())
             dirty_index = dirty_index
 
-        # Do not filter anything when dirty index is empty
-        if dirty_index.numel() == 0:
-            return None
-
         device = self.video.device
-        poses = torch.index_select(self.video.poses, 0, dirty_index)
-        disps = torch.index_select(self.video.disps_up, 0, dirty_index)
-        # TODO chen: is this a good heuristic?
-        thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
+        poses = torch.index_select(clone_obj(self.video.poses), 0, dirty_index)  ## BUG same here
+        self.info(self.video.disps_up.shape)  ## half of it is empty
+        self.info("Dirty index:", dirty_index)
+        disps = torch.index_select(clone_obj(self.video.disps_up), 0, dirty_index)  ## BUG here
+        # thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
+        thresh = torch.tensor(0.005).unsqueeze(0)
         intrinsics = self.video.intrinsics[0] * self.video.scale_factor
         count = droid_backends.depth_filter(poses, disps, intrinsics, dirty_index, thresh)
 
-        mask = ((count >= 1) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True)))[idx]
+        # mask = (count >= 1) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
+        self.info("poses shape: {}".format(poses.shape))
+        mean_disps = disps.mean(dim=[1, 2], keepdim=True)
+        half_mean_disps = 0.5 * mean_disps
+        disps_greater_than_half_mean = disps > half_mean_disps
+        count_greater_than_or_equal_to_one = count >= 1
+        mask = count_greater_than_or_equal_to_one & disps_greater_than_half_mean
+
+        if len(mask) > 0:
+            mask = mask[idx]
+
         # self.info(f"Valid points:{mask.sum()}/{mask.numel()}")
 
         return mask
@@ -374,14 +376,13 @@ class GaussianMapper(object):
         # Select last 5 frames and other 5 random frames
         if len(self.cameras) <= 10:
             keyframes = self.cameras
+            keyframes_idx = np.arange(len(self.cameras))
         else:
-            keyframes = self.cameras[-5:] + [
-                self.cameras[i] for i in np.random.choice(len(self.cameras) - 5, 5, replace=False)
-            ]
-        return keyframes
+            keyframes_idx = np.random.choice(len(self.cameras) - 5, 5, replace=False)
+            keyframes = self.cameras[-5:] + [self.cameras[i] for i in keyframes_idx]
+        return keyframes, keyframes_idx
 
     def __call__(self, the_end=False):
-
         cur_idx = int(self.video.filtered_id.item())
 
         if self.last_idx + 2 < cur_idx and cur_idx > self.setup.warmup:
@@ -400,8 +401,7 @@ class GaussianMapper(object):
             else:
                 n_g = self.gaussians.get_xyz.shape[0]
                 self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=False)
-                msg = "Added {} gaussian for the new view".format(self.gaussians.get_xyz.shape[0] - n_g)
-                self.info(msg)
+                self.info(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians for the new view")
 
             # Optimze gaussians
             for iter in range(self.setup.mapping_iters):
@@ -457,6 +457,7 @@ class GaussianMapper(object):
                         )
                     )
             self.info("Mapping refinement finished")
+
             self.gaussians.save_ply(f"{self.setup.mesh_path}/final.ply")
             self.info(f"Mesh saved at {self.setup.mesh_path}/final.ply")
 
@@ -464,19 +465,27 @@ class GaussianMapper(object):
                 for cam in self.cameras:
                     self.save_render(cam, f"{self.setup.render_path}/final/{cam.uid}.png")
 
-            fig, ax = plt.subplots()
-            ax.set_title("Loss per frame evolution")
-            ax.set_yscale("log")
-            ax.plot(self.loss_list)
-            plt.show()
-
-            fig, ax = plt.subplots()
-            ax.set_yscale("log")
-            ax.set_title(
-                f"Mode: {self.mode}. Optimize poses: {self.setup.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}"
+            ## export the cameras and gaussians to the terminate process
+            self.mapping_queue.put(
+                gui_utils.EvaluatePacket(
+                    pipeline_params=self.pipeline_params,
+                    cameras=self.cameras,
+                    gaussians=clone_obj(self.gaussians),
+                    background=self.background,
+                )
             )
-            ax.plot(self.loss_list[-self.setup.refinement_iters :])
-            plt.savefig(f"{self.setup.render_path}/loss_{self.mode}.png")
-            plt.show()
+
+            # fig, ax = plt.subplots()
+            # ax.set_title("Loss per frame evolution")
+            # ax.set_yscale("log")
+            # ax.plot(self.loss_list)
+            # plt.show()
+
+            # fig, ax = plt.subplots()
+            # ax.set_yscale("log")
+            # ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.setup.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
+            # ax.plot(self.loss_list[-self.setup.refinement_iters:])
+            # plt.savefig(f"{self.setup.render_path}/loss_{self.mode}.png")
+            # plt.show()
 
             return True

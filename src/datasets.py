@@ -148,9 +148,8 @@ class BaseDataset(Dataset):
         outsize = (H_out_with_edge, W_out_with_edge)
 
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
-        color_data = (
-            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
-        )  # bgr -> rgb, [0, 1]
+        # bgr -> rgb, [0, 1]
+        color_data = torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
         color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
 
         depth_data = self.depthloader(index)
@@ -192,22 +191,13 @@ class ImageFolder(BaseDataset):
         super(ImageFolder, self).__init__(cfg, args, device)
         stride = cfg["stride"]
         # Get either jpg or png files
-        input_images = os.path.join(self.input_folder, "images", "*.jpg")
-        input_depths = os.path.join(self.input_folder, "depthany-vitl-indoor", "*.npy")
+        input_images = os.path.join(self.input_folder, "*.jpg")
         self.color_paths = sorted(glob.glob(input_images))
-        self.depth_paths = sorted(glob.glob(input_depths))
-        # Look for alternative image extensions
         if len(self.color_paths) == 0:
-            input_images = os.path.join(self.input_folder, "images", "*.png")
+            input_images = os.path.join(self.input_folder, "*.png")
             self.color_paths = sorted(glob.glob(input_images))
 
-        if len(self.depth_paths) == 0:
-            self.depth_paths = None
-        else:
-            assert len(self.depth_paths) == len(
-                self.color_paths
-            ), "Number of depth maps does not match number of images"
-            self.depth_paths = self.depth_paths[::stride]
+        # TODO create your own RGBD dataset based on monocular depth predictions from some model like ZoeDepth / Monodepth2 / MiDaS
         self.color_paths = self.color_paths[::stride]
         self.n_img = len(self.color_paths)
 
@@ -217,7 +207,6 @@ class ImageFolder(BaseDataset):
 class Replica(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(Replica, self).__init__(cfg, args, device)
-        stride = cfg["stride"]
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/frame*.jpg")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
@@ -233,6 +222,7 @@ class Replica(BaseDataset):
         else:
             self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/depth*.png")))
 
+        stride = cfg["stride"]
         self.color_paths = self.color_paths[::stride]
         self.depth_paths = self.depth_paths[::stride]
         self.load_poses(os.path.join(self.input_folder, "traj.txt"))
@@ -268,10 +258,8 @@ class TartanAir(BaseDataset):
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg["mode"] == "prgbd":
             self.depth_paths = sorted(
-                # glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy")) # Use ZoeDepth predictions
-                glob.glob(
-                    os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy")
-                )  # Use DepthAnything predictions
+                # glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
+                glob.glob(os.path.join(self.input_folder, "depthany-vitl-indoor/*.npy"))
             )
             assert (
                 len(self.depth_paths) == self.n_img
@@ -313,10 +301,11 @@ class Azure(BaseDataset):
         super(Azure, self).__init__(cfg, args, device)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "color", "*.jpg")))
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", "*.png")))
+        self.load_poses(os.path.join(self.input_folder, "scene", "trajectory.log"))
         stride = cfg["stride"]
         self.color_paths = self.color_paths[::stride]
         self.depth_paths = self.depth_paths[::stride]
-        self.load_poses(os.path.join(self.input_folder, "scene", "trajectory.log"))
+        self.poses = self.poses[::stride]
         self.n_img = len(self.color_paths)
 
     def load_poses(self, path):
@@ -386,12 +375,15 @@ class CoFusion(BaseDataset):
         self.input_folder = os.path.join(self.input_folder)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "colour", "*.png")))
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth_noise", "*.exr")))
+
         stride = cfg["stride"]
-        self.color_paths = self.color_paths[::stride]
-        self.depth_paths = self.depth_paths[::stride]
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         self.load_poses(os.path.join(self.input_folder, "trajectories"))
+        self.color_paths = self.color_paths[::stride]
+        self.depth_paths = self.depth_paths[::stride]
+        self.poses = self.poses[::stride]
+        self.n_img = len(self.color_paths)
 
     def load_poses(self, path):
         # We tried, but cannot align the coordinate frame of cofusion to ours.
@@ -411,6 +403,7 @@ class TUM_RGBD(BaseDataset):
         stride = cfg["stride"]
         self.color_paths = self.color_paths[::stride]
         self.depth_paths = self.depth_paths[::stride]
+        self.poses = self.poses[::stride]
         self.n_img = len(self.color_paths)
 
     def parse_list(self, filepath, skiprows=0):

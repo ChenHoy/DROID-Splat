@@ -8,21 +8,21 @@ import glfw
 import imgviz
 import numpy as np
 import open3d as o3d
+
+o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 import torch
 import torch.nn.functional as F
 from OpenGL import GL as gl
 
+from ..gaussian_renderer import render
+from ..utils.graphics_utils import fov2focal, getWorld2View2
 from .gl_render import util, util_gau
 from .gl_render.render_ogl import OpenGLRenderer
 from .gui_utils import GaussianPacket, Packet_vis2main, create_frustum, cv_gl, get_latest_queue
-from ..gaussian_renderer import render
-from ..utils.graphics_utils import fov2focal, getWorld2View2
 from ..camera_utils import Camera
 from ..logging_utils import Log
-
-o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
 
 
 class SLAM_GUI:
