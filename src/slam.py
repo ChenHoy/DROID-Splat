@@ -163,7 +163,7 @@ class SLAM:
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
-        self.evaluate = cfg.slam.evaluate
+        self.do_evaluate = cfg.slam.evaluate
         self.dataset = None
 
     def create_out_dirs(self, cfg: DictConfig) -> None:
@@ -454,7 +454,7 @@ class SLAM:
                 break
 
         self.save_state()
-        if self.evaluate:
+        if self.do_evaluate:
             self.info("Doing evaluation!")
             self.evaluate(stream)
             self.info("Evaluation complete")
