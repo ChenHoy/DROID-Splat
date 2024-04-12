@@ -10,11 +10,15 @@ class Frontend:
     def __init__(self, net, video, args, cfg):
         self.video = video
         self.update_op = net.update
+
+        # Frontend variables
+        self.is_initialized = False
+        self.count = 0
+        self.max_age = 25
+        self.iters1, self.iters2 = 4, 2
         self.warmup = cfg["tracking"]["warmup"]
         self.upsample = cfg["tracking"]["upsample"]
         self.beta = cfg["tracking"]["beta"]
-        self.verbose = cfg["verbose"]
-
         self.frontend_max_factors = cfg["tracking"]["frontend"]["max_factors"]
         self.frontend_nms = cfg["tracking"]["frontend"]["nms"]
         self.keyframe_thresh = cfg["tracking"]["frontend"]["keyframe_thresh"]
@@ -24,6 +28,18 @@ class Frontend:
         self.enable_loop = cfg["tracking"]["frontend"]["enable_loop"]
         self.last_loop_t = -1
 
+        # Loop closure parameters
+        self.enable_loop = True
+        self.last_loop_t = -1
+        self.loop_window = cfg["tracking"]["backend"]["loop_window"]
+        self.loop_radius = cfg["tracking"]["backend"]["loop_radius"]
+        self.loop_nms = cfg["tracking"]["backend"]["loop_nms"]
+        self.loop_thresh = cfg["tracking"]["backend"]["loop_thresh"]
+
+        # Local optimization window
+        self.t0, self.t1 = 0, 0
+
+        # Data structure for local map
         self.graph = FactorGraph(
             video,
             net.update,
@@ -32,27 +48,6 @@ class Frontend:
             max_factors=self.frontend_max_factors,
             upsample=self.upsample,
         )
-
-        # local optimization window
-        self.t0 = 0
-        self.t1 = 0
-
-        # frontend variables
-        self.is_initialized = False
-        self.count = 0
-
-        self.max_age = 25
-        self.iters1 = 4
-        self.iters2 = 2
-
-        # Loop closure parameters
-        self.loop_window = cfg["tracking"]["backend"]["loop_window"]
-        self.loop_radius = cfg["tracking"]["backend"]["loop_radius"]
-        self.loop_nms = cfg["tracking"]["backend"]["loop_nms"]
-        self.loop_thresh = cfg["tracking"]["backend"]["loop_thresh"]
-
-        self.enable_loop = True
-        self.last_loop_t = -1
 
     @torch.no_grad()
     def loop_closure_update(self, t_start, t_end, steps=6, motion_only=False, lm=1e-4, ep=1e-1):
@@ -76,23 +71,15 @@ class Frontend:
         )
         # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
         self.graph.update_lowmem(
-            t_start_loop + 1,
-            t_end,
-            steps=steps,
-            max_t=t_end,
-            lm=lm,
-            ep=ep,
-            motion_only=motion_only,
+            t_start_loop + 1, t_end, steps=steps, max_t=t_end, lm=lm, ep=ep, motion_only=motion_only
         )
-
         self.graph.clear_edges()
         torch.cuda.empty_cache()
         # Mark the frames as updated
         self.video.dirty[t_start:t_end] = True
-
         return t_end - t_start_loop, n_edges
 
-    def loop_info(self, t_start, cur_t, n_kf):
+    def _loop_info(self, t_start, cur_t, n_kf):
         now = "[Frontend] {} - Loop BA".format(strftime("%Y-%m-%d %H:%M:%S", gmtime()))
         msg = f"\n\n {now} : [{t_start}, {cur_t}]; Current Keyframe is {cur_t}, last is {self.last_loop_t}."
         print(colored(msg + f" {n_kf} KFs, last KF is {self.last_loop_t}! \n", "yellow"))
@@ -152,7 +139,7 @@ class Frontend:
                     steps=self.iters2,
                     motion_only=False,
                 )
-                self.loop_info(t_start, cur_t, n_kf)
+                self._loop_info(t_start, cur_t, n_kf)
                 self.last_loop_t = cur_t
 
             else:
@@ -171,30 +158,30 @@ class Frontend:
     def __initialize(self):
         """initialize the SLAM system"""
 
-        self.t0 = 0
-        self.t1 = self.video.counter.value
+        self.t0, self.t1 = 0, self.video.counter.value
 
         # build edges between nearby(radius <= 3) frames within local windown [t0, t1]
         self.graph.add_neighborhood_factors(self.t0, self.t1, r=3)
 
+        ### First optimization
         for itr in range(8):
             self.graph.update(t0=1, t1=None, use_inactive=True)
 
         # build edges between [t0, video.counter] and [t1, video.counter]
         self.graph.add_proximity_factors(t0=0, t1=0, rad=2, nms=2, thresh=self.frontend_thresh, remove=False)
 
+        ### Second optimization
         for itr in range(8):
             self.graph.update(t0=1, t1=None, use_inactive=True)
 
         self.video.poses[self.t1] = self.video.poses[self.t1 - 1].clone()
         self.video.disps[self.t1] = self.video.disps[self.t1 - 4 : self.t1].mean()
 
-        # initialization complete
+        # process complete
         self.is_initialized = True
         self.last_pose = self.video.poses[self.t1 - 1].clone()
         self.last_disp = self.video.disps[self.t1 - 1].clone()
         self.last_time = self.video.timestamp[self.t1 - 1].clone()
-
         with self.video.get_lock():
             self.video.ready.value = 1
             self.video.dirty[: self.t1] = True
@@ -204,12 +191,12 @@ class Frontend:
     def __call__(self):
         """main update"""
 
-        # do initialization
+        # Initialize
         if not self.is_initialized and self.video.counter.value == self.warmup:
             self.__initialize()
             print(colored("[Frontend] Initialized!", "yellow"))
 
-        # do update
+        # Update
         elif self.is_initialized and self.t1 < self.video.counter.value:
             self.__update()
 

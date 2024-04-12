@@ -12,11 +12,17 @@ from .geom.ba import BA_prior, MoBA, BA, bundle_adjustment
 
 
 class DepthVideo:
+    """
+    Data structure of multiple buffers to keep track of indices, poses, disparities, images, external disparities and more
+    """
+
     def __init__(self, cfg, args):
         self.cfg = cfg
         self.args = args
+        self.device = device = args.device
 
         ### Intrinsics / Calibration ###
+        # NOTE you almost always use a pinhole model
         if args.camera_model == "pinhole":
             self.n_intr = 4
             self.model_id = 0
@@ -27,71 +33,58 @@ class DepthVideo:
             raise Exception("Camera model not implemented! Choose either pinhole or mei model.")
         self.opt_intr = args.opt_intr
 
-        # current keyframe count
         self.counter = Value("i", 0)
         self.ready = Value("i", 0)
         self.mapping = Value("i", 0)
-        self.ba_lock = {
-            "dense": Value("i", 0),
-            "loop": Value("i", 0),
-        }
+        # NOTE we have multiple lock to avoid deadlocks between bundle adjustment and frontend loop closure
+        self.ba_lock = {"dense": Value("i", 0), "loop": Value("i", 0)}
         self.global_ba_lock = Value("i", 0)
-        ht = cfg["cam"]["H_out"]
-        self.ht = ht
-        wd = cfg["cam"]["W_out"]
-        self.wd = wd
+
+        self.ht = ht = cfg["cam"]["H_out"]
+        self.wd = wd = cfg["cam"]["W_out"]
         self.stereo = cfg["mode"] == "stereo"
-        device = args.device
-        self.device = device
         c = 1 if not self.stereo else 2
-        self.scale_factor = 8
-        s = self.scale_factor
+        self.scale_factor = s = 8
         buffer = cfg["tracking"]["buffer"]
 
-        ### state attributes ###
+        ### state attributes -> Raw map ###
         self.timestamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
-        self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float)
         self.dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
+        self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float)
+        self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
         self.red = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
         self.poses = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # w2c quaterion
         self.poses_gt = torch.zeros(buffer, 4, 4, device=device, dtype=torch.float).share_memory_()  # c2w matrix
         self.disps = torch.ones(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
+        self.disps_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
 
         self.disps_sens = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         # Scale and shift parameters for ambiguous monocular depth
-        self.optimize_scales = cfg["mode"] == "prgbd" # Optimze the scales and shifts for Pseudo-RGBD mode
+        self.optimize_scales = cfg["mode"] == "prgbd"  # Optimze the scales and shifts for Pseudo-RGBD mode
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
-
+        # In case we have an external groundtruth
+        # TODO chen: is this ever used right now?
         self.depths_gt = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
-        self.disps_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
-        self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
 
         ### feature attributes ###
         self.fmaps = torch.zeros(buffer, c, 128, ht // s, wd // s, dtype=torch.half, device=device).share_memory_()
         self.nets = torch.zeros(buffer, 128, ht // s, wd // s, dtype=torch.half, device=device).share_memory_()
         self.inps = torch.zeros(buffer, 128, ht // s, wd // s, dtype=torch.half, device=device).share_memory_()
 
-        ### initialize poses to identity transformation
+        ### Initialize poses to identity transformation
         self.poses[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
         self.poses_gt[:] = torch.eye(4, dtype=torch.float, device=device)
 
-        ### consistent construction
+        ### Additional flags for multi-view filter -> Clean map for rendering ###
         self.poses_filtered = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # w2c quaterion
         self.disps_filtered = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
         self.mask_filtered = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
         self.poses_filtered[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
-        self.filtered_id = torch.tensor(
-            [
-                -1,
-            ],
-            dtype=torch.int,
-            device=device,
-        ).share_memory_()
+        self.filtered_id = torch.tensor([-1], dtype=torch.int, device=device).share_memory_()
         self.update_priority = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
         self.bound = torch.zeros(1, 3, 2, device=device, dtype=torch.float).share_memory_()
-
-        ### pose compensation from vitural to real
+        # pose compensation from vitural to real
         self.pose_compensate = torch.zeros(1, 7, dtype=torch.float, device=device).share_memory_()
         self.pose_compensate[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
 
@@ -173,8 +166,9 @@ class DepthVideo:
 
         return bound
 
-    ###  dense mapping operations ###
     def get_mapping_item(self, index, device="cuda:0", decay=0.1):
+        """dense mapping operations to transfer a part of the video to the Rendering module"""
+
         with self.mapping.get_lock():
             image = self.images[index].clone().permute(1, 2, 0).contiguous().to(device)  # [h, w, 3]
             mask = self.mask_filtered[index].clone().to(device)
@@ -189,20 +183,19 @@ class DepthVideo:
             gt_c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
 
             depth = est_depth
-            #gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
-            #depth = gt_depth
+            # gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
+            # depth = gt_depth
 
             # if updated by mapping, the priority is decreased to lowest level, i.e., 0
             self.update_priority[index] *= decay
 
-            return image, depth, c2w, gt_c2w, mask
+        return image, depth, c2w, gt_c2w, mask
 
-    # TODO why is this empty?
+    # TODO Backpropagate an updated map from Renderer to the DepthVideo
+    # TODO chen: this needs to assume that the Renderer actually produces a better state than from the feature maps / optical flow estimates
     def set_item_from_mapping(self, index, pose=None, depth=None):
         with self.get_lock():
             pass
-
-    ### geometric operations ###
 
     @staticmethod
     def format_indices(ii, jj, device="cuda"):
@@ -254,9 +247,7 @@ class DepthVideo:
         CUDA kernel for global BA in the backend.
         """
         # Rescale the external disparities
-        self.disps_sens = (
-            self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
-        )
+        self.disps_sens = self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
         # Reset the scale and shift parameters to initial state
         self.scales = torch.ones_like(self.scales)
         self.shifts = torch.zeros_like(self.shifts)
@@ -298,7 +289,7 @@ class DepthVideo:
     def ba(
         self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, motion_only=False, ba_type=None
     ):
-        """dense bundle adjustment (DBA)"""
+        """Wrapper for dense bundle adjustment. This is used both in Frontend and Backend."""
 
         intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same
         lock = self.get_lock() if ba_type is None else self.get_ba_lock(ba_type)
@@ -326,10 +317,14 @@ class DepthVideo:
                 motion_only,
                 self.opt_intr,
             )
-            self.disps.clamp_(min=0.001)
+            self.disps.clamp_(min=0.001)  # Always make sure that Disparities are non-negative!!!
 
     def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1):
-        """Bundle adjustment over structure with a scalable prior. We keep the poses fixed."""
+        """Bundle adjustment over structure with a scalable prior.
+
+        We keep the poses fixed, since this would create an unnecessary ambiguity and can make the system unstable!
+        We optimize scale and shift parameters on top of the scene disparity.
+        """
 
         lock = self.get_lock()
         with lock:
@@ -338,6 +333,7 @@ class DepthVideo:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
             # MoBA
+            # TODO use CUDA kernel here instead of pure Python function
             bundle_adjustment(
                 target,
                 weight,
@@ -369,7 +365,7 @@ class DepthVideo:
                 self.disps_sens,
                 self.scales,
                 self.shifts,
-                iters=iters+2,
+                iters=iters + 2, # Use slightly more iterations here, so we get the scales right for sure!
                 lm=lm,
                 ep=ep,
                 scale_prior=True,

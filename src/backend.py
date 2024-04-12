@@ -1,4 +1,3 @@
-from copy import deepcopy
 import gc
 from typing import Optional
 
@@ -9,6 +8,13 @@ from .factor_graph import FactorGraph
 
 
 class Backend:
+    """
+    Backend optimization over the whole map and pose graph.
+    This exlusively uses the CUDA kernels for optimization to save memory.
+
+    NOTE: main difference to frontend is initializing a new factor graph each time we call
+    """
+
     def __init__(self, net, video, args, cfg):
         self.video = video
         self.device = args.device
@@ -22,12 +28,7 @@ class Backend:
 
     @torch.no_grad()
     def dense_ba(
-        self,
-        t_start: int = 0,
-        t_end: Optional[int] = None,
-        steps: int = 6,
-        iter: int = 4,
-        motion_only: bool = False,
+        self, t_start: int = 0, t_end: Optional[int] = None, steps: int = 6, iter: int = 4, motion_only: bool = False
     ):
         """Dense Bundle Adjustment over the whole map. Used for global optimization in the Backend."""
 
@@ -54,17 +55,9 @@ class Backend:
             max_factors=max_factors,
         )
         # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
-        graph.update_lowmem(
-            t0=t_start + 1,
-            t1=t_end,
-            steps=steps,
-            iters=iter,
-            max_t=t_end,
-            motion_only=motion_only,
-        )
+        graph.update_lowmem(t0=t_start + 1, t1=t_end, steps=steps, iters=iter, max_t=t_end, motion_only=motion_only)
         graph.clear_edges()
-
-        self.video.dirty[t_start:t_end] = True
+        self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
 
         # Free up memory again after optimization
         del graph

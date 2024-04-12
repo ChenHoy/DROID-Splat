@@ -1,5 +1,8 @@
+#! /usr/bin/env python3
+
 import argparse
 import shutil
+from termcolor import colored
 import ipdb
 import os
 import random
@@ -11,7 +14,14 @@ from src import config
 from src.slam import SLAM
 from src.datasets import get_dataset
 
+"""
+Run the SLAM system on a given dataset or on image folder.
 
+You can configure the system using .yaml configs. See docs for reference
+"""
+
+
+# TODO delete this after merging with hydra config system
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=str, help="Path to config file.")
@@ -51,7 +61,9 @@ def parse_args():
         default=None,
         help="calibration parameters: fx, fy, cx, cy, this have higher priority, can overwrite the one in config file",
     )
-    parser.add_argument("--evaluate", type=bool, default=False, help="Enter evaluation mode. Deactivate gui and visualization.")
+    parser.add_argument(
+        "--evaluate", type=bool, default=False, help="Enter evaluation mode. Deactivate gui and visualization."
+    )
     return parser.parse_args()
 
 
@@ -106,8 +118,8 @@ def set_args(args, cfg):
             args.calibration_txt
         ).tolist()
 
-    cfg['evaluate'] = args.evaluate
-    
+    cfg["evaluate"] = args.evaluate
+
     assert cfg["mode"] in ["rgbd", "prgbd", "mono", "stereo"], "Unknown mode: {}".format(cfg["mode"])
     cfg["stride"] = args.stride if args.stride is not None else cfg["stride"]
 
@@ -136,33 +148,34 @@ def typecheck_cfg(cfg):
     return cfg
 
 
+def sys_print(msg: str) -> None:
+    print(colored(msg, "white", "on_grey", attrs=["bold"]))
+
+
+# TODO merge with hydra config system from Leon's branch
 if __name__ == "__main__":
     setup_seed(43)
     args = parse_args()
-
     torch.multiprocessing.set_start_method("spawn")
 
     cfg = config.load_config(args.config, "./configs/go_gaussian_slam.yaml")
     output_dir, cfg = set_args(args, cfg)
     cfg = typecheck_cfg(cfg)
 
-    print(f"\n\n** Running {cfg['data']['input_folder']} in {cfg['mode']} mode!!! **\n\n")
-    print(args)
+    sys_print(f"\n\n** Running {cfg['data']['input_folder']} in {cfg['mode']} mode!!! **\n\n")
+    sys_print(args)
     # Save state for reproducibility
     # backup_source_code(os.path.join(output_dir, "code"))
     # config.save_config(cfg, f"{output_dir}/cfg.yaml")
 
-    # Run SLAM
-    ## index, color_data, depth_data, intrinsic, pose
-    ## color data is RGB image, depth_data is WxH depth image
+    ### Run SLAM
+    # index, color_data, depth_data, intrinsic, pose
+    # color data is [H x W x 3] RGB image, depth_data is [H x W] depth image
     dataset = get_dataset(cfg, args, device=args.device)
-
     # print(dataset)
-    # index, color_data, depth_data, intrinsic, pose = dataset[5]
-    # print(color_data.shape,depth_data.shape)
-    slam = SLAM(args, cfg)
-    slam.set_dataset(dataset)
-    slam.run(dataset)
-    slam.terminate(rank=-1, stream=dataset)
 
-    print("Done!")
+    slam = SLAM(args, cfg)
+    slam.dataset = dataset
+    slam.run(dataset)
+
+    sys_print("Done!")
