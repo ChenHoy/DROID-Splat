@@ -206,7 +206,7 @@ class SLAM:
 
         self.net.load_state_dict(state_dict)
 
-    def tracking(self, rank, stream, input_queue=mp.Queue):
+    def tracking(self, rank, stream, input_queue: mp.Queue):
         self.info("Tracking thread started!")
         self.all_trigered += 1
         # Wait up for other threads to start
