@@ -33,20 +33,20 @@ class Tracker(nn.Module):
     Wrapper class for SLAM frontend tracking.
     """
 
-    def __init__(self, cfg, args, slam):
+    def __init__(self, cfg, slam):
         super(Tracker, self).__init__()
-        self.args = args
         self.cfg = cfg
-        self.device = args.device
+        self.device = cfg.slam.device
         self.net = slam.net
         self.video = slam.video
 
         # filter incoming frames so that there is enough motion
-        self.frontend_window = cfg["tracking"]["frontend"]["window"]
-        filter_thresh = cfg["tracking"]["motion_filter"]["thresh"]
-
+        self.frontend_window = cfg.tracking.frontend.window
+        filter_thresh = cfg.tracking.motion_filter.thresh
         self.motion_filter = MotionFilter(self.net, self.video, thresh=filter_thresh, device=self.device)
-        self.frontend = Frontend(self.net, self.video, self.args, self.cfg)
+
+        # frontend process
+        self.frontend = Frontend(self.net, self.video, self.cfg)
 
     @torch.no_grad()
     def forward(self, timestamp, image, depth, intrinsic, gt_pose=None):
@@ -62,12 +62,10 @@ class BundleAdjustment(nn.Module):
     Wrapper class for Backend optimization
     """
 
-    def __init__(self, cfg, args, slam):
+    def __init__(self, cfg, slam):
         super(BundleAdjustment, self).__init__()
-
-        self.args = args
         self.cfg = cfg
-        self.device = args.device
+        self.device = cfg.slam.device
         self.net = slam.net
         self.video = slam.video
 
@@ -75,7 +73,8 @@ class BundleAdjustment(nn.Module):
         self.last_t = -1
         self.ba_counter = -1
 
-        self.backend = Backend(self.net, self.video, self.args, self.cfg)
+        # backend process
+        self.backend = Backend(self.net, self.video, self.cfg)
 
     def info(self, t_start, t_end, cur_t):
         now = "[Backend] {} - Full BA".format(strftime("%Y-%m-%d %H:%M:%S", gmtime()))
@@ -98,20 +97,20 @@ class BundleAdjustment(nn.Module):
 
 
 class SLAM:
-    def __init__(self, args, cfg):
+    def __init__(self, cfg):
         super(SLAM, self).__init__()
-        self.args = args
         self.cfg = cfg
-        self.device = args.device
-        self.mode = cfg["mode"]
-        self.only_tracking = cfg["only_tracking"]
+        self.device = cfg.slam.device
+        self.verbose = cfg.slam.verbose
+        self.mode = cfg.slam.mode
+        self.create_out_dirs(cfg)
 
-        self.create_out_dirs(args, cfg)
         self.update_cam(cfg)
         self.load_bound(cfg)
 
         self.net = DroidNet()
-        self.load_pretrained(cfg["tracking"]["pretrained"])
+
+        self.load_pretrained(cfg.tracking.pretrained)
         self.net.to(self.device).eval()
         self.net.share_memory()
 
@@ -132,40 +131,32 @@ class SLAM:
         self.backend_finished.share_memory_()
         self.visualizing_finished = torch.zeros((1)).int()
         self.visualizing_finished.share_memory_()
-
-        # Dummy for pause/interrupts
-        # FIXME chen: Does hang_on actually ever get set?
-        self.hang_on = torch.zeros((1)).int()
-        self.hang_on.share_memory_()
         self.sleep_time = 1.0  # Time for giving delays
-
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
 
         # store images, depth, poses, intrinsics (shared between process)
         # NOTE: we can use this for getting both gt and rendered images
-        self.video = DepthVideo(cfg, args)
+        self.video = DepthVideo(cfg)
 
-        # Worker process functions
-        self.tracker = Tracker(cfg, args, self)
-        self.multiview_filter = MultiviewFilter(cfg, args, self)
-        self.dense_ba = BundleAdjustment(cfg, args, self)
+        self.tracker = Tracker(cfg, self)
+
+        self.multiview_filter = MultiviewFilter(cfg, self)
+
+        self.dense_ba = BundleAdjustment(cfg, self)
+
+        # post processor - fill in poses for non-keyframes
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
-        self.gaussian_mapper = GaussianMapper(cfg, args, self)
+        self.gaussian_mapper = GaussianMapper(cfg, self)
 
-        self.do_evaluate = cfg["evaluate"]
-        # self.do_evaluate = cfg.slam.evaluate
+        self.do_evaluate = cfg.slam.evaluate
         self.dataset = None
 
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
 
-    def create_out_dirs(self, args, cfg: DictConfig) -> None:
-        if args.output is None:
-            self.output = cfg["data"]["output"]
-        else:
-            self.output = args.output
-        # self.output = cfg.slam.output_folder
+    def create_out_dirs(self, cfg: DictConfig) -> None:
+        self.output = cfg.slam.output_folder
 
         os.makedirs(self.output, exist_ok=True)
         os.makedirs(f"{self.output}/logs/", exist_ok=True)
@@ -179,12 +170,12 @@ class SLAM:
         such as resize or edge crop
         """
         # resize the input images to crop_size(variable name used in lietorch)
-        H, W = float(cfg["cam"]["H"]), float(cfg["cam"]["W"])
-        fx, fy = cfg["cam"]["fx"], cfg["cam"]["fy"]
-        cx, cy = cfg["cam"]["cx"], cfg["cam"]["cy"]
+        H, W = float(cfg.data.cam.H), float(cfg.data.cam.W)
+        fx, fy = cfg.data.cam.fx, cfg.data.cam.fy
+        cx, cy = cfg.data.cam.cx, cfg.data.cam.cy
 
-        h_edge, w_edge = cfg["cam"]["H_edge"], cfg["cam"]["W_edge"]
-        H_out, W_out = cfg["cam"]["H_out"], cfg["cam"]["W_out"]
+        h_edge, w_edge = cfg.data.cam.H_edge, cfg.data.cam.W_edge
+        H_out, W_out = cfg.data.cam.H_out, cfg.data.cam.W_out
 
         self.fx = fx * (W_out + w_edge * 2) / W
         self.fy = fy * (H_out + h_edge * 2) / H
@@ -203,8 +194,8 @@ class SLAM:
         Args:
             cfg [dict], parsed config dict
         """
-        # self.bound = torch.from_numpy(np.array(cfg.data.bound)).float()
-        self.bound = torch.from_numpy(np.array(cfg["mapping"]["bound"])).float()
+        # scale the bound if there is a global scaling factor
+        self.bound = torch.from_numpy(np.array(cfg.data.bound)).float()
 
     def load_pretrained(self, pretrained: str) -> None:
         self.info(f"Load pretrained checkpoint from {pretrained}!")
@@ -232,13 +223,11 @@ class SLAM:
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
-            input_queue.put(image)
-            input_queue.put(depth)
+            # input_queue.put(image)
+            # input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
-            while self.hang_on > 0:
-                sleep(self.sleep_time)
 
         self.tracking_finished += 1
         self.all_finished += 1
@@ -249,8 +238,6 @@ class SLAM:
         self.all_trigered += 1
 
         while self.tracking_finished < 1 and not dont_run:
-            while self.hang_on > 0:
-                sleep(self.sleep_time)
             self.dense_ba()
             sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
@@ -267,8 +254,6 @@ class SLAM:
         self.all_trigered += 1
 
         while (self.tracking_finished < 1 or self.backend_finished < 1) and not dont_run:
-            while self.hang_on > 0:
-                sleep(self.sleep_time)
             self.multiview_filter()
 
         self.multiview_filtering_finished += 1
@@ -282,8 +267,6 @@ class SLAM:
         # NOTE chen: We run rendering one last time even after backend is done for finetuning
         # at some point we have to think about whether this makes sense or if rendering could be even better
         while self.tracking_finished < 1 and self.backend_finished < 1 and not dont_run:
-            while self.hang_on > 0:
-                sleep(self.sleep_time)
             self.gaussian_mapper()
 
         # Run for one last time after everything else finished
@@ -419,7 +402,7 @@ class SLAM:
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
             mp.Process(target=self.backend, args=(2, False)),
             mp.Process(target=self.multiview_filtering, args=(3, False)),
-            # mp.Process(target=self.visualizing, args=(4, False)),
+            mp.Process(target=self.visualizing, args=(4, False)),
             mp.Process(target=self.gaussian_mapping, args=(5, False)),
         ]
 

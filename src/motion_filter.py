@@ -48,7 +48,7 @@ class MotionFilter:
         image: torch.Tensor,
         depth: Optional[torch.Tensor] = None,
         intrinsic: Optional[torch.Tensor] = None,
-        gt_posse=None,
+        gt_pose=None,
     ):
         """main update operation - run on every frame in video"""
 

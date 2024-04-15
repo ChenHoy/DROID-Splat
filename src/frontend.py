@@ -7,7 +7,7 @@ from .factor_graph import FactorGraph
 
 
 class Frontend:
-    def __init__(self, net, video, args, cfg):
+    def __init__(self, net, video, cfg):
         self.video = video
         self.update_op = net.update
 
@@ -43,7 +43,7 @@ class Frontend:
         self.graph = FactorGraph(
             video,
             net.update,
-            device=args.device,
+            device=cfg.slam.device,
             corr_impl="volume",
             max_factors=self.frontend_max_factors,
             upsample=self.upsample,
@@ -77,6 +77,8 @@ class Frontend:
         torch.cuda.empty_cache()
         # Mark the frames as updated
         self.video.dirty[t_start:t_end] = True
+        self.video.mapping_dirty[t_start:t_end] = True
+
         return t_end - t_start_loop, n_edges
 
     def _loop_info(self, t_start, cur_t, n_kf):
@@ -154,6 +156,7 @@ class Frontend:
         # Sanity check, because I think sometimes the loop_ba results in [] for ii
         if self.graph.ii.numel() > 0:
             self.video.dirty[self.graph.ii.min() : self.t1] = True
+            self.video.mapping_dirty[self.graph.ii.min() : self.t1] = True
 
     def __initialize(self):
         """initialize the SLAM system"""
@@ -185,6 +188,7 @@ class Frontend:
         with self.video.get_lock():
             self.video.ready.value = 1
             self.video.dirty[: self.t1] = True
+            self.video.mapping_dirty[: self.t1] = True
 
         self.graph.rm_factors(self.graph.ii < self.warmup - 4, store=True)
 
@@ -199,6 +203,6 @@ class Frontend:
         # Update
         elif self.is_initialized and self.t1 < self.video.counter.value:
             self.__update()
-
+            
         else:
             pass

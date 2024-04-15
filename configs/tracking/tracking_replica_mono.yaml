@@ -1,0 +1,35 @@
+pretrained: ./pretrained/droid.pth
+
+buffer: 256
+beta: 0.75
+warmup: 8
+upsample: True
+motion_filter:
+  thresh: 4.0  # add as keyframe if avg flow >= 4.0 pixels
+
+
+multiview_filter:
+  thresh: 0.01  # dpeth error < 0.01m
+  visible_num: 2  # points viewed by at least 2 cameras
+  kernel_size: inf
+  bound_enlarge_scale: 1.20
+
+
+frontend:
+  radius: 2
+  nms: 1
+  thresh: 25.0  # only consider edge with avg flow < 25.0 pixels
+  enable_loop: True
+  keyframe_thresh: 4.0  # remove keyframe if avg flow < 4.0 pixels
+  window: 50  # local ba window size
+  max_factors: 100  # num of edges within local ba
+
+backend:
+  thresh: 25.0  # only consider edge with avg flow < 25.0 pixels
+  radius: 1
+  nms: 5
+  # used for loop detection
+  loop_window: 50
+  loop_thresh: 50.0  # only consider edge with avg flow < 50.0 pixels
+  loop_radius: 1
+  loop_nms: 25

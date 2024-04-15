@@ -181,6 +181,7 @@ class FactorGraph:
             self.video.timestamp[ix] = self.video.timestamp[ix + 1]
             self.video.images[ix] = self.video.images[ix + 1]
             self.video.dirty[ix] = self.video.dirty[ix + 1]
+            self.video.mapping_dirty[ix] = self.video.mapping_dirty[ix + 1]
             self.video.red[ix] = self.video.red[ix + 1]
             self.video.poses[ix] = self.video.poses[ix + 1]
             self.video.poses_gt[ix] = self.video.poses_gt[ix + 1]
@@ -572,6 +573,8 @@ class FactorGraph:
 
             # for visualization
             self.video.dirty[:t] = True
+            # for mapping
+            self.video.mapping_dirty[:t] = True
 
     @torch.cuda.amp.autocast(enabled=True)
     def update_fast(self, t0=None, t1=None, iters=2, steps=8, motion_only=False):

@@ -19,12 +19,11 @@ NOTE you can use this filter as a good density proxy for cleaning noisy point cl
 
 
 class MultiviewFilter(nn.Module):
-    def __init__(self, cfg, args, slam):
+    def __init__(self, cfg, slam):
         super(MultiviewFilter, self).__init__()
 
-        self.args = args
         self.cfg = cfg
-        self.device = args.device
+        self.device = cfg.slam.device
         self.warmup = cfg["tracking"]["warmup"]
         # dpeth error < 0.01m
         self.filter_thresh = cfg["tracking"]["multiview_filter"]["thresh"]

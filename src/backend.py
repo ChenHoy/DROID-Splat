@@ -15,9 +15,9 @@ class Backend:
     NOTE: main difference to frontend is initializing a new factor graph each time we call
     """
 
-    def __init__(self, net, video, args, cfg):
+    def __init__(self, net, video, cfg):
         self.video = video
-        self.device = args.device
+        self.device = cfg.slam.device
         self.update_op = net.update
 
         self.upsample = cfg["tracking"]["upsample"]
@@ -57,7 +57,9 @@ class Backend:
         # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
         graph.update_lowmem(t0=t_start + 1, t1=t_end, steps=steps, iters=iter, max_t=t_end, motion_only=motion_only)
         graph.clear_edges()
-        self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
+
+        self.video.dirty[t_start:t_end] = True
+        self.video.mapping_dirty[t_start:t_end] = True
 
         # Free up memory again after optimization
         del graph

@@ -1,9 +1,0 @@
-inherit_from: configs/Replica/replica.yaml
-mode: rgbd
-mapping:
-  bound: [[-5.0, 5.0], [-5.0, 5.0], [-5.0, 5.0]]
-meshing:
-  gt_mesh_path: /media/data/Replica/cull_replica_meshv2/office2.ply
-data:
-  input_folder: /media/data/Replica/office2
-  output: ""
