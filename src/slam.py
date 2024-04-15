@@ -365,7 +365,7 @@ class SLAM:
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
             mp.Process(target=self.optimizing, args=(2, False)),
             mp.Process(target=self.multiview_filtering, args=(3, False)),
-            mp.Process(target=self.visualizing, args=(4, True)),
+            mp.Process(target=self.visualizing, args=(4, False)),
             mp.Process(target=self.gaussian_mapping, args=(5, False)),
         ]
 
