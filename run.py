@@ -78,7 +78,6 @@ def run_slam(cfg):
     # Run SLAM 
     slam = SLAM(cfg)
     slam.run(dataset)
-    slam.terminate(rank=-1, stream=dataset)
     sys_print("Done!")
 
 

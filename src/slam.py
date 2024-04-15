@@ -222,9 +222,11 @@ class SLAM:
             timestamp, image, depth, intrinsic, gt_pose = frame
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
-            # Transmit the incoming stream to another visualization thread
-            # input_queue.put(image)
-            # input_queue.put(depth)
+
+            if self.cfg.slam.show_stream:
+                # Transmit the incoming stream to another visualization thread
+                input_queue.put(image)
+                input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
@@ -233,62 +235,66 @@ class SLAM:
         self.all_finished += 1
         self.info("Tracking done!")
 
-    def backend(self, rank, dont_run=False):
+
+    def backend(self, rank, run=True):
         self.info("Full Bundle Adjustment thread started!")
         self.all_trigered += 1
 
-        while self.tracking_finished < 1 and not dont_run:
+        while self.tracking_finished < 1 and run:
             self.dense_ba()
             sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
         # Run one last time after tracking finished
-        if not dont_run:
+        if run:
             self.dense_ba()
 
         self.backend_finished += 1
         self.all_finished += 1
         self.info("Full Bundle Adjustment done!")
 
-    def multiview_filtering(self, rank, dont_run=False):
+
+    def multiview_filtering(self, rank, run=True):
         self.info("Multiview Filtering thread started!")
         self.all_trigered += 1
 
-        while (self.tracking_finished < 1 or self.backend_finished < 1) and not dont_run:
+        while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
             self.multiview_filter()
 
         self.multiview_filtering_finished += 1
         self.all_finished += 1
         self.info("Multiview Filtering Done!")
 
-    def gaussian_mapping(self, rank, dont_run=False):
+
+    def gaussian_mapping(self, rank, run=True):
         self.info("Gaussian Mapping thread started!")
         self.all_trigered += 1
 
         # NOTE chen: We run rendering one last time even after backend is done for finetuning
         # at some point we have to think about whether this makes sense or if rendering could be even better
-        while self.tracking_finished < 1 and self.backend_finished < 1 and not dont_run:
+        while self.tracking_finished < 1 and self.backend_finished < 1 and run:
             self.gaussian_mapper()
 
         # Run for one last time after everything else finished
         finished = False
-        if not dont_run:
-            while not finished:
-                finished = self.gaussian_mapper(the_end=True)
+        while not finished and run:
+            finished = self.gaussian_mapper(the_end=True)
 
         self.gaussian_mapping_finished += 1
         self.all_finished += 1
         self.info("Gaussian Mapping done!")
 
-    def visualizing(self, rank, dont_run=False):
+
+    def visualizing(self, rank, run=True):
         self.info("Visualization thread started!")
         self.all_trigered += 1
 
-        while (self.tracking_finished < 1 or self.backend_finished < 1) and (not dont_run):
+        while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
             droid_visualization(self.video, device=self.device, save_root=self.output)
 
         self.visualizing_finished += 1
         self.all_finished += 1
         self.info("Visualization done!")
+
 
     def show_stream(self, rank, input_queue: mp.Queue) -> None:
         self.info("OpenCV Image stream thread started!")
@@ -314,6 +320,7 @@ class SLAM:
 
         self.all_finished += 1
         self.info("Input data stream done!")
+
 
     def evaluate(self, stream) -> None:
         """Evaluate our estimated poses against the ground truth poses.
@@ -400,10 +407,10 @@ class SLAM:
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
-            mp.Process(target=self.backend, args=(2, False)),
-            mp.Process(target=self.multiview_filtering, args=(3, False)),
-            mp.Process(target=self.visualizing, args=(4, False)),
-            mp.Process(target=self.gaussian_mapping, args=(5, False)),
+            mp.Process(target=self.backend, args=(2, self.cfg.slam.run_backend)),
+            mp.Process(target=self.multiview_filtering, args=(3, self.cfg.slam.run_multiview_filter)),
+            mp.Process(target=self.visualizing, args=(4, self.cfg.slam.run_visualization)),
+            mp.Process(target=self.gaussian_mapping, args=(5, self.cfg.slam.run_mapping)),
         ]
 
         self.num_running_thread[0] += len(processes)
@@ -419,5 +426,5 @@ class SLAM:
             # Make exception for configuration where we only have frontend tracking
             if self.num_running_thread == 1 and self.tracking_finished > 0:
                 break
-
+            
         self.terminate(processes, stream)

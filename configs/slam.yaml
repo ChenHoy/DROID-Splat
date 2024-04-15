@@ -15,6 +15,14 @@ slam:
   opt_intr: True
   evaluate: False
 
+  run_backend: True
+  run_frontend: True
+  run_multiview_filter: True
+  run_mapping: True
+  run_visualization: True
+  show_stream: False
+
+
 
 hydra:
   job:
