@@ -90,6 +90,7 @@ class Frontend:
         torch.cuda.empty_cache()
         # Mark the frames as updated
         self.video.dirty[t_start:t_end] = True
+        self.video.mapping_dirty[t_start:t_end] = True
 
         return t_end - t_start_loop, n_edges
 
@@ -168,6 +169,7 @@ class Frontend:
         # Sanity check, because I think sometimes the loop_ba results in [] for ii
         if self.graph.ii.numel() > 0:
             self.video.dirty[self.graph.ii.min() : self.t1] = True
+            self.video.mapping_dirty[self.graph.ii.min() : self.t1] = True
 
     def __initialize(self):
         """initialize the SLAM system"""
@@ -201,6 +203,7 @@ class Frontend:
         with self.video.get_lock():
             self.video.ready.value = 1
             self.video.dirty[: self.t1] = True
+            self.video.mapping_dirty[: self.t1] = True
 
         self.graph.rm_factors(self.graph.ii < self.warmup - 4, store=True)
 

@@ -92,8 +92,6 @@ class SLAM:
         self.device = cfg.slam.device
         self.verbose = cfg.slam.verbose
         self.mode = cfg.slam.mode
-        self.only_tracking = cfg.slam.only_tracking
-        self.make_video = cfg.slam.make_video
 
         self.output = cfg.slam.output_folder
 
@@ -123,9 +121,6 @@ class SLAM:
         self.optimizing_finished.share_memory_()
         self.visualizing_finished = torch.zeros((1)).int()
         self.visualizing_finished.share_memory_()
-
-        self.hang_on = torch.zeros((1)).int()
-        self.hang_on.share_memory_()
 
         self.reload_map = torch.zeros((1)).int()
         self.reload_map.share_memory_()
@@ -201,15 +196,11 @@ class SLAM:
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
             # Transmit the incoming stream to another visualization thread
-            #input_queue.put(image)
-            #input_queue.put(depth)
+            # input_queue.put(image)
+            # input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
-            if timestamp % 50 == 0 and timestamp > 0 and self.make_video:
-                self.hang_on[:] = 1
-            while self.hang_on > 0:
-                sleep(1.0)
 
         self.tracking_finished += 1
         print("Tracking Done!")
@@ -218,8 +209,6 @@ class SLAM:
         print("Full Bundle Adjustment Triggered!")
         self.all_trigered += 1
         while self.tracking_finished < 1 and not dont_run:
-            while self.hang_on > 0 and self.make_video:
-                sleep(1.0)
             self.ba()
             sleep(2.0)  # Let multiprocessing cool down a little bit
 
@@ -233,8 +222,6 @@ class SLAM:
         print("Multiview Filtering Triggered!")
         self.all_trigered += 1
         while (self.tracking_finished < 1 or self.optimizing_finished < 1) and not dont_run:
-            while self.hang_on > 0 and self.make_video:
-                sleep(1.0)
             self.multiview_filter()
 
         print("Multiview Filtering Done!")
@@ -243,8 +230,6 @@ class SLAM:
         print("Gaussian Mapping Triggered!")
         self.all_trigered += 1
         while self.tracking_finished < 1 and not dont_run:
-            while self.hang_on > 0 and self.make_video:
-                sleep(1.0)
             self.gaussian_mapper()
         finished = False
         if not dont_run:

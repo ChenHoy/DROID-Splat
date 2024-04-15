@@ -65,6 +65,7 @@ class Backend:
         graph.clear_edges()
 
         self.video.dirty[t_start:t_end] = True
+        self.video.mapping_dirty[t_start:t_end] = True
 
         # Free up memory again after optimization
         del graph

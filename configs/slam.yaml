@@ -12,9 +12,7 @@ slam:
   verbose: True
   mode: "mono"  # 'mono', 'prgbd', 'rgbd'
   stride: 1
-  only_tracking: False
   opt_intr: True
-  make_video: False
 
 
 hydra:

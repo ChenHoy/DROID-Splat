@@ -51,6 +51,7 @@ class DepthVideo:
         self.timestamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
         self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float)
         self.dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
+        self.mapping_dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
         self.red = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
         self.poses = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # w2c quaterion
         self.poses_gt = torch.zeros(buffer, 4, 4, device=device, dtype=torch.float).share_memory_()  # c2w matrix
@@ -228,6 +229,7 @@ class DepthVideo:
             self.disps[:cur_ix] /= s
             self.poses[:cur_ix, :3] *= s  # [tx, ty, tz, qx, qy, qz, qw]
             self.dirty[:cur_ix] = True
+            self.mapping_dirty[:cur_ix] = True
 
     def reproject(self, ii, jj):
         """project points from ii -> jj"""

@@ -262,7 +262,7 @@ class TartanAir(BaseDataset):
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_left/*.png")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
-        print("found {} images".format(self.n_img))
+        #print("found {} images".format(self.n_img))
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.slam.mode == "prgbd":
             self.depth_paths = sorted(
