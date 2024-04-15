@@ -19,7 +19,7 @@ slam:
   run_frontend: True
   run_multiview_filter: True
   run_mapping: True
-  run_visualization: True
+  run_visualization: False
   show_stream: False
 
 

@@ -293,8 +293,6 @@ class GaussianMapper(object):
             disps = torch.index_select(self.video.disps_up.detach(), dim=0, index=all_idxs)
             intrinsics = self.video.intrinsics[0] * self.video.scale_factor
 
-        self.info(f"Updating frames {dirty_index}")
-
 
         depths = 1 / (disps + 1e-7)
         thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
