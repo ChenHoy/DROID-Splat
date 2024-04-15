@@ -338,7 +338,7 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
     ### Store the geometry and trajectory visualizaton for later inspection when done
     print(colored("[Visu] Saving the visualization for later usage ...!", "grey"))
     try:
-        o3d.io.write_pinhole_camera_parameters("final_viewpoint.json", param)
+        o3d.io.write_pinhole_camera_parameters(save_root + "/final_viewpoint.json", param)
         pcl_path = str(Path(save_root) / "pointclouds")
         cam_path = str(Path(save_root) / "cameras")
         write_pointclouds(droid_visualization.points, pcl_path, ext="xyzrgb")
