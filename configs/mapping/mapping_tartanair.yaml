@@ -1,6 +1,6 @@
 warmup: 0 # Wait until tracking gets to this frame
 mapping_iters: 50 # At each new frame, 10 views
-refinement_iters: 200 # Once at the end, all views
+refinement_iters: 100 # Once at the end, all views
 optimize_last: 10
 optimize_rand: 10
 
@@ -37,29 +37,29 @@ pipeline_params:
 loss:
   alpha: 0.95 # Size of the mapping loss that the rgb takes up, the rest is depth
   rgb_boundary_threshold: 0.01
-  isotropic: 2 # Weight on the isotropic loss term
+  isotropic: 5 # Weight on the isotropic loss term
 
 filter:
   neighbor_th: 0.5
   neighbor_count: 1
-  disp_th: 0.05
+  disp_th: 0.01
 
 pruning:
-  prune_every: 25
+  prune_every: 30
   visibility_th: 5
   prune_last: 5
 
   mapping:
-    densify_grad_threshold: 0.0001
+    densify_grad_threshold: 0.00005
     size_threshold: 20
-    gaussian_th: 0.005
-    gaussian_extent: 10
+    gaussian_th: 0.05
+    gaussian_extent: 5
 
   refinement:
     densify_grad_threshold: 0.0002
     size_threshold: 20
     gaussian_th: 0.05
-    gaussian_extent: 5
+    gaussian_extent: 3
 
 
 

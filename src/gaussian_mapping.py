@@ -86,7 +86,8 @@ class GaussianMapper(object):
         self.pruning_params = cfg.mapping.pruning
         self.mapping_params = cfg.mapping
         self.loss_params = cfg.mapping.loss
-        self.delay = 2 # Delay between tracking and mapping
+        self.filter_params = cfg.mapping.filter
+        self.delay = 3 # Delay between tracking and mapping
         
         self.use_spherical_harmonics = False
         self.model_params.sh_degree = 3 if self.use_spherical_harmonics else 0
@@ -119,8 +120,8 @@ class GaussianMapper(object):
         self.initialized = False
         self.projection_matrix = None
 
-        self.n_last_frames = 10
-        self.n_rand_frames = 5
+        self.n_last_frames = self.cfg.mapping.optimize_last
+        self.n_rand_frames = self.cfg.mapping.optimize_rand
 
         self.show_filtered = False
 
@@ -157,13 +158,18 @@ class GaussianMapper(object):
         """
         Get all new cameras from the video.
         """
+        max_cam = 5
+
         for idx in range(self.last_idx, self.cur_idx - self.delay):
             color, depth, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
             color = color.permute(2, 0, 1)
             intrinsics = self.video.intrinsics[0] * self.video.scale_factor
             cam = self.camera_from_frame(idx, color, depth, intrinsics, c2w)
             cam.update_RT(cam.R_gt, cam.T_gt) # Assuming we found the best pose in tracking
+
             self.new_cameras.append(cam)
+            if len(self.new_cameras) >= max_cam:
+                return
         
 
     def camera_from_frame(
@@ -174,7 +180,7 @@ class GaussianMapper(object):
         height, width = image.shape[1:]
         gt_pose = torch.linalg.inv(gt_pose)  # They invert the poses in the dataloader
         znear = 0.01
-        zfar = 100.0  # TODO make this configurable?
+        zfar = 1000.0  # TODO make this configurable?
         fovx = focal2fov(fx, width)
         fovy = focal2fov(fy, height)
 
@@ -287,7 +293,7 @@ class GaussianMapper(object):
 
         with self.video.get_lock():
             (dirty_index,) = torch.where(self.video.mapping_dirty.clone())
-            dirty_index = dirty_index[dirty_index < self.cur_idx - self.delay]
+            dirty_index = dirty_index[dirty_index < self.last_idx]
 
             poses = torch.index_select(self.video.poses.detach(), dim=0, index=all_idxs)
             disps = torch.index_select(self.video.disps_up.detach(), dim=0, index=all_idxs)
@@ -295,12 +301,16 @@ class GaussianMapper(object):
 
 
         depths = 1 / (disps + 1e-7)
-        thresh = 0.1 * torch.ones_like(disps.mean(dim=[1, 2]))
+        thresh = self.filter_params.neighbor_th * torch.ones_like(disps.mean(dim=[1, 2]))
         count = droid_backends.depth_filter(poses, disps, intrinsics, all_idxs, thresh)
-        mask = (count >= 1) & (disps > 0.05 * disps.mean(dim=[1, 2], keepdim=True))
+        mask = (count >= self.filter_params.neighbor_count) \
+            & (disps > self.filter_params.disp_th * disps.mean(dim=[1, 2], keepdim=True))
+        depths = depths * mask
 
         for idx in dirty_index:
-            # self.info(f"Frame {idx}: filtered {100*(1 - mask[idx].sum() / mask[idx].numel()):.2f}% of the points")
+            if mask[idx].sum() == 0:
+                print(" \n\n No valid points in frame \n\n", idx)
+            #self.info(f"Frame {idx}: filtered {100*(1 - mask[idx].sum() / mask[idx].numel()):.2f}% of the points")
             _, _, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
             cam = all_cameras[idx]
             w2c = torch.inverse(c2w)
@@ -344,13 +354,13 @@ class GaussianMapper(object):
             opacity, n_touched = render_pkg["opacity"], render_pkg["n_touched"]
 
             loss += self.mapping_loss(image, depth, view)
-            if self.last_idx - view.uid < self.n_last_frames: # TODO Only take into account last frames and not random ones
+            if self.last_idx - view.uid <= self.n_last_frames: # Only update visibility for the last n frames
                 self.occ_aware_visibility[view.uid] = (n_touched > 0).long()
 
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
         # TODO chen: is this 5 simply because of the number of random frames or a hyperparameter?
-        loss += 5 * len(frames) * isotropic_loss.mean()  # TODO chen: why was the 5 not in the previous commits?
+        loss += self.loss_params.isotropic * len(frames) * isotropic_loss.mean()  # TODO chen: why was the 5 not in the previous commits?
         loss.backward()
 
         with torch.no_grad():
@@ -363,7 +373,7 @@ class GaussianMapper(object):
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
             if self.last_idx > self.n_last_frames and (iter + 1) % self.pruning_params.prune_every == 0:
-                #self.prune_gaussians() # Covisibility based pruning for recently added gaussians 
+                self.prune_gaussians() # Covisibility based pruning for recently added gaussians 
                 self.gaussians.densify_and_prune( # General pruning based on opacity and size + densification
                 pruning_params.densify_grad_threshold,
                 pruning_params.gaussian_th,
@@ -405,7 +415,7 @@ class GaussianMapper(object):
     def prune_gaussians(self):
         """Covisibility based pruning"""
 
-        new_frames = self.cameras[-self.n_last_frames :]
+        new_frames = (self.cameras + self.new_cameras)[-self.n_last_frames :] 
         new_idx = [view.uid for view in new_frames]
         sorted_frames = sorted(new_idx, reverse=True)
 
@@ -439,14 +449,16 @@ class GaussianMapper(object):
         
         # TODO make conditional more readable
         # TODO refactor so this is cleaner
-        #if self.last_idx + self.delay < self.cur_idx and self.cur_idx > self.mapping_params.warmup:
         if self.last_idx+self.delay < self.cur_idx and self.cur_idx > self.mapping_params.warmup:
-            #self.last_idx += 1
             
-            # self.info(f"\nStarting frame: {self.last_idx}. Gaussians: {self.gaussians.get_xyz.shape[0]}. Video at {self.cur_idx}")
+            msg = "Last frame: {}. Gaussians: {}. Video at {}".format(self.last_idx, self.gaussians.get_xyz.shape[0], self.cur_idx)
+            self.info(msg)
+
 
             # Add all new cameras
             self.get_new_cameras()
+            self.last_idx = self.new_cameras[-1].uid + 1
+
             self.info(f"Added {len(self.new_cameras)} new cameras: {[cam.uid for cam in self.new_cameras]}")
 
             self.frame_updater() # Filter dirty and new cameras
@@ -488,8 +500,7 @@ class GaussianMapper(object):
                     )
                 )
 
-            msg = "Frame: {}. Gaussians: {}. Video at {}".format(cam.uid, self.gaussians.get_xyz.shape[0], self.cur_idx)
-            self.info(msg)
+
 
             # Save renders
             if self.mapping_params.save_renders and cam.uid % 5 == 0:
@@ -498,10 +509,9 @@ class GaussianMapper(object):
 
             self.cameras += self.new_cameras
             self.new_cameras = []
-            self.last_idx = self.cameras[-1].uid + 1
 
         elif the_end and self.last_idx + self.delay == self.cur_idx:
-            self.info("\nMapping refinement starting")
+            self.info("Mapping refinement starting")
 
             for iter in range(self.mapping_params.refinement_iters):
                 loss = self.mapping_step(
@@ -529,17 +539,18 @@ class GaussianMapper(object):
                 for cam in self.cameras:
                     self.save_render(cam, f"{self.output}/renders/final/{cam.uid}.png")
 
-            # fig, ax = plt.subplots()
-            # ax.set_title("Loss per frame evolution")
-            # ax.set_yscale("log")
-            # ax.plot(self.loss_list)
-            # plt.show()
+            fig, ax = plt.subplots()
+            ax.set_title("Loss per frame evolution")
+            ax.set_yscale("log")
+            ax.plot(self.loss_list)
+            plt.savefig(f"{self.output}/all_loss_{self.mode}.png")
+
 
             fig, ax = plt.subplots()
             ax.set_yscale("log")
             ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.mapping_params.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
             ax.plot(self.loss_list[-self.mapping_params.refinement_iters:])
-            plt.savefig(f"{self.output}/loss_{self.mode}.png")
+            plt.savefig(f"{self.output}/refinement_loss_{self.mode}.png")
 
             if self.cfg.slam.evaluate:
                 ## export the cameras and gaussians to the terminate process
