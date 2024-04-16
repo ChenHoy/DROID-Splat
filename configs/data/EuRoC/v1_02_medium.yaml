@@ -1,0 +1,21 @@
+inherit_from: configs/EuRoC/euroc.yaml
+mode: stereo
+only_tracking: False
+mapping:
+  bound: [[-10, 10], [-10, 10], [-10, 20]]
+data:
+  input_folder: /media/data/EuRoC/V1_02_medium
+  output: ""
+cam:
+  H_out: 320
+  W_out: 480
+
+tracking:
+  motion_filter:
+    thresh: 8.0  # add as keyframe if avg flow >= 4.0 pixels
+  frontend:
+    keyframe_thresh: 8.0  # remove keyframe if avg flow < 4.0 pixels
+    thresh: 16.0  # only consider edge with avg flow < 16.0 pixels
+meshing:
+  resolution: 1024  # change to 512 for higher resolution geometry
+
