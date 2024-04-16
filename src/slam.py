@@ -13,8 +13,15 @@ from evo.core.trajectory import PosePath3D
 import numpy as np
 import pandas as pd
 from typing import List, Optional
+import os.path as osp
+from typing import List, Optional
+from tqdm import tqdm
+from time import gmtime, strftime, sleep
+from collections import OrderedDict
+from omegaconf import DictConfig
+from termcolor import colored
+import ipdb
 import cv2
-import open3d as o3d
 import numpy as np
 import torch
 import torch.nn as nn
@@ -31,8 +38,6 @@ from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .gaussian_mapping import GaussianMapper
 from .gaussian_splatting.eval_utils import eval_ate, eval_rendering, save_gaussians
-import pandas as pd
-from .render import Renderer
 from multiprocessing import Manager
 from .gaussian_splatting.multiprocessing_utils import clone_obj
 
@@ -82,21 +87,23 @@ class BundleAdjustment(nn.Module):
         # backend process
         self.backend = Backend(self.net, self.video, self.cfg)
 
-    def info(self, msg: str) -> None:
-        print(colored("[Backend]" + msg, "blue"))
+    def info(self, t_start, t_end, cur_t):
+        now = "[Backend] {} - Full BA".format(strftime("%Y-%m-%d %H:%M:%S", gmtime()))
+        msg = "\n {} : [{}, {}]; Current Keyframe is {}, last is {}. \n".format(
+            now, t_start, t_end, cur_t, self.last_t
+        )
+        print(colored(msg, "blue"))
 
     def forward(self):
         cur_t = self.video.counter.value
         t = cur_t
 
+        # Only optimize outside of Frontend
         if cur_t > self.frontend_window:
             t_start = 0
-            now = f'{strftime("%Y-%m-%d %H:%M:%S", gmtime())} - Full BA'
-            msg = f"\n\n {now} : [{t_start}, {t}]; Current Keyframe is {cur_t}, last is {self.last_t}."
-
             self.backend.dense_ba(t_start=t_start, t_end=t, steps=6, motion_only=False)
-            self.info(msg + "\n")
 
+            self.info(t_start, t, cur_t)
             self.last_t = cur_t
 
 
@@ -115,6 +122,7 @@ class SLAM:
         self.cfg = cfg
         self.device = cfg.slam.device
         self.mode = cfg.slam.mode
+        self.create_out_dirs(cfg)
 
         self.create_out_dirs(cfg)
         self.update_cam(cfg)
@@ -143,24 +151,22 @@ class SLAM:
         self.backend_finished.share_memory_()
         self.visualizing_finished = torch.zeros((1)).int()
         self.visualizing_finished.share_memory_()
-
-        self.hang_on = torch.zeros((1)).int()
-        self.hang_on.share_memory_()
-
-        self.reload_map = torch.zeros((1)).int()
-        self.reload_map.share_memory_()
+        self.sleep_time = 1.0  # Time for giving delays
+        # Stream the images into the main thread
+        self.input_pipe = mp.Queue()
 
         # store images, depth, poses, intrinsics (shared between process)
+        # NOTE: we can use this for getting both gt and rendered images
         self.video = DepthVideo(cfg)
 
         self.tracker = Tracker(cfg, self)
-        self.ba = BundleAdjustment(cfg, self)
 
         self.multiview_filter = MultiviewFilter(cfg, self)
 
+        self.dense_ba = BundleAdjustment(cfg, self)
+
         # post processor - fill in poses for non-keyframes
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
-
         ## Used to share packets for evaluation from the gaussian mapper
         self.gaussian_mapper = GaussianMapper(cfg, self)
         self.mapping_queue = mp.Queue()
@@ -171,6 +177,9 @@ class SLAM:
         self.do_evaluate = cfg.slam.evaluate
         self.dataset = None
 
+        self.hang_on = torch.zeros((1)).int()
+        self.hang_on.share_memory_()
+
     def create_out_dirs(self, cfg: DictConfig) -> None:
         self.output = cfg.slam.output_folder
         os.makedirs(f"{self.output}/logs/", exist_ok=True)
@@ -179,12 +188,8 @@ class SLAM:
         os.makedirs(f"{self.output}/mesh", exist_ok=True)
         os.makedirs(f"{self.output}/evaluation", exist_ok=True)
         
-
-    def set_dataset(self, dataset):
-        self.dataset = dataset
-
-    def info(self, msg: str) -> None:
-        print(colored("[Main]" + msg, "green"))
+    def info(self, msg) -> None:
+        print(colored("[Main]: " + msg, "green"))
 
     def update_cam(self, cfg):
         """
@@ -208,7 +213,7 @@ class SLAM:
         self.cx = self.cx - w_edge
         self.cy = self.cy - h_edge
 
-    def load_bound(self, cfg):
+    def load_bound(self, cfg: DictConfig) -> None:
         """
         Pass the scene bound parameters to different decoders and self.
 
@@ -218,12 +223,11 @@ class SLAM:
         """
         self.bound = torch.from_numpy(np.array(cfg.data.bound)).float()
 
-    def load_pretrained(self, pretrained):
-        self.info(f"INFO: load pretrained checkpiont from {pretrained}!")
-
-        state_dict = OrderedDict([(k.replace("module.", ""), v) for (k, v) in torch.load(pretrained).items()])
+    def load_pretrained(self, pretrained: str) -> None:
+        self.info(f"Load pretrained checkpoint from {pretrained}!")
 
         # TODO why do we have to use the [:2] here?!
+        state_dict = OrderedDict([(k.replace("module.", ""), v) for (k, v) in torch.load(pretrained).items()])
         state_dict["update.weight.2.weight"] = state_dict["update.weight.2.weight"][:2]
         state_dict["update.weight.2.bias"] = state_dict["update.weight.2.bias"][:2]
         state_dict["update.delta.2.weight"] = state_dict["update.delta.2.weight"][:2]
@@ -231,8 +235,10 @@ class SLAM:
 
         self.net.load_state_dict(state_dict)
 
-    def tracking(self, rank, stream, input_queue: mp.Queue):
-        self.info("Tracking Triggered!")
+    def tracking(self, rank, stream, input_queue: mp.Queue) -> None:
+        """Main driver of framework by looping over the input stream"""
+
+        self.info("Tracking thread started!")
         self.all_trigered += 1
 
         # Wait up for other threads to start
@@ -243,82 +249,81 @@ class SLAM:
             timestamp, image, depth, intrinsic, gt_pose = frame
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
-            # Transmit the incoming stream to another visualization thread
-            input_queue.put(image)
-            input_queue.put(depth)
+
+            if self.cfg.slam.show_stream:
+                # Transmit the incoming stream to another visualization thread
+                input_queue.put(image)
+                input_queue.put(depth)
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
-            while self.hang_on > 0:
-                sleep(1.0)
 
         self.tracking_finished += 1
         self.all_finished += 1
-        self.info("Tracking Done!")
+        self.info("Tracking done!")
 
-    def backend(self, rank, dont_run=False):
-        self.info("Full Bundle Adjustment Triggered!")
+
+    def backend(self, rank, run=True):
+        self.info("Full Bundle Adjustment thread started!")
         self.all_trigered += 1
-        while self.tracking_finished < 1 and not dont_run:
-            while self.hang_on > 0:
-                sleep(1.0)
 
-            self.ba()
-            sleep(2.0)  # Let multiprocessing cool down a little bit
+        while self.tracking_finished < 1 and run:
+            self.dense_ba()
+            sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
         # Run one last time after tracking finished
-        if not dont_run:
-            self.ba()
+        if run:
+            self.dense_ba()
 
         self.backend_finished += 1
         self.all_finished += 1
-        self.info("Full Bundle Adjustment Done!")
+        self.info("Full Bundle Adjustment done!")
 
-    def multiview_filtering(self, rank, dont_run=False):
-        self.info("Multiview Filtering Triggered!")
+
+    def multiview_filtering(self, rank, run=True):
+        self.info("Multiview Filtering thread started!")
         self.all_trigered += 1
 
-        while (self.tracking_finished < 1 or self.backend_finished < 1) and not dont_run:
-            while self.hang_on > 0:
-                sleep(1.0)
+        while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
             self.multiview_filter()
 
         self.multiview_filtering_finished += 1
         self.all_finished += 1
         self.info("Multiview Filtering Done!")
 
-    def gaussian_mapping(self, rank, dont_run, mapping_queue: mp.Queue, received_mapping: mp.Event):
+
+    def gaussian_mapping(self, rank, run, mapping_queue: mp.Queue, received_mapping: mp.Event):
         self.info("Gaussian Mapping Triggered!")
         self.all_trigered += 1
 
-        while self.tracking_finished < 1 and not dont_run:
+        while self.tracking_finished < 1 and run:
             while self.hang_on > 0:
                 sleep(1.0)
             self.gaussian_mapper(mapping_queue, received_mapping)
 
         # Run for one last time after everything finished
         finished = False
-        if not dont_run:
-            while not finished:
-                finished = self.gaussian_mapper(mapping_queue, received_mapping, True)
+        while not finished and run:
+            finished = self.gaussian_mapper(mapping_queue, received_mapping, True)
 
         self.gaussian_mapping_finished += 1
         self.all_finished += 1
         self.info("Gaussian Mapping Done!")
 
-    def visualizing(self, rank, dont_run=False):
-        self.info("Visualization triggered!")
+    def visualizing(self, rank, run=True):
+        self.info("Visualization thread started!")
         self.all_trigered += 1
 
-        while (self.tracking_finished < 1 or self.backend_finished < 1) and (not dont_run):
+        while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
             droid_visualization(self.video, device=self.device, save_root=self.output)
 
         self.visualizing_finished += 1
         self.all_finished += 1
-        self.info("Visualization Done!")
+        self.info("Visualization done!")
+
 
     def show_stream(self, rank, input_queue: mp.Queue) -> None:
-        self.info("OpenCV Image stream triggered!")
+        self.info("OpenCV Image stream thread started!")
         self.all_trigered += 1
 
         while self.tracking_finished < 1 or self.backend_finished < 1:
@@ -458,17 +463,18 @@ class SLAM:
         self.info("Terminate: Done!")
 
     def run(self, stream):
-
+        # TODO visualizing and guassian mapping cannot be run at the same time, because they both access the dirty_index
+        # -> introduce multiple indices so we can keep track of what we already visualized and what we already put into the renderer
         processes = [
-            # NOTE The OpenCV thread always needs to be 0 to work
+            # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe), name="OpenCV Stream"),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Frontend Tracking"),
-            mp.Process(target=self.backend, args=(2, False), name="Backend"),
-            mp.Process(target=self.multiview_filtering, args=(3, False), name="Multiview Filtering"),
-            mp.Process(target=self.visualizing, args=(4, True), name="Visualizing"),
+            mp.Process(target=self.backend, args=(2, self.cfg.slam.run_backend), name="Backend"), 
+            mp.Process(target=self.multiview_filtering, args=(3, self.cfg.slam.run_multiview_filter),name="Multiview Filtering"),
+            mp.Process(target=self.visualizing, args=(4, self.cfg.slam.run_visualization),name="Visualizing"),
             mp.Process(
                 target=self.gaussian_mapping,
-                args=(5, False, self.mapping_queue, self.received_mapping),
+                args=(5, self.cfg.slam.run_mapping, self.mapping_queue, self.received_mapping),
                 name="Gaussian Mapping",
             ),
         ]
@@ -497,4 +503,3 @@ class SLAM:
 
 
         self.terminate(processes,stream,gaussian_mapper_last_state)
-

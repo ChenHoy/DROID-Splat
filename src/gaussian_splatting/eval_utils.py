@@ -21,6 +21,7 @@ from .utils.system_utils import mkdir_p
 from .logging_utils import Log
 from .multiprocessing_utils import clone_obj
 
+
 def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ## Plot
     traj_ref = PosePath3D(poses_se3=poses_gt)
@@ -28,8 +29,8 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     # traj_est_aligned = trajectory.align_trajectory(
     #     traj_est, traj_ref, correct_scale=monocular
     # )
-    traj_est_aligned = clone_obj(traj_est) 
-    traj_est_aligned.align(traj_ref, correct_scale=monocular) ## throws 
+    traj_est_aligned = clone_obj(traj_est)
+    traj_est_aligned.align(traj_ref, correct_scale=monocular)  ## throws
     # traj_est_aligned.align_origin(traj_ref)
 
     ## RMSE
@@ -68,10 +69,10 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
 
 
 def get_c2w_list(camera_trajectory, stream):
-    '''
+    """
     Gets the camera trajectory and the stream of poses and returns the estimated and gt poses for
     all frames after trajectory filler
-    '''
+    """
     estimate_c2w_list = camera_trajectory.matrix().data.cpu()
     traj_ref = []
     for i in range(len(stream.poses)):
@@ -86,17 +87,24 @@ def get_c2w_list(camera_trajectory, stream):
     return estimate_c2w_list, gt_c2w_list
 
 
-def eval_ate(video, kf_ids, save_dir, iterations, final=False, monocular=False, 
-             keyframes_only=True,
-             camera_trajectory=None,
-             stream=None):
-    '''
+def eval_ate(
+    video,
+    kf_ids,
+    save_dir,
+    iterations,
+    final=False,
+    monocular=False,
+    keyframes_only=True,
+    camera_trajectory=None,
+    stream=None,
+):
+    """
     video: DepthVideo
     kf_ids: list of keyframe indices | in case of the video object all of them are keyframes
     used poses_gt for gt and poses for estimated poses
     stream: Dataset
     camera_trajectory: poses after trajectory filler
-    '''
+    """
     frames = video.images
 
     trj_data = dict()
@@ -113,13 +121,13 @@ def eval_ate(video, kf_ids, save_dir, iterations, final=False, monocular=False,
     if keyframes_only:
 
         for kf_id in kf_ids:
-            kf = frames[kf_id] 
+            kf = frames[kf_id]
 
             _, _, c2w, _, _ = video.get_mapping_item(kf_id, video.device)
             w2c = torch.inverse(c2w)
             R_est = w2c[:3, :3].unsqueeze(0).detach()
             T_est = w2c[:3, 3].detach()
-                
+
             gt_c2w = video.poses_gt[kf_id].clone().to(video.device)  # [4, 4]
             gt_w2c = torch.inverse(gt_c2w)
             R_gt = gt_w2c[:3, :3].unsqueeze(0).detach()
@@ -143,9 +151,7 @@ def eval_ate(video, kf_ids, save_dir, iterations, final=False, monocular=False,
         mkdir_p(plot_dir)
 
         label_evo = "final" if final else "{:04}".format(iterations)
-        with open(
-            os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8"
-        ) as f:
+        with open(os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8") as f:
             json.dump(trj_data, f, indent=4)
 
         ate = evaluate_evo(
@@ -156,7 +162,7 @@ def eval_ate(video, kf_ids, save_dir, iterations, final=False, monocular=False,
             monocular=monocular,
         )
         return ate
-    
+
     else:
         estimate_c2w_list, gt_c2w_list = get_c2w_list(camera_trajectory, stream)
 
@@ -194,9 +200,7 @@ def eval_ate(video, kf_ids, save_dir, iterations, final=False, monocular=False,
         mkdir_p(plot_dir)
 
         label_evo = "final" if final else "{:04}".format(iterations)
-        with open(
-            os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8"
-        ) as f:
+        with open(os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8") as f:
             json.dump(trj_data, f, indent=4)
 
         ate = evaluate_evo(
@@ -207,8 +211,6 @@ def eval_ate(video, kf_ids, save_dir, iterations, final=False, monocular=False,
             monocular=monocular,
         )
         return ate
-             
-        
 
 
 def eval_rendering(
@@ -221,27 +223,26 @@ def eval_rendering(
     kf_indices,
     iteration="final",
 ):
-    '''
+    """
     mapper: GaussianMapper
-    '''
+    """
     interval = 1
     img_pred, img_gt, saved_frame_idx = [], [], []
     end_idx = len(frames) - 1 if iteration == "final" or "before_opt" else iteration
     psnr_array, ssim_array, lpips_array = [], [], []
-    cal_lpips = LearnedPerceptualImagePatchSimilarity(
-        net_type="alex", normalize=True
-    ).to("cuda")
+    cal_lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to("cuda")
 
-    '''
+    """
     Runs this only for frames that are not keyframes
-    '''
+    """
+
     for idx in range(0, end_idx, interval):
         if idx in kf_indices:
             continue
         saved_frame_idx.append(idx)
         frame = frames[idx]
         ## gt_image is an rgb image no depth
-        _, gt_image, _, _, _ = dataset[idx] 
+        _, gt_image, _, _, _ = dataset[idx]
 
         gt_image = gt_image.squeeze(0)
 
@@ -249,9 +250,7 @@ def eval_rendering(
         image = torch.clamp(rendering, 0.0, 1.0)
 
         gt = (gt_image.cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
-        pred = (image.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(
-            np.uint8
-        )
+        pred = (image.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
         gt = cv2.cvtColor(gt, cv2.COLOR_BGR2RGB)
         pred = cv2.cvtColor(pred, cv2.COLOR_BGR2RGB)
         img_pred.append(pred)
@@ -294,7 +293,5 @@ def save_gaussians(gaussians, name, iteration, final=False):
     if final:
         point_cloud_path = os.path.join(name, "point_cloud/final")
     else:
-        point_cloud_path = os.path.join(
-            name, "point_cloud/iteration_{}".format(str(iteration))
-        )
+        point_cloud_path = os.path.join(name, "point_cloud/iteration_{}".format(str(iteration)))
     gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))

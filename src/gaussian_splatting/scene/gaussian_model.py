@@ -10,6 +10,7 @@
 #
 
 import os
+from termcolor import colored
 
 import numpy as np
 import open3d as o3d
@@ -458,7 +459,7 @@ class GaussianModel:
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group["params"][0], None)
             if stored_state is not None:
-                # print(group["name"], stored_state["exp_avg"].shape, extension_tensor.shape)
+                # self.info(group["name"], stored_state["exp_avg"].shape, extension_tensor.shape)
                 stored_state["exp_avg"] = torch.cat(
                     (stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0
                 )
@@ -608,10 +609,13 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
 
-        print(f"Pruning & densification added {self.get_xyz.shape[0] - n_g} gaussians")
+        self.info(f"Pruning & densification added {self.get_xyz.shape[0] - n_g} gaussians")
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(
             viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
         )
         self.denom[update_filter] += 1
+
+    def info(self, msg: str) -> None:
+        print(colored(f"[Gaussian Model] {msg}", "magenta"))

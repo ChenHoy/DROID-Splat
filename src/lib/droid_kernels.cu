@@ -1770,7 +1770,12 @@ class SparseBlock {
       torch::Tensor dx;
 
       Eigen::SparseMatrix<double> L(A);
-      L.diagonal().array() += ep + lm * L.diagonal().array();
+      // FIXME: Eigen does not support easy interaction between SparseMatrix and Diagonal
+      // see https://gitlab.com/libeigen/eigen/-/issues/1574
+      // L.diagonal().array() += ep + lm * L.diagonal().array();
+      for (int i = 0; i < std::min(L.rows(), L.cols()); ++i) {
+        L.coeffRef(i, i) += ep + lm * L.coeffRef(i, i);
+      }
 
       Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> solver;
       solver.compute(L); // Compute the sparse Cholesky decomposition of matrix L
@@ -1781,6 +1786,7 @@ class SparseBlock {
           .dtype(torch::kFloat64)).to(torch::kCUDA).to(torch::kFloat32);
       }
       else {
+        std::cout << "Warning: Cholesky decomposition was not successful." << std::endl;
         dx = torch::zeros({N, M}, torch::TensorOptions()
           .device(torch::kCUDA).dtype(torch::kFloat32));
       }
@@ -1925,7 +1931,12 @@ class SparseBlockAsym {
       torch::Tensor dx;
 
       Eigen::SparseMatrix<double> L(A);
-      L.diagonal().array() += ep + lm * L.diagonal().array();
+      // FIXME: Eigen does not support easy interaction between SparseMatrix and Diagonal
+      // see https://gitlab.com/libeigen/eigen/-/issues/1574
+      // L.diagonal().array() += ep + lm * L.diagonal().array();
+      for (int i = 0; i < std::min(L.rows(), L.cols()); ++i) {
+        L.coeffRef(i, i) += ep + lm * L.coeffRef(i, i);
+      }
 
       Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> solver;
       solver.compute(L);

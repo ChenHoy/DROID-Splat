@@ -1,21 +1,24 @@
 [submodule "thirdparty/lietorch"]
 	path = thirdparty/lietorch
+	branch = master
 	url = https://github.com/princeton-vl/lietorch.git
 [submodule "thirdparty/eigen"]
 	path = thirdparty/eigen
+	branch = master
 	url = https://gitlab.com/libeigen/eigen.git
-[submodule "ext/Depth-Anything"]
-	path = ext/Depth-Anything
-	url = https://github.com/LiheYoung/Depth-Anything
-[submodule "ext/Zoedepth"]
-	path = ext/Zoedepth
-	url = https://github.com/isl-org/ZoeDepth
+[submodule "thirdparty/simple-knn"]
+	path = thirdparty/simple-knn
+	branch = main
+	url = https://github.com/camenduru/simple-knn.git
 [submodule "thirdparty/diff-gaussian-rasterization-w-pose"]
 	path = thirdparty/diff-gaussian-rasterization-w-pose
+	branch = main
 	url = https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose.git
-[submodule "thirdparty/--force"]
-	path = thirdparty/--force
-	url = https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose.git
-[submodule "thirdparty/diff_gaussian_rasterization_w_pose"]
-	path = thirdparty/diff_gaussian_rasterization_w_pose
-	url = https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose.git
+[submodule "ext/Depth-Anything"]
+	path = ext/Depth-Anything
+	branch = main
+	url = https://github.com/ChenHoy/Depth-Anything.git
+[submodule "ext/Zoedepth"]
+	path = ext/ZoeDepth
+	branch = master
+	url = https://github.com/ChenHoy/ZoeDepth.git

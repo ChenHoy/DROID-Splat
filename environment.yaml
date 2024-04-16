@@ -38,5 +38,6 @@ dependencies:
     - networkx
     - pandas
     - trimesh
+    - termcolor
     - webencodings
     - pyrender
