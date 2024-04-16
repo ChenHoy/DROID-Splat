@@ -139,7 +139,7 @@ def eval_ate(video, kf_ids, save_dir, iterations, final=False, monocular=False,
         trj_data["trj_est"] = trj_est
         trj_data["trj_gt"] = trj_gt
 
-        plot_dir = os.path.join(save_dir, "plot")
+        plot_dir = os.path.join(save_dir, "trajectory-plots")
         mkdir_p(plot_dir)
 
         label_evo = "final" if final else "{:04}".format(iterations)
@@ -235,7 +235,6 @@ def eval_rendering(
     '''
     Runs this only for frames that are not keyframes
     '''
-    print("Calculating metrics on non-keyframes. Total keyframes: ", len(kf_indices),"Step used for evaluation: ", interval)
     for idx in range(0, end_idx, interval):
         if idx in kf_indices:
             continue

@@ -83,7 +83,7 @@ class GaussianMapper(object):
         bg_color = [1, 1, 1]
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        if self.mapping_params.use_gui and not cfg.slam.evaluate:
+        if self.mapping_params.use_gui and not cfg.evaluate:
             self.q_main2vis = mp.Queue()
             self.q_vis2main = mp.Queue()
             self.params_gui = gui_utils.ParamsGUI(
@@ -409,17 +409,11 @@ class GaussianMapper(object):
 
             ## export the cameras and gaussians to the terminate process
             print("Sending the final state to the terminate process")
-            # FIXME this is never received?
-            # mapping_queue.put(
-            #     gui_utils.GaussianPacket(
-            #         gaussians=clone_obj(self.gaussians),
-            #         keyframes=self.cameras,
-            #     )
-            # )
+
             mapping_queue.put(
                 gui_utils.EvaluatePacket(
                     pipeline_params=clone_obj(self.pipeline_params),
-                    cameras=self.cameras[:], ##FIXME: why only 28, that is too few
+                    cameras=self.cameras[:],
                     gaussians=clone_obj(self.gaussians),
                     background=clone_obj(self.background),
                 )
@@ -428,18 +422,14 @@ class GaussianMapper(object):
             received_item.wait()  # Wait until the Packet got delivered
             print("Sent the final state to the terminate process successfully")
 
-            # fig, ax = plt.subplots()
-            # ax.set_title("Loss per frame evolution")
-            # ax.set_yscale("log")
-            # ax.plot(self.loss_list)
-            # plt.show()
+            if self.cfg.slam.evaluate:
 
-            # fig, ax = plt.subplots()
-            # ax.set_yscale("log")
-            # ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.setup.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
-            # ax.plot(self.loss_list[-self.setup.refinement_iters:])
-            # plt.savefig(f"{self.setup.render_path}/loss_{self.mode}.png")
-            # plt.show()
+                fig, ax = plt.subplots()
+                ax.set_yscale("log")
+                ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.mapping_params.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
+                ax.plot(self.loss_list[-self.mapping_params.refinement_iters:])
+                plt.savefig(f"{self.output}/loss_{self.mode}.png")
+                plt.clf()
 
             return True
 

@@ -1,11 +1,18 @@
 import os
 import ipdb
+from omegaconf import DictConfig
 from colorama import Fore, Style
 from termcolor import colored
 from collections import OrderedDict
 from tqdm import tqdm
 from time import gmtime, strftime, time, sleep
-
+from evo.core.trajectory import PoseTrajectory3D
+import evo.main_ape as main_ape
+from evo.core.metrics import PoseRelation
+from evo.core.trajectory import PosePath3D
+import numpy as np
+import pandas as pd
+from typing import List, Optional
 import cv2
 import open3d as o3d
 import numpy as np
@@ -30,39 +37,44 @@ from multiprocessing import Manager
 from .gaussian_splatting.multiprocessing_utils import clone_obj
 
 class Tracker(nn.Module):
+    """
+    Wrapper class for SLAM frontend tracking.
+    """
+
     def __init__(self, cfg, slam):
         super(Tracker, self).__init__()
         self.cfg = cfg
         self.device = cfg.slam.device
         self.net = slam.net
         self.video = slam.video
-        self.verbose = slam.verbose
 
         # filter incoming frames so that there is enough motion
         self.frontend_window = cfg.tracking.frontend.window
         filter_thresh = cfg.tracking.motion_filter.thresh
-        self.motion_filter = MotionFilter(self.net, self.video, thresh=filter_thresh, device=self.device)
 
-        # frontend process
+        self.motion_filter = MotionFilter(self.net, self.video, thresh=filter_thresh, device=self.device)
         self.frontend = Frontend(self.net, self.video, self.cfg)
 
+    @torch.no_grad()
     def forward(self, timestamp, image, depth, intrinsic, gt_pose=None):
-        with torch.no_grad():
-            ### check there is enough motion
-            self.motion_filter.track(timestamp, image, depth, intrinsic, gt_pose=gt_pose)
+        ### check there is enough motion
+        self.motion_filter.track(timestamp, image, depth, intrinsic, gt_pose=gt_pose)
 
-            # local bundle adjustment
-            self.frontend()
+        # local bundle adjustment
+        self.frontend()
 
 
 class BundleAdjustment(nn.Module):
+    """
+    Wrapper class for Backend optimization
+    """
+
     def __init__(self, cfg, slam):
         super(BundleAdjustment, self).__init__()
         self.cfg = cfg
         self.device = cfg.slam.device
         self.net = slam.net
         self.video = slam.video
-        self.verbose = slam.verbose
         self.frontend_window = cfg["tracking"]["frontend"]["window"]
         self.last_t = -1
         self.ba_counter = -1
@@ -89,22 +101,23 @@ class BundleAdjustment(nn.Module):
 
 
 class SLAM:
+    """
+    SLAM system with multiprocessing:
+        i) Frontend tracking for local optimization of incoming frames and filter based on perceived motion
+        ii) Backend optimization of whole map using bundle adjustment
+        iii) Gaussian Renderer initialized from dense point cloud map
+        iv) Visualization functionality
+    """
+
     def __init__(self, cfg):
         super(SLAM, self).__init__()
+
         self.cfg = cfg
         self.device = cfg.slam.device
-        self.verbose = cfg.slam.verbose
         self.mode = cfg.slam.mode
         self.only_tracking = cfg.slam.only_tracking
-        self.make_video = cfg.slam.make_video
 
-        self.output = cfg.slam.output_folder
-
-        os.makedirs(f"{self.output}/logs/", exist_ok=True)
-        os.makedirs(f"{self.output}/renders/mapping/", exist_ok=True)
-        os.makedirs(f"{self.output}/renders/final", exist_ok=True)
-        os.makedirs(f"{self.output}/mesh", exist_ok=True)
-
+        self.create_out_dirs(cfg)
         self.update_cam(cfg)
         self.load_bound(cfg)
 
@@ -114,6 +127,7 @@ class SLAM:
         self.net.to(self.device).eval()
         self.net.share_memory()
 
+        # Manage life time of individual processes
         self.num_running_thread = torch.zeros((1)).int()
         self.num_running_thread.share_memory_()
         self.all_trigered = torch.zeros((1)).int()
@@ -126,8 +140,8 @@ class SLAM:
         self.multiview_filtering_finished.share_memory_()
         self.gaussian_mapping_finished = torch.zeros((1)).int()
         self.gaussian_mapping_finished.share_memory_()
-        self.optimizing_finished = torch.zeros((1)).int()
-        self.optimizing_finished.share_memory_()
+        self.backend_finished = torch.zeros((1)).int()
+        self.backend_finished.share_memory_()
         self.visualizing_finished = torch.zeros((1)).int()
         self.visualizing_finished.share_memory_()
 
@@ -155,8 +169,17 @@ class SLAM:
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
-        self.evaluate = cfg.slam.evaluate
+        self.do_evaluate = cfg.slam.evaluate
         self.dataset = None
+
+    def create_out_dirs(self, cfg: DictConfig) -> None:
+        self.output = cfg.slam.output_folder
+        os.makedirs(f"{self.output}/logs/", exist_ok=True)
+        os.makedirs(f"{self.output}/renders/mapping/", exist_ok=True)
+        os.makedirs(f"{self.output}/renders/final", exist_ok=True)
+        os.makedirs(f"{self.output}/mesh", exist_ok=True)
+        os.makedirs(f"{self.output}/evaluation", exist_ok=True)
+        
 
     def set_dataset(self, dataset):
         self.dataset = dataset
@@ -189,11 +212,11 @@ class SLAM:
     def load_bound(self, cfg):
         """
         Pass the scene bound parameters to different decoders and self.
-        Args:
-            cfg:                        (dict), parsed config dict
 
+        ---
+        Args:
+            cfg [dict], parsed config dict
         """
-        # scale the bound if there is a global scaling factor
         self.bound = torch.from_numpy(np.array(cfg.data.bound)).float()
 
     def load_pretrained(self, pretrained):
@@ -201,6 +224,7 @@ class SLAM:
 
         state_dict = OrderedDict([(k.replace("module.", ""), v) for (k, v) in torch.load(pretrained).items()])
 
+        # TODO why do we have to use the [:2] here?!
         state_dict["update.weight.2.weight"] = state_dict["update.weight.2.weight"][:2]
         state_dict["update.weight.2.bias"] = state_dict["update.weight.2.bias"][:2]
         state_dict["update.delta.2.weight"] = state_dict["update.delta.2.weight"][:2]
@@ -211,9 +235,11 @@ class SLAM:
     def tracking(self, rank, stream, input_queue: mp.Queue):
         self.info("Tracking Triggered!")
         self.all_trigered += 1
+
         # Wait up for other threads to start
         while self.all_trigered < self.num_running_thread:
             pass
+
         for frame in tqdm(stream):
             timestamp, image, depth, intrinsic, gt_pose = frame
             if self.mode not in ["rgbd", "prgbd"]:
@@ -224,8 +250,6 @@ class SLAM:
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
-            if timestamp % 50 == 0 and timestamp > 0 and self.make_video:
-                self.hang_on[:] = 1
             while self.hang_on > 0:
                 sleep(1.0)
 
@@ -233,27 +257,30 @@ class SLAM:
         self.all_finished += 1
         self.info("Tracking Done!")
 
-    def optimizing(self, rank, dont_run=False):
+    def backend(self, rank, dont_run=False):
         self.info("Full Bundle Adjustment Triggered!")
         self.all_trigered += 1
         while self.tracking_finished < 1 and not dont_run:
-            while self.hang_on > 0 and self.make_video:
+            while self.hang_on > 0:
                 sleep(1.0)
+
             self.ba()
             sleep(2.0)  # Let multiprocessing cool down a little bit
 
+        # Run one last time after tracking finished
         if not dont_run:
             self.ba()
 
-        self.optimizing_finished += 1
+        self.backend_finished += 1
         self.all_finished += 1
         self.info("Full Bundle Adjustment Done!")
 
     def multiview_filtering(self, rank, dont_run=False):
         self.info("Multiview Filtering Triggered!")
         self.all_trigered += 1
-        while (self.tracking_finished < 1 or self.optimizing_finished < 1) and not dont_run:
-            while self.hang_on > 0 and self.make_video:
+
+        while (self.tracking_finished < 1 or self.backend_finished < 1) and not dont_run:
+            while self.hang_on > 0:
                 sleep(1.0)
             self.multiview_filter()
 
@@ -261,32 +288,30 @@ class SLAM:
         self.all_finished += 1
         self.info("Multiview Filtering Done!")
 
-
-    # FIXME Gaussian mapper gets a different queue here than the one we originally passed
     def gaussian_mapping(self, rank, dont_run, mapping_queue: mp.Queue, received_mapping: mp.Event):
         self.info("Gaussian Mapping Triggered!")
-
         self.all_trigered += 1
+
         while self.tracking_finished < 1 and not dont_run:
-            while self.hang_on > 0 and self.make_video:
+            while self.hang_on > 0:
                 sleep(1.0)
             self.gaussian_mapper(mapping_queue, received_mapping)
 
+        # Run for one last time after everything finished
         finished = False
         if not dont_run:
-            self.info("[Gaussian mapping] Last run")
             while not finished:
                 finished = self.gaussian_mapper(mapping_queue, received_mapping, True)
 
         self.gaussian_mapping_finished += 1
         self.all_finished += 1
-        # self.shared_space['gaussian_mapper'] = self.gaussian_mapper
         self.info("Gaussian Mapping Done!")
 
     def visualizing(self, rank, dont_run=False):
         self.info("Visualization triggered!")
         self.all_trigered += 1
-        while (self.tracking_finished < 1 or self.optimizing_finished < 1) and (not dont_run):
+
+        while (self.tracking_finished < 1 or self.backend_finished < 1) and (not dont_run):
             droid_visualization(self.video, device=self.device, save_root=self.output)
 
         self.visualizing_finished += 1
@@ -296,7 +321,8 @@ class SLAM:
     def show_stream(self, rank, input_queue: mp.Queue) -> None:
         self.info("OpenCV Image stream triggered!")
         self.all_trigered += 1
-        while self.tracking_finished < 1 or self.optimizing_finished < 1:
+
+        while self.tracking_finished < 1 or self.backend_finished < 1:
             if not input_queue.empty():
                 try:
                     rgb = input_queue.get()
@@ -318,15 +344,92 @@ class SLAM:
         self.all_finished += 1
         self.info("Show stream Done!")
 
-    def terminate(self, rank, stream=None):
-        """fill poses for non-keyframe images and evaluate"""
+    def evaluate(self, stream, gaussian_mapper_last_state):
 
-        self.info("Initiating termination sequence!")
-        while self.optimizing_finished < 1:
-            self.info("Waiting for the optimizing...")
-            if self.num_running_thread == 1 and self.tracking_finished > 0:
-                break
+        eval_path = os.path.join(self.output,"evaluation")
 
+        def stringify_config():
+            tbr = "Config: "
+
+            if self.cfg.slam.run_backend:
+                tbr +="Backend"
+            if self.cfg.slam.run_frontend:
+                tbr += " Frontend"
+            if self.cfg.slam.run_mapping:
+                tbr += " Mapping"
+
+            tbr += " | Stride: " + str(self.cfg.slam.stride)
+
+            return tbr
+
+        self.info("Saving evaluation results in {}".format(self.output))
+
+        rendering_result = eval_rendering(
+            gaussian_mapper_last_state.cameras,
+            gaussian_mapper_last_state.gaussians,
+            stream,
+            eval_path,
+            gaussian_mapper_last_state.pipeline_params,
+            gaussian_mapper_last_state.background,
+            kf_indices=[], ## NOTE: all frames are keyframes
+            iteration="final",) ## NOTE: only for printing additional messages
+
+        #### ------------------- ####
+        ### Trajectory evaluation ###
+
+        self.info("#" * 20 + f" Results for {stream.input_folder} ...")
+
+        timestamps = [i for i in range(len(stream))]
+        camera_trajectory = self.traj_filler(stream)  # w2cs
+        w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
+        camera_trajectory = w2w * camera_trajectory.inv()
+        traj_est = camera_trajectory.data.cpu().numpy()
+        estimate_c2w_list = camera_trajectory.matrix().data.cpu()
+
+        # out_path = os.path.join(self.output, "checkpoints/est_poses.npy")
+        # np.save(out_path, estimate_c2w_list.numpy())  # c2ws
+
+        ## TODO: change this for depth videos
+        # Set keyframes_only to True to compute the APE and plots on keyframes only.
+
+        monocular = self.cfg.slam.mode == "mono"
+
+        result_ate = eval_ate(
+            self.video,
+            kf_ids=list(range(len(self.video.images))),
+            save_dir=eval_path,
+            iterations=-1,
+            final=True,
+            monocular=monocular,
+            keyframes_only=False,
+            camera_trajectory=camera_trajectory,
+            stream=stream,
+        )
+
+        self.info("ATE: {}".format(result_ate))
+
+        trajectory_df = pd.DataFrame([result_ate])
+        trajectory_df.to_csv(os.path.join(eval_path, "trajectory_results.csv"), index=False)
+
+        #### ------------------- ####
+        ## Joint metrics file ##
+        columns = ["config",'dataset','mode', "psnr", "ssim", "lpips","ape"]
+        data = [
+            [
+                stringify_config(),
+                self.cfg.data.dataset,
+                self.cfg.slam.mode,
+                rendering_result["mean_psnr"],
+                rendering_result["mean_ssim"],
+                rendering_result["mean_lpips"],
+                result_ate['mean']
+            ]
+        ]
+
+        df = pd.DataFrame(data, columns=columns)
+        df.to_csv(os.path.join(eval_path,"evaluation_results.csv"), index=False)
+
+    def save_state(self):
         self.info("Saving checkpoints...")
         os.makedirs(os.path.join(self.output, "checkpoints/"), exist_ok=True)
         torch.save(
@@ -337,126 +440,30 @@ class SLAM:
             os.path.join(self.output, "checkpoints/go.ckpt"),
         )
 
-        self.info("Doing evaluation!")
-        if self.evaluate:
-            from evo.core.trajectory import PoseTrajectory3D
-            import evo.main_ape as main_ape
-            from evo.core.metrics import PoseRelation
-            from evo.core.trajectory import PosePath3D
-            import numpy as np
-            import pandas as pd
+    def terminate(self, processes: List, stream=None,gaussian_mapper_last_state=None):
+        """fill poses for non-keyframe images and evaluate"""
+        self.info("Initiating termination ...")
 
-            eval_save_path = "evaluation_results/"
-
-            #### Rendering evaluation ####
-            print("Initialize my evaluation in the termination method")
-            print("Shape of images:",self.video.images.shape)
-            print("Shape of poses:",self.video.poses.shape)
-            print("Shape of ground truth poses:",self.video.poses_gt.shape)
-            print("Check that gt poses are not empty:",self.video.poses_gt[25])
+        for i, p in enumerate(processes):
+            p.join()
+            self.info("Terminated process {}".format(p.name))
 
 
-
-            print("Number of cameras / frames:",len(self.evaluation_packet.cameras))
-            # print("Last index of gaussian_mapper:",self.gaussian_mapper.last_idx)
-
-            # # self.info("Retrieved mapper camera {}. Retrieved mapper last idx {}".format(retrieved_mapper.cameras,retrieved_mapper.last_idx))
-            # _, kf_indices = self.gaussian_mapper.select_keyframes()
-            # self.info("Selected keyframe indices:", kf_indices)
-
-            '''
-            We're passing only keyframes in self.evaluation_packet.cameras so kf_indcies is not used
-            '''
-            print("Gaussians:",type(self.evaluation_packet.gaussians),self.evaluation_packet.gaussians)
-
-            rendering_result = eval_rendering(
-                self.evaluation_packet.cameras,
-                self.evaluation_packet.gaussians,
-                self.dataset,
-                eval_save_path,
-                self.evaluation_packet.pipeline_params,
-                self.evaluation_packet.background,
-                kf_indices=[],
-                iteration="final",
-            )
-
-            self.info("Rendering loss: {}".format(rendering_result))
-
-
-            #### ------------------- ####
-
-            ### Trajectory evaluation ###
-
-            self.info("#" * 20 + f" Results for {stream.input_folder} ...")
-
-            timestamps = [i for i in range(len(stream))]
-            camera_trajectory = self.traj_filler(stream)  # w2cs
-            w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
-            camera_trajectory = w2w * camera_trajectory.inv()
-            traj_est = camera_trajectory.data.cpu().numpy()
-            estimate_c2w_list = camera_trajectory.matrix().data.cpu()
-
-            out_path = os.path.join(self.output, "checkpoints/est_poses.npy")
-            np.save(out_path, estimate_c2w_list.numpy())  # c2ws
-
-            ## TODO: change this for depth videos
-            """
-            Set keyframes_only to True to compute the APE and plots on keyframes only.
-            """
-            result_ate = eval_ate(
-                self.video,
-                kf_ids=list(range(len(self.video.images))),
-                save_dir=self.output,
-                iterations=-1,
-                final=True,
-                monocular=True,
-                keyframes_only=False,
-                camera_trajectory=camera_trajectory,
-                stream=stream,
-            )
-
-            out_path = os.path.join(eval_save_path, "metrics_traj.txt")
-
-            self.info("ATE: {}".format(result_ate))
-
-            trajectory_df = pd.DataFrame([result_ate])
-            trajectory_df.to_csv(os.path.join(self.output, "trajectory_results.csv"), index=False)
-
-            #### ------------------- ####
-
-            ## Joint metrics file ##
-
-            # ## TODO: add ATE
-            # columns = ["tag", "psnr", "ssim", "lpips","ape"]
-            # data = [
-            #     [
-            #         "optimizing + multiview ",
-            #         rendering_result["mean_psnr"],
-            #         rendering_result["mean_ssim"],
-            #         rendering_result["mean_lpips"],
-            #         result_ape.stats['mean']
-            #     ]
-            # ]
-
-            # df = pd.DataFrame(data, columns=columns)
-            # df.to_csv(os.path.join(eval_save_path,"metrics.csv"), index=False)
-
+        self.save_state()
+        if self.do_evaluate:
+            self.info("Doing evaluation!")
+            self.evaluate(stream, gaussian_mapper_last_state)
             self.info("Evaluation complete")
+
         self.info("Terminate: Done!")
 
-    # NOTE communication between tracking and show_stream works based on input_pipe
-    # Tracking feeds objects into input_pipe and show_stream reads from it
-
-    # FIXME communication between gaussian_mapping and the main thread here does not work.
-    # Why is that the case?
     def run(self, stream):
 
-
         processes = [
-            # NOTE The OpenCV thread always needs to be 0 to work somehow
+            # NOTE The OpenCV thread always needs to be 0 to work
             mp.Process(target=self.show_stream, args=(0, self.input_pipe), name="OpenCV Stream"),
-            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Tracking"),
-            mp.Process(target=self.optimizing, args=(2, False), name="Optimizing"),
+            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Frontend Tracking"),
+            mp.Process(target=self.backend, args=(2, False), name="Backend"),
             mp.Process(target=self.multiview_filtering, args=(3, False), name="Multiview Filtering"),
             mp.Process(target=self.visualizing, args=(4, True), name="Visualizing"),
             mp.Process(
@@ -470,26 +477,24 @@ class SLAM:
         for p in processes:
             p.start()
 
-        # Wait for final mapping update
-        while self.mapping_queue.empty():
+        # Wait for all processes to have finished before terminating and for final mapping update to be transmitted
+        while self.mapping_queue.empty() and self.all_finished < self.num_running_thread:
             pass
 
+        # Receive the final update, so we can do something with it ...
         a = self.mapping_queue.get()
+        gaussian_mapper_last_state = clone_obj(a)
         self.received_mapping.set()
-        # Do something with a
-        # self.info("From mapping queue: {}".format(a))
-        ## clone the packet for the evaluation process
-        self.evaluation_packet = clone_obj(a)
-        del a
+        del a  # NOTE Always delete receive object from a multiprocessing Queue!
 
-        # Wait for all processes to have finished, so we can be sure that the mapping queue is not empty, i.e. the last item has been put in
-        while self.all_finished < self.num_running_thread:
-            pass
 
-        for i, p in enumerate(processes):
-            self.info("Joining process {}".format(p.name))
-            p.join()
-            # FIXME we hang here for gaussian mapping
-            self.info("Joined process {}".format(p.name))
+        while self.backend_finished < 1 and self.gaussian_mapping_finished < 1:
+            self.info("Waiting Backend and Gaussian Renderer to finish ...")
+            # Make exception for configuration where we only have frontend tracking
+            if self.num_running_thread == 1 and self.tracking_finished > 0:
+                break
 
-        self.info("Run method is finished")  ## BUG: doesnt get here
+
+
+        self.terminate(processes,stream,gaussian_mapper_last_state)
+
