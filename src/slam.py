@@ -115,7 +115,6 @@ class SLAM:
         self.cfg = cfg
         self.device = cfg.slam.device
         self.mode = cfg.slam.mode
-        self.only_tracking = cfg.slam.only_tracking
 
         self.create_out_dirs(cfg)
         self.update_cam(cfg)
@@ -379,6 +378,7 @@ class SLAM:
 
         self.info("#" * 20 + f" Results for {stream.input_folder} ...")
 
+        ## Trajectory filler
         timestamps = [i for i in range(len(stream))]
         camera_trajectory = self.traj_filler(stream)  # w2cs
         w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
