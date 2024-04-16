@@ -83,7 +83,7 @@ class GaussianMapper(object):
         bg_color = [1, 1, 1]
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        if self.mapping_params.use_gui and not cfg.evaluate:
+        if self.mapping_params.use_gui and not cfg.slam.evaluate:
             self.q_main2vis = mp.Queue()
             self.q_vis2main = mp.Queue()
             self.params_gui = gui_utils.ParamsGUI(
