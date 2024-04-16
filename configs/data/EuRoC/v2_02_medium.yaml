@@ -1,8 +1,0 @@
-inherit_from: configs/EuRoC/euroc.yaml
-mode: stereo
-only_tracking: False
-mapping:
-  bound: [[-10, 10], [-10, 10], [-10, 20]]
-data:
-  input_folder: /media/data/EuRoC/V2_02_medium
-  output: ""
