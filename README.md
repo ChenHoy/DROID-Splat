@@ -188,9 +188,17 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
   - [x] Implement Gauss-Newton updates in Python on combined objective of Reprojection error and Depth prior loss with fixed pose graph
   - [x] Use a mixed residual objective in a true least-squares objective
 - [x] FIX bug in ellipsoid renderer
-- [ ] FIX bug in Gaussian Mapper and Multiview filter
-    - [ ] Which array creates the memory access error?
-    - [ ] How can we resolve this?
+- [x] FIX memory error in CUDA kernel
+    - This turned out to be a problem in Eigen. You cant damp the sparse system matrix with a dense diagonal matrix using the += operator.
+    - Instead iterating over the diagonal elements is safe and still super fast
+- [x] FIX bug in Gaussian Mapper and Multiview filter
+    - [x] Which array creates the memory access error? -> Multi-thread acces on video data structure needs to be locked
+    - [x] How can we resolve this? -> Lock indexing common data, do not mix .cpu() calls when indexing on GPU arrays!
+- [x] FIX instable SLAM system on TartanAir scenes
+    - [x] Move loop closure away from frontend into backend  
+        -> This makes more sense, as the frontend would suddenly grow without control and not optimize only locally
+    - [x] Safeguard the Backend to avoid OOM in case the scene gets too big
+    - [x] Make system more memory efficient -> Empty cache in frontend as speed/memory tradeoff
 - [ ] FIX bug in scale optimization / Python BA on outdoor scenes
     - [ ] Optimization turns instable over longer windows and large scenes. What is the source?
     - [ ] Fix scale parameters after optimizing them once?
