@@ -202,6 +202,7 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
 - [ ] FIX bug in scale optimization / Python BA on outdoor scenes
     - [ ] Optimization turns instable over longer windows and large scenes. What is the source?
     - [ ] Fix scale parameters after optimizing them once?
+- [ ] Use both multi-view consistency and uncertainty to filter the map before sending to Renderer
 - [ ] Backpropagate the pose loss from the Rendering objective into the SLAM tracking
     - [x] Optimize poses with additional optimizer
     - [ ] Evaluate optimized poses with new metrics
