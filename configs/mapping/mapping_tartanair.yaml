@@ -5,7 +5,6 @@ optimize_last: 10
 optimize_rand: 10
 max_cameras: 5
 
-use_gui: True
 optimize_poses: False
 update_frames: True
 save_renders: True

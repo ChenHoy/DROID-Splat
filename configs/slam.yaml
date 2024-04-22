@@ -20,8 +20,9 @@ slam:
   run_multiview_filter: True
   run_mapping: True
   run_visualization: False
-  show_stream: False
+  run_mapping_gui: True
 
+  show_stream: False
 
 
 hydra:

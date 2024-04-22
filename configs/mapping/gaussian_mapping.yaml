@@ -21,8 +21,8 @@ opt_params:
   rotation_lr: 0.001
   percent_dense: 0.01
 
-  cam_rot_delta: 0.0003
-  cam_trans_delta: 0.0001
+  cam_rot_delta: 0.00003
+  cam_trans_delta: 0.00001
 
   
 

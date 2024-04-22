@@ -73,7 +73,7 @@ class GaussianMapper(object):
     SLAM from Rendering with 3D Gaussian Splatting.
     """
 
-    def __init__(self, cfg, slam, mapping_queue=None):
+    def __init__(self, cfg, slam, mapping_queue=None, gui_qs=None):
         self.cfg = cfg
         self.slam = slam
         self.video = slam.video
@@ -96,22 +96,13 @@ class GaussianMapper(object):
         self.gaussians.init_lr(6.0)
         self.gaussians.training_setup(self.opt_params)
 
-        bg_color = [1, 1, 1]
-        self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        if self.mapping_params.use_gui and not self.cfg.slam.evaluate:
-            self.q_main2vis = mp.Queue()
-            self.q_vis2main = mp.Queue()
-            self.params_gui = gui_utils.ParamsGUI(
-                pipe=self.pipeline_params,
-                background=self.background,
-                gaussians=self.gaussians,
-                q_main2vis=self.q_main2vis,
-                q_vis2main=self.q_vis2main,
-            )
-            gui_process = mp.Process(target=slam_gui.run, args=(self.params_gui,))
-            gui_process.start()
-            self.info("GUI process started!")
+        if gui_qs is not None:
+            bg_color = [1, 1, 1]
+            self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+            self.q_main2vis, self.q_vis2main = gui_qs
+            self.use_gui = True
+
 
         self.cameras = []
         self.new_cameras = []
@@ -125,7 +116,8 @@ class GaussianMapper(object):
 
         self.show_filtered = False
 
-        self.mapping_queue = mapping_queue
+        if mapping_queue is not None:
+            self.mapping_queue = mapping_queue
 
     def info(self, msg: str):
         print(colored("[Gaussian Mapper] " + msg, "magenta"))
@@ -158,8 +150,6 @@ class GaussianMapper(object):
         """
         Get all new cameras from the video.
         """
-        max_cam = 5
-
         for idx in range(self.last_idx, self.cur_idx - self.delay):
             color, depth, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
             color = color.permute(2, 0, 1)
@@ -168,10 +158,9 @@ class GaussianMapper(object):
             cam.update_RT(cam.R_gt, cam.T_gt) # Assuming we found the best pose in tracking
 
             self.new_cameras.append(cam)
-            if len(self.new_cameras) >= max_cam:
+            if len(self.new_cameras) >= self.mapping_params.max_cameras:
                 return
         
-
     def camera_from_frame(
         self, idx: int, image: torch.Tensor, depth: torch.Tensor, intrinsic: torch.Tensor, gt_pose: torch.Tensor
     ):
@@ -299,17 +288,19 @@ class GaussianMapper(object):
             disps = torch.index_select(self.video.disps_up.detach(), dim=0, index=all_idxs)
             intrinsics = self.video.intrinsics[0] * self.video.scale_factor
 
-
         depths = 1 / (disps + 1e-7)
-        thresh = self.filter_params.neighbor_th * torch.ones_like(disps.mean(dim=[1, 2]))
-        count = droid_backends.depth_filter(poses, disps, intrinsics, all_idxs, thresh)
-        mask = (count >= self.filter_params.neighbor_count) \
-            & (disps > self.filter_params.disp_th * disps.mean(dim=[1, 2], keepdim=True))
-        depths = depths * mask
+
+        if self.filter_params.filter_depth:
+            thresh = self.filter_params.neighbor_th * torch.ones_like(disps.mean(dim=[1, 2]))
+            count = droid_backends.depth_filter(poses, disps, intrinsics, all_idxs, thresh)
+            mask = (count >= self.filter_params.neighbor_count) \
+                    & (disps > self.filter_params.disp_th * disps.mean(dim=[1, 2], keepdim=True))
+            depths = depths * mask
 
         for idx in dirty_index:
-            if mask[idx].sum() == 0:
-                print(" \n\n No valid points in frame \n\n", idx)
+
+            # if mask[idx].sum() == 0:
+            #     self.info(" \n\n No valid points in frame \n\n", idx)
             #self.info(f"Frame {idx}: filtered {100*(1 - mask[idx].sum() / mask[idx].numel()):.2f}% of the points")
             _, _, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
             cam = all_cameras[idx]
@@ -343,7 +334,7 @@ class GaussianMapper(object):
         Takes the list of selected keyframes to optimize and performs one step of the mapping optimization.
         """
         if self.mapping_params.optimize_poses:
-            pose_optimizer = self.pose_optimizer(self.cameras)
+            pose_optimizer = self.pose_optimizer(frames)
         loss = 0
         self.occ_aware_visibility = {}
         for view in frames:
@@ -373,7 +364,8 @@ class GaussianMapper(object):
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
             if self.last_idx > self.n_last_frames and (iter + 1) % self.pruning_params.prune_every == 0:
-                self.prune_gaussians() # Covisibility based pruning for recently added gaussians 
+                if self.mode != "rgbd":
+                    self.prune_gaussians() # Covisibility based pruning for recently added gaussians 
                 self.gaussians.densify_and_prune( # General pruning based on opacity and size + densification
                 pruning_params.densify_grad_threshold,
                 pruning_params.gaussian_th,
@@ -384,7 +376,7 @@ class GaussianMapper(object):
 
             self.gaussians.optimizer.step()
             self.gaussians.optimizer.zero_grad()
-            self.gaussians.update_learning_rate(self.last_idx)
+            self.gaussians.update_learning_rate(10*self.last_idx) # Only taking keyframes, the update is to small
 
             if optimize_poses:
                 pose_optimizer.step()
@@ -485,9 +477,14 @@ class GaussianMapper(object):
                     iter, frames, self.pruning_params.mapping, densify=True, optimize_poses=False
                 )
                 self.loss_list.append(loss / len(frames))
+
+            for param_group in self.gaussians.optimizer.param_groups:
+                if param_group["name"] == "xyz":
+                    print(param_group["lr"])
+                
                 
             # Update visualization
-            if self.mapping_params.use_gui:
+            if self.use_gui:
                 self.q_main2vis.put(
                     gui_utils.GaussianPacket(
                         gaussians=clone_obj(self.gaussians),
@@ -523,7 +520,7 @@ class GaussianMapper(object):
                 )
                 self.loss_list.append(loss / len(self.cameras))
 
-                if self.mapping_params.use_gui:
+                if self.use_gui:
                     self.q_main2vis.put(
                         gui_utils.GaussianPacket(
                             gaussians=clone_obj(self.gaussians),
@@ -551,6 +548,8 @@ class GaussianMapper(object):
             ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.mapping_params.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
             ax.plot(self.loss_list[-self.mapping_params.refinement_iters:])
             plt.savefig(f"{self.output}/refinement_loss_{self.mode}.png")
+
+            self.info(f"Final loss: {self.loss_list[-1]}")
 
             if self.cfg.slam.evaluate:
                 ## export the cameras and gaussians to the terminate process

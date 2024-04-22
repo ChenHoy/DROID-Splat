@@ -25,6 +25,8 @@ from .visualization import droid_visualization, depth2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .gaussian_mapping import GaussianMapper
 from .gaussian_splatting.eval_utils import eval_ate, eval_rendering, save_gaussians
+from .gaussian_splatting.gui import gui_utils, slam_gui
+
 from multiprocessing import Manager
 
 
@@ -147,10 +149,25 @@ class SLAM:
 
         # post processor - fill in poses for non-keyframes
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
-        self.gaussian_mapper = GaussianMapper(cfg, self)
 
         self.do_evaluate = cfg.slam.evaluate
         self.dataset = None
+
+        if cfg.slam.run_mapping_gui:
+            self.q_main2vis = mp.Queue()
+            self.q_vis2main = mp.Queue()
+            self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs = (self.q_main2vis, self.q_vis2main))
+        else:
+            self.gaussian_mapper = GaussianMapper(cfg, self)
+
+        if cfg.slam.run_mapping_gui:
+            self.params_gui = gui_utils.ParamsGUI(
+                pipe=cfg.mapping.pipeline_params,
+                background=self.gaussian_mapper.background,
+                gaussians=self.gaussian_mapper.gaussians,
+                q_main2vis=self.q_main2vis,
+                q_vis2main=self.q_vis2main,
+            )
 
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
@@ -295,6 +312,20 @@ class SLAM:
         self.all_finished += 1
         self.info("Visualization done!")
 
+    def mapping_gui(self, rank, run=True):
+        self.info("Mapping GUI thread started!")
+        self.all_trigered += 1
+        if run:
+            slam_gui.run(self.params_gui)
+
+        while (self.gaussian_mapping_finished < 1 ) and run:
+            pass
+
+        print(self.gaussian_mapper.gaussians[0].shape)
+
+        self.all_finished += 1
+        self.info("Mapping GUI done!")
+
 
     def show_stream(self, rank, input_queue: mp.Queue) -> None:
         self.info("OpenCV Image stream thread started!")
@@ -410,7 +441,8 @@ class SLAM:
             mp.Process(target=self.backend, args=(2, self.cfg.slam.run_backend)),
             mp.Process(target=self.multiview_filtering, args=(3, self.cfg.slam.run_multiview_filter)),
             mp.Process(target=self.visualizing, args=(4, self.cfg.slam.run_visualization)),
-            mp.Process(target=self.gaussian_mapping, args=(5, self.cfg.slam.run_mapping)),
+            mp.Process(target=self.mapping_gui, args=(5, self.cfg.slam.run_mapping_gui and self.cfg.slam.run_mapping)),
+            mp.Process(target=self.gaussian_mapping, args=(6, self.cfg.slam.run_mapping)),
         ]
 
         self.num_running_thread[0] += len(processes)
