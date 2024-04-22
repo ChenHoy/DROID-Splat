@@ -1,13 +1,13 @@
 warmup: 0 # Wait until tracking gets to this frame
-mapping_iters: 50 # At each new frame, 10 views
+mapping_iters: 100 # At each new frame, 10 views
 refinement_iters: 100 # Once at the end, all views
 optimize_last: 10
 optimize_rand: 10
+max_cameras: 5
 
 use_gui: True
 optimize_poses: False
 update_frames: True
-filter_depth: False
 save_renders: True
 
 opt_params:
@@ -40,6 +40,7 @@ loss:
   isotropic: 5 # Weight on the isotropic loss term
 
 filter:
+  filter_depth: True
   neighbor_th: 0.5
   neighbor_count: 1
   disp_th: 0.01

@@ -1,13 +1,13 @@
 warmup: 0 # Wait until tracking gets to this frame
-mapping_iters: 50 # At each new frame, 10 views
-refinement_iters: 200 # Once at the end, all views
+mapping_iters: 100 # At each new frame, the selected views are optimized for this many iterations
+refinement_iters: 200 # Once at the end, all views are optimized for this many iterations
 optimize_last: 10
 optimize_rand: 10
+max_cameras: 5
 
 use_gui: True
 optimize_poses: False
 update_frames: True
-filter_depth: False
 save_renders: True
 
 opt_params:
@@ -40,6 +40,7 @@ loss:
   isotropic: 2 # Weight on the isotropic loss term
 
 filter:
+  filter_depth: True
   neighbor_th: 0.5
   neighbor_count: 1
   disp_th: 0.05
@@ -50,7 +51,7 @@ pruning:
   prune_last: 5
 
   mapping:
-    densify_grad_threshold: 0.0001
+    densify_grad_threshold: 0.0001  # Main threshold for densification
     size_threshold: 20
     gaussian_th: 0.005
     gaussian_extent: 10

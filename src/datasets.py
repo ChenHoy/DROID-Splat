@@ -306,6 +306,35 @@ class TartanAir(BaseDataset):
             self.poses.append(c2w)
 
 
+class KITTI(BaseDataset):
+    def __init__(self, cfg, device="cuda:0"):
+        super(KITTI, self).__init__(cfg, device)
+        stride = cfg.slam.stride
+        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_2/*.png")))
+        # Set number of images for loading poses
+        self.n_img = len(self.color_paths)
+        # For Pseudo RGBD, we use monocular depth predictions in another folder
+        if cfg.slam.mode == "prgbd":
+            self.depth_paths = sorted(
+                glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy")) # Use ZoeDepth predictions
+                # glob.glob(
+                #     os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy")
+                # )  # Use DepthAnything predictions
+            )
+            assert (
+                len(self.depth_paths) == self.n_img
+            ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
+            self.depth_paths = self.depth_paths[::stride]
+
+        else:
+            self.depth_paths = None
+
+        self.color_paths = self.color_paths[::stride]
+
+        self.poses = [np.eye(4) for _ in range(self.n_img)] # Fake gt poses
+
+
+
 class Azure(BaseDataset):
     def __init__(self, cfg, args, device="cuda:0"):
         super(Azure, self).__init__(cfg, args, device)
@@ -837,4 +866,5 @@ dataset_dict = {
     "eth3d": ETH3D,
     "euroc": EuRoC,
     "tartanair": TartanAir,
+    "kitti": KITTI,
 }
