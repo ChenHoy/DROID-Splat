@@ -1,11 +1,10 @@
 warmup: 0 # Wait until tracking gets to this frame
 mapping_iters: 100 # At each new frame, the selected views are optimized for this many iterations
-refinement_iters: 200 # Once at the end, all views are optimized for this many iterations
+refinement_iters: 100 # Once at the end, all views are optimized for this many iterations
 optimize_last: 10
 optimize_rand: 10
 max_cameras: 5
 
-use_gui: True
 optimize_poses: False
 update_frames: True
 save_renders: True
@@ -49,17 +48,18 @@ pruning:
   prune_every: 25
   visibility_th: 5
   prune_last: 5
+  final_visibility_th: 2
 
   mapping:
-    densify_grad_threshold: 0.0001  # Main threshold for densification
-    size_threshold: 20
-    gaussian_th: 0.005
-    gaussian_extent: 10
+    densify_grad_threshold: 0.00005  # Main threshold for densification
+    size_threshold: 15
+    opacity_th: 0.005
+    gaussian_extent: 5
 
   refinement:
     densify_grad_threshold: 0.0002
-    size_threshold: 20
-    gaussian_th: 0.05
+    size_threshold: 10
+    opacity_th: 0.05
     gaussian_extent: 5
 
 

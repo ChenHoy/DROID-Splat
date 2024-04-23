@@ -20,8 +20,8 @@ opt_params:
   rotation_lr: 0.001
   percent_dense: 0.01
 
-  cam_rot_delta: 0.0003
-  cam_trans_delta: 0.0001
+  cam_rot_delta: 0.00003
+  cam_trans_delta: 0.00001
 
   
 
@@ -48,17 +48,18 @@ pruning:
   prune_every: 30
   visibility_th: 5
   prune_last: 5
+  final_visibility_th: 2
 
   mapping:
     densify_grad_threshold: 0.00005
-    size_threshold: 20
-    gaussian_th: 0.05
+    size_threshold: 15
+    opacity_th: 0.05
     gaussian_extent: 5
 
   refinement:
     densify_grad_threshold: 0.0002
-    size_threshold: 20
-    gaussian_th: 0.05
+    size_threshold: 10
+    opacity_th: 0.05
     gaussian_extent: 3
 
 

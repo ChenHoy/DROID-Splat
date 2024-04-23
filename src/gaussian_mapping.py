@@ -237,8 +237,6 @@ class GaussianMapper(object):
 
         return torch.optim.Adam(opt_params)
 
-    # FIXME this can fail when dirty index is empty
-    # TODO chen: why does this even depend on dirty index, when we call it with last_idx?!
     def depth_filter(self, idx: int):
         """
         Gets the video and the time idex and returns the mask.
@@ -350,8 +348,7 @@ class GaussianMapper(object):
 
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-        # TODO chen: is this 5 simply because of the number of random frames or a hyperparameter?
-        loss += self.loss_params.isotropic * len(frames) * isotropic_loss.mean()  # TODO chen: why was the 5 not in the previous commits?
+        loss += self.loss_params.isotropic * len(frames) * isotropic_loss.mean() 
         loss.backward()
 
         with torch.no_grad():
@@ -364,11 +361,11 @@ class GaussianMapper(object):
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
             if self.last_idx > self.n_last_frames and (iter + 1) % self.pruning_params.prune_every == 0:
-                if self.mode != "rgbd":
-                    self.prune_gaussians() # Covisibility based pruning for recently added gaussians 
+                # if self.mode != "rgbd":
+                #     self.covisibility_pruning() # Covisibility based pruning for recently added gaussians 
                 self.gaussians.densify_and_prune( # General pruning based on opacity and size + densification
                 pruning_params.densify_grad_threshold,
-                pruning_params.gaussian_th,
+                pruning_params.opacity_th,
                 pruning_params.gaussian_extent,
                 pruning_params.size_threshold,
                 )
@@ -403,8 +400,7 @@ class GaussianMapper(object):
 
         return alpha * l1_rgb.mean() + (1 - alpha) * l1_depth.mean()
     
-    # TODO implement and use this
-    def prune_gaussians(self):
+    def covisibility_pruning(self):
         """Covisibility based pruning"""
 
         new_frames = (self.cameras + self.new_cameras)[-self.n_last_frames :] 
@@ -425,7 +421,33 @@ class GaussianMapper(object):
             self.occ_aware_visibility[idx] = self.occ_aware_visibility[idx][~to_prune]
         self.info(f"Covisibility based pruning removed {to_prune.sum()} gaussians")
 
-    # TODO chen: make the 5 configurable, because this should be treated as a hyperparameter
+
+    def final_covisibility(self, threshold:int=None):
+        """
+        Absolute covisibility based pruning. Removes all gaussians 
+        that are not seen in at least final_visibility_th views.
+        """
+
+        self.occ_aware_visibility = {}
+        for view in (self.cameras + self.new_cameras):
+            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background)
+            self.occ_aware_visibility[view.uid] = (render_pkg["n_touched"] > 0).long()
+
+        #print(self.occ_aware_visibility[1])
+        self.gaussians.n_obs.fill_(0)
+        for _, visibility in self.occ_aware_visibility.items():
+            self.gaussians.n_obs += visibility.cpu()
+
+        if threshold is None:
+            threshold = self.pruning_params.final_visibility_th
+
+        mask = self.gaussians.n_obs < threshold
+        self.gaussians.prune_points(mask.cuda())
+        self.info(f"Final pruning removed {mask.sum()} gaussians")
+        
+
+
+
     def select_keyframes(self):
         # Select n_last_frames and other n_rand_frames
         if len(self.cameras) <= self.n_last_frames + self.n_rand_frames:
@@ -438,23 +460,22 @@ class GaussianMapper(object):
 
     def __call__(self, the_end=False):
         self.cur_idx = int(self.video.filtered_id.item()) 
+
+        if self.cur_idx <= self.mapping_params.warmup: # Not starting mapping yet
+            return
         
-        # TODO make conditional more readable
-        # TODO refactor so this is cleaner
-        if self.last_idx+self.delay < self.cur_idx and self.cur_idx > self.mapping_params.warmup:
+        if (self.last_idx < self.cur_idx - self.delay):
             
             msg = "Last frame: {}. Gaussians: {}. Video at {}".format(self.last_idx, self.gaussians.get_xyz.shape[0], self.cur_idx)
             self.info(msg)
-
 
             # Add all new cameras
             self.get_new_cameras()
             self.last_idx = self.new_cameras[-1].uid + 1
 
             self.info(f"Added {len(self.new_cameras)} new cameras: {[cam.uid for cam in self.new_cameras]}")
-
-            self.frame_updater() # Filter dirty and new cameras
-
+            # Filter depth and update pose for dirty and new cameras
+            self.frame_updater() 
 
 
             for cam in self.new_cameras:
@@ -478,9 +499,12 @@ class GaussianMapper(object):
                 )
                 self.loss_list.append(loss / len(frames))
 
-            for param_group in self.gaussians.optimizer.param_groups:
-                if param_group["name"] == "xyz":
-                    print(param_group["lr"])
+            # for param_group in self.gaussians.optimizer.param_groups:
+            #     if param_group["name"] == "xyz":
+            #         print(param_group["lr"])
+
+            if self.last_idx % 1 == 0:
+                self.final_covisibility()
                 
                 
             # Update visualization
@@ -498,7 +522,6 @@ class GaussianMapper(object):
                 )
 
 
-
             # Save renders
             if self.mapping_params.save_renders and cam.uid % 5 == 0:
                 self.save_render(cam, f"{self.output}/renders/mapping/{cam.uid}.png")
@@ -507,8 +530,9 @@ class GaussianMapper(object):
             self.cameras += self.new_cameras
             self.new_cameras = []
 
-        elif the_end and self.last_idx + self.delay == self.cur_idx:
+        elif the_end and self.last_idx == self.cur_idx - self.delay:
             self.info("Mapping refinement starting")
+            self.final_covisibility(threshold=3)
 
             for iter in range(self.mapping_params.refinement_iters):
                 loss = self.mapping_step(
@@ -524,10 +548,17 @@ class GaussianMapper(object):
                     self.q_main2vis.put(
                         gui_utils.GaussianPacket(
                             gaussians=clone_obj(self.gaussians),
-                            keyframes=self.cameras,
                         )
                     )
             self.info("Mapping refinement finished")
+
+            if self.use_gui:
+                    self.q_main2vis.put(
+                        gui_utils.GaussianPacket(
+                            gaussians=clone_obj(self.gaussians),
+                        )
+                    )
+
 
             self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
             self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")

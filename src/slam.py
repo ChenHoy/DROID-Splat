@@ -157,10 +157,6 @@ class SLAM:
             self.q_main2vis = mp.Queue()
             self.q_vis2main = mp.Queue()
             self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs = (self.q_main2vis, self.q_vis2main))
-        else:
-            self.gaussian_mapper = GaussianMapper(cfg, self)
-
-        if cfg.slam.run_mapping_gui:
             self.params_gui = gui_utils.ParamsGUI(
                 pipe=cfg.mapping.pipeline_params,
                 background=self.gaussian_mapper.background,
@@ -168,6 +164,10 @@ class SLAM:
                 q_main2vis=self.q_main2vis,
                 q_vis2main=self.q_vis2main,
             )
+        else:
+            self.gaussian_mapper = GaussianMapper(cfg, self)
+
+            
 
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
@@ -317,11 +317,6 @@ class SLAM:
         self.all_trigered += 1
         if run:
             slam_gui.run(self.params_gui)
-
-        while (self.gaussian_mapping_finished < 1 ) and run:
-            pass
-
-        print(self.gaussian_mapper.gaussians[0].shape)
 
         self.all_finished += 1
         self.info("Mapping GUI done!")
