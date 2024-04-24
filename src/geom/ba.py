@@ -1,5 +1,6 @@
 import ipdb
 from typing import Optional
+from termcolor import colored
 
 import torch
 from einops import rearrange, einsum, reduce
@@ -199,9 +200,11 @@ def bundle_adjustment(
             ba_function = BA
 
     #### Bundle Adjustment Loop
+    disps.clamp_(min=0.001)  # Disparities should never be negative
     for i in range(iters):
         ba_function(*args, **skwargs, ep=ep, lm=lm)
-        disps.clamp(min=0.001)  # Disparities should never be negative
+        disps.clamp_(min=0.001)  # Disparities should never be negative
+    
     ####
 
     # Update data structure
@@ -652,7 +655,7 @@ def BA_prior(
     # Residuals for r2(disps, s, o) (B, N, HW)
     scaled_prior = disps_sens[:, kx_exp].view(bs, -1, ht * wd) * scales[:, kx_exp, None] + shifts[:, kx_exp, None]
     # Prior should never be negative, i.e. clip this if s and o are diverging
-    scaled_prior = scaled_prior.clamp(min=0.001)
+    scaled_prior.clamp_(min=0.001)
 
     ## Rescale the prior residuals according to estimated uncertainty
     # NOTE this gets rid of strong outliers like the sky or dynamic objects for scale adjustment
@@ -759,6 +762,9 @@ def reduce_edge_weights(weights: torch.Tensor, ii: torch.Tensor, strategy: str =
     return torch.stack(reduced, dim=1)
 
 
+# FIXME we get a Cholesky decomposition fail on outdoor scenes on TartanAir here
+# TODO it looks like the cause here is that we are already near an optimum structure wise and have very little confident matches
+# how can you skip this?
 def BA_prior_no_motion(
     target: torch.Tensor,
     weight: torch.Tensor,
@@ -791,6 +797,9 @@ def BA_prior_no_motion(
     bs, m, ht, wd = disps.shape
 
     ### 1: compute jacobians and residuals ###
+    # FIXME Jz makes trouble here
+    # if disps are not clipped correctly you get inf / nans
+    # Somehow even with valid disps, we get a -inf
     coords, valid, (Ji, Jj, Jz) = projective_transform(poses, disps, intrinsics, ii, jj, jacobian=True)
     Jz, Ji, Jj = -Jz.double(), -Ji.double(), -Jj.double()
 
@@ -821,12 +830,13 @@ def BA_prior_no_motion(
     w_exp[:, non_empty_nodes] = w
 
     eta = rearrange(eta, "n h w -> 1 n (h w)")
+    # TODO maybe dont damp and use alpha at the same time
     C_exp = C_exp + alpha * 1.0 + eta
     C_exp = rearrange(C_exp, "b n hw -> b (n hw) 1 1")
 
     scaled_prior = disps_sens[:, kx_exp].view(bs, -1, ht * wd) * scales[:, kx_exp, None] + shifts[:, kx_exp, None]
     # Prior should never be negative, i.e. clip this if s and o are diverging
-    scaled_prior = scaled_prior.clamp(min=0.001)
+    scaled_prior.clamp_(min=0.001)
 
     ## Rescale the prior residuals according to estimated uncertainty
     # NOTE this gets rid of strong outliers like the sky or dynamic objects for scale adjustment
@@ -841,9 +851,9 @@ def BA_prior_no_motion(
         all_conf = torch.zeros((bs, n_exp, ht * wd), device=weight.device, dtype=torch.float64)
         all_conf[:, non_empty_nodes] = confidence
         # always ensure to have enough residuals to actually optimize over
-        # NOTE this is just a drastic measure to ensure a positive definite system matrix
-        # if confidence.sum() < 0.1 * n * ht * wd:
-        #     all_conf = torch.ones_like(all_conf, device=confidence.device, dtype=torch.float64)
+        # NOTE this is just a drastic measure to stabilize the system in case there are no confident matches
+        if confidence.sum() < 0.05 * n * ht * wd:
+            all_conf = torch.ones_like(all_conf, device=confidence.device, dtype=torch.float64)
     else:
         all_conf = torch.ones((bs, n_exp, ht * wd), device=weight.device, dtype=torch.float64)
 
@@ -880,6 +890,8 @@ def BA_prior_no_motion(
     ### 4: Solve whole system with dX, ds, do, dZ ###
     dso, dz, was_success = schur_solve(H, E, C_exp, v, w_exp, ep=ep, lm=lm, return_state=True)
     if not was_success:
+        print(colored("Entering debug mode ...", "red"))
+        ipdb.set_trace()
         dso, dz = schur_solve(H, E, C_exp, v, w_exp, ep=ep, lm=lm, solver="lu")
     ds, do = dso[:, :n_exp], dso[:, n_exp:]
     dz = rearrange(dz, "b (n h w) -> b n h w", n=n_exp, h=ht, w=wd)

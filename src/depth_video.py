@@ -64,7 +64,7 @@ class DepthVideo:
         self.disps_sens = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         # Scale and shift parameters for ambiguous monocular depth
         self.optimize_scales = cfg["mode"] == "prgbd"  # Optimze the scales and shifts for Pseudo-RGBD mode
-        self.warmup_prior = 50  # cfg["tracking"]["warmup_prior"]
+        self.warmup_prior = 0  # cfg["tracking"]["warmup_prior"]
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
         # In case we have an external groundtruth
@@ -121,6 +121,8 @@ class DepthVideo:
         if item[4] is not None:
             self.depths_gt[index] = item[4]
             depth = item[4][..., 3::8, 3::8]
+            # Clamp negative depth to a small value
+            depth.clamp_(min=0.001)
             self.disps_sens[index] = torch.where(depth > 0, 1.0 / depth, depth)
             # If we have a prior, we initialize disparity with the prior
             self.disps[index] = self.disps_sens[index].clone()
@@ -289,6 +291,8 @@ class DepthVideo:
         """
         # Rescale the external disparities
         self.disps_sens = self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
+        # Always ensure that disparities are non-negative!!!
+        self.disps_sens.clamp_(min=0.001)
         # Reset the scale and shift parameters to initial state
         self.scales = torch.ones_like(self.scales)
         self.shifts = torch.zeros_like(self.shifts)
@@ -432,6 +436,7 @@ class DepthVideo:
                     True,
                     self.opt_intr,
                 )
+
                 # JDSA
                 bundle_adjustment(
                     target,
