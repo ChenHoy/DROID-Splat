@@ -1,4 +1,5 @@
 import torch
+from termcolor import colored
 import ipdb
 from einops import einsum, rearrange
 
@@ -32,7 +33,7 @@ class LUSolver(torch.autograd.Function):
             ctx.save_for_backward(lu, pivots, xs)
             ctx.failed = False
         except Exception as e:
-            print(e)
+            print(colored("Warning. LU Decomposition failed!", "red"))
             ctx.failed = True
             xs = torch.zeros_like(b)
 
@@ -61,7 +62,7 @@ class CholeskySolver(torch.autograd.Function):
             ctx.save_for_backward(U, xs)
             ctx.failed = False
         except Exception as e:
-            print(e)
+            print(colored("Warning. Cholesky Decomposition failed!", "red"))
             ctx.failed = True
             xs = torch.zeros_like(b)
 
@@ -213,7 +214,6 @@ def schur_solve(
     A = S + (ep + lm * S) * torch.eye(S.shape[1], device=S.device)
     dX = Solver.apply(A, y)
     if torch.isnan(dX).any():
-        print("Decomposition of Schur complement failed!")
         dX = torch.zeros_like(dX)
         success = False
     else:
