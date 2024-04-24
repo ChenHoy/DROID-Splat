@@ -762,9 +762,6 @@ def reduce_edge_weights(weights: torch.Tensor, ii: torch.Tensor, strategy: str =
     return torch.stack(reduced, dim=1)
 
 
-# FIXME we get a Cholesky decomposition fail on outdoor scenes on TartanAir here
-# TODO it looks like the cause here is that we are already near an optimum structure wise and have very little confident matches
-# how can you skip this?
 def BA_prior_no_motion(
     target: torch.Tensor,
     weight: torch.Tensor,
@@ -797,9 +794,6 @@ def BA_prior_no_motion(
     bs, m, ht, wd = disps.shape
 
     ### 1: compute jacobians and residuals ###
-    # FIXME Jz makes trouble here
-    # if disps are not clipped correctly you get inf / nans
-    # Somehow even with valid disps, we get a -inf
     coords, valid, (Ji, Jj, Jz) = projective_transform(poses, disps, intrinsics, ii, jj, jacobian=True)
     Jz, Ji, Jj = -Jz.double(), -Ji.double(), -Jj.double()
 
