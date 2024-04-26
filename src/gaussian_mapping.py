@@ -73,7 +73,7 @@ class GaussianMapper(object):
     SLAM from Rendering with 3D Gaussian Splatting.
     """
 
-    def __init__(self, cfg, slam, mapping_queue=None):
+    def __init__(self, cfg, slam):
         self.cfg = cfg
         self.slam = slam
         self.video = slam.video

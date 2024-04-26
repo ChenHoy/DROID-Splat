@@ -394,9 +394,7 @@ class SLAM:
         # out_path = os.path.join(self.output, "checkpoints/est_poses.npy")
         # np.save(out_path, estimate_c2w_list.numpy())  # c2ws
 
-        ## TODO: change this for depth videos
         # Set keyframes_only to True to compute the APE and plots on keyframes only.
-
         monocular = self.cfg.slam.mode == "mono"
 
         result_ate = eval_ate(
@@ -451,10 +449,12 @@ class SLAM:
 
         for i, p in enumerate(processes):
             p.join()
-            self.info("Terminated process {}".format(p.name))
+            self.info("Terminated process {}".format(p.name)) ## not terminating gaussian mapping here
 
 
         self.save_state()
+        print("Reached here") ## this is not reached
+        print("Evaluation: {}".format(self.do_evaluate))
         if self.do_evaluate:
             self.info("Doing evaluation!")
             self.evaluate(stream, gaussian_mapper_last_state)
@@ -494,6 +494,9 @@ class SLAM:
         del a  # NOTE Always delete receive object from a multiprocessing Queue!
 
 
+        print("I received {}".format(gaussian_mapper_last_state.cameras))
+        print("I received {}".format(gaussian_mapper_last_state.gaussians))
+
         while self.backend_finished < 1 and self.gaussian_mapping_finished < 1:
             self.info("Waiting Backend and Gaussian Renderer to finish ...")
             # Make exception for configuration where we only have frontend tracking
@@ -502,4 +505,4 @@ class SLAM:
 
 
 
-        self.terminate(processes,stream,gaussian_mapper_last_state)
+        self.terminate(processes,stream,gaussian_mapper_last_state) ## this is reached
