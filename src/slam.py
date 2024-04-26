@@ -308,7 +308,7 @@ class SLAM:
 
         self.gaussian_mapping_finished += 1
         self.all_finished += 1
-        self.info("Gaussian Mapping Done!")
+        self.info("Gaussian Mapping Done!") ## this is reached 
 
     def visualizing(self, rank, run=True):
         self.info("Visualization thread started!")
