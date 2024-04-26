@@ -191,16 +191,22 @@ class ImageFolder(BaseDataset):
         super(ImageFolder, self).__init__(cfg, args, device)
         stride = cfg["stride"]
         # Get either jpg or png files
-        input_images = os.path.join(self.input_folder, "*.jpg")
+        input_images = os.path.join(self.input_folder, "images", "*.jpg")
         self.color_paths = sorted(glob.glob(input_images))
         if len(self.color_paths) == 0:
-            input_images = os.path.join(self.input_folder, "*.png")
+            input_images = os.path.join(self.input_folder, "images", "*.png")
             self.color_paths = sorted(glob.glob(input_images))
-
-        # TODO create your own RGBD dataset based on monocular depth predictions from some model like ZoeDepth / Monodepth2 / MiDaS
         self.color_paths = self.color_paths[::stride]
-        self.n_img = len(self.color_paths)
 
+        depth_paths = os.path.join(self.input_folder, "zoed-nk", "*.npy")
+        if len(depth_paths) != 0:
+            self.depth_paths = sorted(glob.glob(depth_paths))
+            self.depth_paths = self.depth_paths[::stride]
+            assert len(self.depth_paths) == len(
+                self.color_paths
+            ), "Number of depth maps does not match number of images"
+
+        self.n_img = len(self.color_paths)
         assert self.n_img > 0, f"No images found in {self.input_folder}"
 
 
@@ -254,12 +260,11 @@ class TartanAir(BaseDataset):
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_left/*.png")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
-        print("found {} images".format(self.n_img))
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg["mode"] == "prgbd":
             self.depth_paths = sorted(
-                # glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
-                glob.glob(os.path.join(self.input_folder, "depthany-vitl-indoor/*.npy"))
+                glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy"))
+                # glob.glob(os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy"))
             )
             assert (
                 len(self.depth_paths) == self.n_img
