@@ -20,7 +20,7 @@ tracking:
     kernel_size: inf
     bound_enlarge_scale: 1.20
   frontend:
-    thresh: 20.0 
+    thresh: 25.0 
     radius: 1
     window: 20 
     nms: 0

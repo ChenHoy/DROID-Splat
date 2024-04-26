@@ -20,17 +20,17 @@ tracking:
     kernel_size: inf
     bound_enlarge_scale: 1.20
   frontend:
-    thresh: 20.0 
+    thresh: 15.0 
     radius: 1
     window: 20 
     nms: 0
   backend:
-    thresh: 30.0  
+    thresh: 30.0  # only consider edge with avg flow < 25.0 pixels
     radius: 2
     nms: 2
     # used for loop detection
     loop_window: 250
-    loop_thresh: 30.0  
+    loop_thresh: 30.0  # only consider edge with avg flow < 50.0 pixels
     loop_radius: 2
     loop_nms: 5
 

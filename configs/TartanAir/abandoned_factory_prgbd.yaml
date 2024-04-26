@@ -22,7 +22,7 @@ tracking:
   frontend:
     thresh: 20.0 
     radius: 1
-    window: 20 
+    window: 40 
     nms: 0
   backend:
     thresh: 30.0  
