@@ -204,7 +204,7 @@ def bundle_adjustment(
     for i in range(iters):
         ba_function(*args, **skwargs, ep=ep, lm=lm)
         disps.clamp_(min=0.001)  # Disparities should never be negative
-    
+
     ####
 
     # Update data structure
@@ -778,8 +778,8 @@ def BA_prior_no_motion(
     all_shifts: torch.Tensor,
     ep: float = 0.1,
     lm: float = 1e-4,
-    alpha: float = 0.1,
-    reweight_prior: bool = True,
+    alpha: float = 0.01,
+    reweight_prior: bool = False,
 ):
     """Optimize the geometry of the scene with a depth prior. The prior is scale ambiguous, i.e. we add scale and shift
     parameters in the regularior term to optimize the depth of the scene. This is useful in combination with monocular depth estimation.
@@ -824,7 +824,6 @@ def BA_prior_no_motion(
     w_exp[:, non_empty_nodes] = w
 
     eta = rearrange(eta, "n h w -> 1 n (h w)")
-    # TODO maybe dont damp and use alpha at the same time
     C_exp = C_exp + alpha * 1.0 + eta
     C_exp = rearrange(C_exp, "b n hw -> b (n hw) 1 1")
 
@@ -846,7 +845,7 @@ def BA_prior_no_motion(
         all_conf[:, non_empty_nodes] = confidence
         # always ensure to have enough residuals to actually optimize over
         # NOTE this is just a drastic measure to stabilize the system in case there are no confident matches
-        if confidence.sum() < 0.05 * n * ht * wd:
+        if confidence.sum() < 0.15 * n * ht * wd:
             all_conf = torch.ones_like(all_conf, device=confidence.device, dtype=torch.float64)
     else:
         all_conf = torch.ones((bs, n_exp, ht * wd), device=weight.device, dtype=torch.float64)
@@ -884,8 +883,8 @@ def BA_prior_no_motion(
     ### 4: Solve whole system with dX, ds, do, dZ ###
     dso, dz, was_success = schur_solve(H, E, C_exp, v, w_exp, ep=ep, lm=lm, return_state=True)
     if not was_success:
-        print(colored("Entering debug mode ...", "red"))
-        ipdb.set_trace()
+        # print(colored("Entering debug mode ...", "red"))
+        # ipdb.set_trace()
         dso, dz = schur_solve(H, E, C_exp, v, w_exp, ep=ep, lm=lm, solver="lu")
     ds, do = dso[:, :n_exp], dso[:, n_exp:]
     dz = rearrange(dz, "b (n h w) -> b n h w", n=n_exp, h=ht, w=wd)
