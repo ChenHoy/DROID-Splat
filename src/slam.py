@@ -449,11 +449,11 @@ class SLAM:
 
         for i, p in enumerate(processes):
             p.join()
-            self.info("Terminated process {}".format(p.name)) ## not terminating gaussian mapping here
+            self.info("Terminated process {}".format(p.name)) ## not joining gaussian mapping here
 
 
-        self.save_state()
-        print("Reached here") ## this is not reached
+        self.save_state()## this is not reached
+        print("Reached here") 
         print("Evaluation: {}".format(self.do_evaluate))
         if self.do_evaluate:
             self.info("Doing evaluation!")
@@ -488,12 +488,14 @@ class SLAM:
             pass
 
         # Receive the final update, so we can do something with it ...
+        
         a = self.mapping_queue.get()
         gaussian_mapper_last_state = clone_obj(a)
         self.received_mapping.set()
         del a  # NOTE Always delete receive object from a multiprocessing Queue!
 
 
+        ## these prints are correct and go through
         print("I received {}".format(gaussian_mapper_last_state.cameras))
         print("I received {}".format(gaussian_mapper_last_state.gaussians))
 
