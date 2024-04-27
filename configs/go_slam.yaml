@@ -59,7 +59,7 @@ tracking:
     kernel_size: inf
     bound_enlarge_scale: 1.20
   frontend:
-    enable_loop: True
+    enable_loop: False
     keyframe_thresh: 6.0  # remove keyframe if avg flow < 4.0 pixels
     thresh: 16.0  # only consider edge with avg flow < 16.0 pixels
     window: 25  # local ba window size
@@ -68,12 +68,12 @@ tracking:
     max_factors: 100  # num of edges within local ba
   backend:
     thresh: 25.0  # only consider edge with avg flow < 25.0 pixels
-    radius: 1
+    radius: 2
     nms: 5
     # used for loop detection
-    loop_window: 25
-    loop_thresh: 50.0  # only consider edge with avg flow < 50.0 pixels
-    loop_radius: 1
+    loop_window: 100
+    loop_thresh: 30.0  # only consider edge with avg flow < 50.0 pixels
+    loop_radius: 2
     loop_nms: 12
 
 cam:

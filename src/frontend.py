@@ -44,16 +44,17 @@ class Frontend:
         self.device = video.device
         self.update_op = net.update
 
-        # NOTE chen: This reduces memory a lot but increases run-time! This potentially saves ~5GB, 
+        # NOTE chen: This reduces memory a lot but increases run-time! This potentially saves ~5GB,
         # but is nearly 2x run-time
         # On most scenes its fine to simply not release the cache
-        self.release_cache = True
+        self.release_cache = False  # TODO make configurable
 
         # Frontend variables
         self.is_initialized = False
         self.count = 0
         self.max_age = 25
-        self.iters1, self.iters2 = 4, 2
+        # TODO make configurable
+        self.iters1, self.iters2 = 6, 4  # 4, 2
         self.warmup = cfg["tracking"]["warmup"]
         self.upsample = cfg["tracking"]["upsample"]
         self.beta = cfg["tracking"]["beta"]
@@ -133,6 +134,42 @@ class Frontend:
         self.video.dirty[t_start:t_end] = True
         return t_end - t_start_loop, n_edges
 
+    @torch.no_grad()
+    def global_scale_optimization(
+        self, t_start, t_end, steps=4, lm=1e-4, ep=1e-1, radius: int = 200, nms: int = 2, thresh: float = 10.0
+    ):
+        """Optimize the scene globally with the pure Python code for scale optimization. This optimizes poses and structure
+        in a block-coordinate descent way."""
+        assert self.graph.scale_priors == True, "You need to set scale_priors to True when using this function!"
+        assert self.video.optimize_scales == True, "You need to set scale_priors to True when using this function!"
+
+        if t_end is None:
+            t_end = self.video.counter.value
+        n = t_end - t_start
+        max_factors = 16 * t_end  # From DROID-SLAM
+
+        graph = FactorGraph(
+            self.video,
+            self.update_op,
+            device=self.device,
+            corr_impl="volume",
+            max_factors=max_factors,
+            upsample=self.upsample,
+        )
+        n_edges = graph.add_proximity_factors(rad=radius, nms=nms, beta=self.beta, thresh=thresh, remove=False)
+        print(colored(f"[Backend] Performing full scale prior optimization over map with: {n_edges} edges!", "blue"))
+        graph.prior_update_lowmem(t0=t_start, t1=t_end, steps=steps, lm=lm, ep=ep)
+        print(colored("[Backend] Done!", "blue"))
+
+        # Empty cache immediately and release memory
+        graph.clear_edges()
+        del graph
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        with self.video.get_lock():
+            self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
+
     def __update(self):
         """add edges, perform update"""
 
@@ -155,11 +192,9 @@ class Frontend:
             remove=True,
         )
 
-        # Dont influence the optimization with a prior before warmup
-        if self.video.optimize_scales and self.t1 <= self.video.warmup_prior:
-            pass
+        # NOTE chen: Dont do this with a prior, because it will be harder to correct the scales
         # Condition video.disps based on external sensor data if given before optimizing
-        else:
+        if not self.video.optimize_scales:
             self.video.disps[self.t1 - 1] = torch.where(
                 self.video.disps_sens[self.t1 - 1] > 0,
                 self.video.disps_sens[self.t1 - 1],
@@ -186,6 +221,7 @@ class Frontend:
             cur_t = self.video.counter.value
             if self.enable_loop and cur_t > self.frontend_window:
                 ### 2nd update
+                # FIXME the t_start = 0 will produce a lot of memory in case we have a big map
                 n_kf, n_edges = self.loop_closure_update(t_start=0, t_end=cur_t, steps=self.iters2, motion_only=False)
                 self.loop_info(0, cur_t, n_kf, n_edges)
                 self.last_loop_t = cur_t
@@ -197,6 +233,7 @@ class Frontend:
 
                 ### 2nd update
                 for itr in range(self.iters2):
+                    # TODO make steps of this update configurable!
                     self.graph.update(t0=None, t1=None, use_inactive=True)
 
         # Manually free memory here as this builds up over time
@@ -254,7 +291,7 @@ class Frontend:
         # Initialize
         if not self.is_initialized and self.video.counter.value == self.warmup:
             self.__initialize()
-            print(colored("[Frontend] Initialized!", "yellow"))
+            self.info("Initialized!")
 
         # Update
         elif self.is_initialized and self.t1 < self.video.counter.value:

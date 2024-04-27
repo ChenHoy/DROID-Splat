@@ -172,10 +172,9 @@ if __name__ == "__main__":
     # index, color_data, depth_data, intrinsic, pose
     # color data is [H x W x 3] RGB image, depth_data is [H x W] depth image
     dataset = get_dataset(cfg, args, device=args.device)
-    # print(dataset)
-
     slam = SLAM(args, cfg)
     slam.dataset = dataset
-    slam.run(dataset)
 
+    sys_print(f"Running on {len(dataset)} frames")
+    slam.run(dataset)
     sys_print("Done!")

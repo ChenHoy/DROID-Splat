@@ -13,7 +13,7 @@ tracking:
   # TODO this is in stark contrast to DROID SLAM where beta is 0.3
   beta: 0.75  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
   warmup: 8
-  upsample: True
+  upsample: False
   motion_filter:
     thresh: 5.0  # add as keyframe if avg flow >:  4.0 pixels
   multiview_filter:
@@ -22,7 +22,7 @@ tracking:
     kernel_size: inf
     bound_enlarge_scale: 1.20
   frontend:
-    enable_loop: True
+    enable_loop: False
     keyframe_thresh: 6.0  # remove keyframe if avg flow < 4.0 pixels
     thresh: 16.0  # only consider edge with avg flow < 16.0 pixels
     window: 25  # local ba window size

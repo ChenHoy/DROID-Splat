@@ -13,7 +13,7 @@ mapping:
 tracking:
   device: "cuda:0"
   buffer: 1024
-  beta: 0.8
+  beta: 0.3
   warmup: 7
   upsample: True
   motion_filter:
@@ -26,11 +26,12 @@ tracking:
   frontend:
     thresh: 15.0 
     radius: 4
-    window: 30
+    window: 40
     nms: 0
     enable_loop: False
   backend:
-    warmup: null
+    do_loop_closure: True
+    warmup: 10
     thresh: 25.0  
     radius: 5
     window: 200 # Limit backend in case we would run OOM

@@ -22,11 +22,15 @@ class BundleAdjustment(torch.nn.Module):
         self.net = slam.net
         self.video = slam.video
 
-        self.enable_loop = True
+        self.enable_loop = cfg["tracking"]["backend"].get("do_loop_closure", True)
+        self.warmup = cfg["tracking"]["backend"].get("warmup", 20)
+        self.steps = cfg["tracking"]["backend"].get("steps", 2)
 
         self.frontend_window = cfg["tracking"]["frontend"]["window"]
-        # NOTE chen: 200 keyframes is actually quite a lot! We usually dont have clips for such large loop closures
-        self.max_window = 200  # TODO make configurable
+        # NOTE chen: it is sometimes (e.g. TartanAir) better to use a smaller window like 100
+        self.max_window = cfg["tracking"]["backend"].get(
+            "window", 200
+        )  # Absolute limit for backend optimization to avoid OOM
         self.last_t = -1
         self.ba_counter = -1
 
@@ -42,8 +46,11 @@ class BundleAdjustment(torch.nn.Module):
         t_end = cur_t
 
         # Only optimize outside of Frontend
-        if cur_t < self.frontend_window:
+        if cur_t < self.frontend_window and self.warmup is None:
             return
+        if self.warmup is not None:
+            if cur_t < self.warmup:
+                return
 
         # Run over the whole map only if its within hardware bounds
         if cur_t > self.max_window:
@@ -52,9 +59,9 @@ class BundleAdjustment(torch.nn.Module):
             t_start = 0
 
         if self.enable_loop:
-            _, n_edges = self.backend.loop_ba(t_start=t_start, t_end=t_end, steps=6, motion_only=False)
+            _, n_edges = self.backend.loop_ba(t_start=t_start, t_end=t_end, steps=self.steps, motion_only=False)
         else:
-            _, n_edges = self.backend.dense_ba(t_start=t_start, t_end=t_end, steps=6, motion_only=False)
+            _, n_edges = self.backend.dense_ba(t_start=t_start, t_end=t_end, steps=self.steps, motion_only=False)
 
         msg = "Full BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
         self.info(msg)
@@ -75,13 +82,13 @@ class Backend:
         self.update_op = net.update
 
         self.last_loop_t = -1
-        self.loop_window = cfg["tracking"]["backend"]["loop_window"]
-        self.loop_radius = cfg["tracking"]["backend"]["loop_radius"]
-        self.loop_nms = cfg["tracking"]["backend"]["loop_nms"]
-        self.loop_thresh = cfg["tracking"]["backend"]["loop_thresh"]
+        self.loop_window = cfg["tracking"]["backend"].get("loop_window", 200)
+        self.loop_radius = cfg["tracking"]["backend"].get("loop_radius", 3)
+        self.loop_nms = cfg["tracking"]["backend"].get("loop_nms", 2)
+        self.loop_thresh = cfg["tracking"]["backend"].get("loop_thresh", 30.0)
 
-        self.upsample = cfg["tracking"]["upsample"]
-        self.beta = cfg["tracking"]["beta"]
+        self.upsample = cfg["tracking"].get("upsample", False)
+        self.beta = cfg["tracking"].get("beta", 0.3)
         self.backend_thresh = cfg["tracking"]["backend"]["thresh"]
         self.backend_radius = cfg["tracking"]["backend"]["radius"]
         self.backend_nms = cfg["tracking"]["backend"]["nms"]
@@ -162,10 +169,8 @@ class Backend:
         )
 
         # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
-        # TODO do we really need to use t0=t_start_loop and not t_sart?
-        graph.update_lowmem(
-            t0=t_start_loop + 1, t1=t_end, steps=steps, max_t=t_end, lm=lm, ep=ep, motion_only=motion_only
-        )
+        # TODO do we really need to use t0=t_start_loop and not t_start?
+        graph.update_lowmem(t0=t_start, t1=t_end, steps=steps, max_t=t_end, lm=lm, ep=ep, motion_only=motion_only)
         graph.clear_edges()
 
         # Free up memory again after optimization

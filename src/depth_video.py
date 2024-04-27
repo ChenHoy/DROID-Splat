@@ -64,7 +64,6 @@ class DepthVideo:
         self.disps_sens = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         # Scale and shift parameters for ambiguous monocular depth
         self.optimize_scales = cfg["mode"] == "prgbd"  # Optimze the scales and shifts for Pseudo-RGBD mode
-        self.warmup_prior = 0  # cfg["tracking"]["warmup_prior"]
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
         # In case we have an external groundtruth
@@ -349,16 +348,11 @@ class DepthVideo:
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
-            if self.optimize_scales and t1 <= self.warmup_prior:
-                disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
-            else:
-                disps_sens = self.disps_sens
-
             droid_backends.ba(
                 self.poses,
                 self.disps,
                 self.intrinsics[intrinsic_common_id],
-                disps_sens,
+                self.disps_sens,
                 target,
                 weight,
                 eta,
@@ -392,69 +386,45 @@ class DepthVideo:
             # Uncertainties are for [x, y] directions -> Take norm to get single scalar
             self.uncertainty[idx] = torch.norm(uncertainty, dim=1)
 
-            if t1 <= self.warmup_prior:
-                droid_backends.ba(
-                    self.poses,
-                    self.disps,
-                    self.intrinsics[0],
-                    torch.zeros_like(self.disps_sens, device=self.device),
-                    target,
-                    weight,
-                    eta,
-                    ii,
-                    jj,
-                    t0,
-                    t1,
-                    iters,
-                    self.model_id,
-                    lm,
-                    ep,
-                    False,
-                    self.opt_intr,
-                )
-                self.disps.clamp_(min=0.001)  # Always make sure that Disparities are non-negative!!!
+            # MoBA
+            droid_backends.ba(
+                self.poses,
+                self.disps,
+                self.intrinsics[0],
+                self.disps_sens,
+                target,
+                weight,
+                eta,
+                ii,
+                jj,
+                t0,
+                t1,
+                iters,
+                self.model_id,
+                lm,
+                ep,
+                True,
+                self.opt_intr,
+            )
 
-            else:
-
-                # MoBA
-                droid_backends.ba(
-                    self.poses,
-                    self.disps,
-                    self.intrinsics[0],
-                    self.disps_sens,
-                    target,
-                    weight,
-                    eta,
-                    ii,
-                    jj,
-                    t0,
-                    t1,
-                    iters,
-                    self.model_id,
-                    lm,
-                    ep,
-                    True,
-                    self.opt_intr,
-                )
-
-                # JDSA
-                bundle_adjustment(
-                    target,
-                    weight,
-                    eta,
-                    self.poses,
-                    self.disps,
-                    self.intrinsics,
-                    ii,
-                    jj,
-                    t0,
-                    t1,
-                    self.disps_sens,
-                    self.scales,
-                    self.shifts,
-                    iters=iters + 2,  # Use slightly more iterations here, so we get the scales right for sure!
-                    lm=lm,
-                    ep=ep,
-                    scale_prior=True,
-                    structure_only=True,
-                )
+            # JDSA
+            bundle_adjustment(
+                target,
+                weight,
+                eta,
+                self.poses,
+                self.disps,
+                self.intrinsics,
+                ii,
+                jj,
+                t0,
+                t1,
+                self.disps_sens,
+                self.scales,
+                self.shifts,
+                iters=iters + 2,
+                lm=lm,
+                ep=ep,
+                scale_prior=True,
+                structure_only=True,
+            )
