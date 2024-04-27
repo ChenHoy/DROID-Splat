@@ -134,6 +134,7 @@ class GaussianPacket:
         return symm
 
 
+# TODO is this the proper way to do it?
 def get_latest_queue(q):
     message = None
     while True:
@@ -169,10 +170,11 @@ class ParamsGUI:
 
 
 class EvaluatePacket:
-    '''
+    """
     This class is used to pass params from the gaussian_mapper to the terminate thread
     for evaluation
-    '''
+    """
+
     def __init__(
         self,
         pipeline_params=None,
