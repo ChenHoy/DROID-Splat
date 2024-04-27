@@ -308,7 +308,7 @@ class SLAM:
 
         self.gaussian_mapping_finished += 1
         self.all_finished += 1
-        self.info("Gaussian Mapping Done!") ## this is reached 
+        self.info("Gaussian Mapping Done!")
 
     def visualizing(self, rank, run=True):
         self.info("Visualization thread started!")
@@ -449,7 +449,7 @@ class SLAM:
 
         for i, p in enumerate(processes):
             p.join()
-            self.info("Terminated process {}".format(p.name)) ## not joining gaussian mapping here
+            self.info("Terminated process {}".format(p.name))
 
 
         self.save_state()## this is not reached
@@ -471,7 +471,7 @@ class SLAM:
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Frontend Tracking"),
             mp.Process(target=self.backend, args=(2, self.cfg.slam.run_backend), name="Backend"), 
             mp.Process(target=self.multiview_filtering, args=(3, self.cfg.slam.run_multiview_filter),name="Multiview Filtering"),
-            mp.Process(target=self.visualizing, args=(4, self.cfg.slam.run_visualization),name="Visualizing"),
+            mp.Process(target=self.visualizing, args=(4, self.cfg.slam.run_visualization),name="Visualizing"), ## NOTE: always run without visualizing in evaluation mode
             mp.Process(
                 target=self.gaussian_mapping,
                 args=(5, self.cfg.slam.run_mapping, self.mapping_queue, self.received_mapping),
@@ -494,11 +494,6 @@ class SLAM:
         self.received_mapping.set()
         del a  # NOTE Always delete receive object from a multiprocessing Queue!
 
-
-        ## these prints are correct and go through
-        print("I received {}".format(gaussian_mapper_last_state.cameras))
-        print("I received {}".format(gaussian_mapper_last_state.gaussians))
-
         while self.backend_finished < 1 and self.gaussian_mapping_finished < 1:
             self.info("Waiting Backend and Gaussian Renderer to finish ...")
             # Make exception for configuration where we only have frontend tracking
@@ -507,4 +502,4 @@ class SLAM:
 
 
 
-        self.terminate(processes,stream,gaussian_mapper_last_state) ## this is reached
+        self.terminate(processes,stream,gaussian_mapper_last_state)
