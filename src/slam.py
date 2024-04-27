@@ -78,11 +78,9 @@ class SLAM:
         self.visualizing_finished.share_memory_()
 
         # Dummy for pause/interrupts
-        # FIXME chen: Does hang_on actually ever get set?
-        self.hang_on = torch.zeros((1)).int()
-        self.hang_on.share_memory_()
         # NOTE chen: Use this to synchronize frontend and backend
-        self.sleep_time = 0.5  # Time for giving delays
+        # TODO make configurable
+        self.sleep_time = 3  # Time for giving delays
         # Sanity check for keeping the load balanced between frontend & backend
         self.max_ram_usage = 0.9  # Use only 90% of max. RAM with frontend/backend
         self.plot_uncertainty = True
@@ -104,6 +102,8 @@ class SLAM:
         self.do_evaluate = cfg["evaluate"]
         # self.do_evaluate = cfg.slam.evaluate
         self.dataset = None
+        # NOTE chen: Use 5.0 for indoor datasets and 50.0 (TartanAir) / 100.0 (KITTI) for outdoor scenes
+        self.max_depth_visu = 50.0  # Cut of value to show a consistent depth stream
 
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
@@ -185,9 +185,6 @@ class SLAM:
 
             self.tracker(timestamp, image, depth, intrinsic, gt_pose)
 
-            while self.hang_on > 0:
-                sleep(self.sleep_time)
-
         self.tracking_finished += 1
         self.all_finished += 1
         self.info("Tracking done!")
@@ -222,14 +219,12 @@ class SLAM:
         self.all_trigered += 1
 
         while self.tracking_finished < 1 and not dont_run:
-            while self.hang_on > 0:
-                sleep(self.sleep_time)
 
             # Only run backend if we have enough RAM for it
             self.ram_safeguard_backend(max_ram=self.max_ram_usage)
             if self.dense_ba is not None:
                 self.dense_ba()
-                sleep(2 * self.sleep_time)  # Let multiprocessing cool down a little bit
+                sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
         # Run one last time after tracking finished
         if not dont_run and self.dense_ba is not None:
@@ -238,7 +233,8 @@ class SLAM:
 
             msg = "Optimize full map: [{}, {}]!".format(0, t_end)
             self.dense_ba.info(msg)
-            _, _ = self.dense_ba.backend.dense_ba(t_start=0, t_end=t_end, steps=12)
+            _, _ = self.dense_ba.backend.dense_ba(t_start=0, t_end=t_end, steps=6)
+            _, _ = self.dense_ba.backend.dense_ba(t_start=0, t_end=t_end, steps=6)
 
         self.backend_finished += 1
         self.all_finished += 1
@@ -250,8 +246,6 @@ class SLAM:
         self.all_trigered += 1
 
         while (self.tracking_finished < 1 or self.backend_finished < 1) and not dont_run:
-            while self.hang_on > 0:
-                sleep(self.sleep_time)
             self.multiview_filter()
 
         self.multiview_filtering_finished += 1
@@ -265,8 +259,6 @@ class SLAM:
         # NOTE chen: We run rendering one last time even after backend is done for finetuning
         # at some point we have to think about whether this makes sense or if rendering could be even better
         while self.tracking_finished < 1 and self.backend_finished < 1 and not dont_run:
-            while self.hang_on > 0:
-                sleep(self.sleep_time)
             self.gaussian_mapper()
 
         # Run for one last time after everything else finished
@@ -304,7 +296,7 @@ class SLAM:
                     cv2.imshow("RGB", rgb_image.numpy())
                     if self.mode in ["rgbd", "prgbd"] and depth is not None:
                         # Create normalized depth map with intensity plot
-                        depth_image = depth2rgb(depth.clone().cpu())[0]
+                        depth_image = depth2rgb(depth.clone().cpu(), max_depth=self.max_depth_visu)[0]
                         # Convert to BGR for cv2
                         cv2.imshow("depth", depth_image[..., ::-1])
                     cv2.waitKey(1)
@@ -436,3 +428,18 @@ class SLAM:
                 break
 
         self.terminate(processes, stream)
+
+    def test(self, stream):
+
+        processes = [
+            # mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
+            mp.Process(target=self.visualizing, args=(1, False))
+        ]
+
+        self.num_running_thread[0] += len(processes)
+        for p in processes:
+            p.start()
+
+        for frame in tqdm(stream):
+            timestamp, image, depth, intrinsic, gt_pose = frame
+            self.tracker(timestamp, image, depth, intrinsic, gt_pose)

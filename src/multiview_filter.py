@@ -19,24 +19,23 @@ NOTE you can use this filter as a good density proxy for cleaning noisy point cl
 
 
 class MultiviewFilter(nn.Module):
-    def __init__(self, cfg, args, slam):
+    def __init__(self, cfg, args, video):
         super(MultiviewFilter, self).__init__()
 
         self.args = args
         self.cfg = cfg
         self.device = args.device
         self.warmup = cfg["tracking"]["warmup"]
-        # dpeth error < 0.01m
+
+        # Depth error < 0.01m
         self.filter_thresh = cfg["tracking"]["multiview_filter"]["thresh"]
-        # points viewed by at least 3 cameras
+        # Points viewed by at least 3 cameras
         self.filter_visible_num = cfg["tracking"]["multiview_filter"]["visible_num"]
+
         self.kernel_size = cfg["tracking"]["multiview_filter"]["kernel_size"]  # 3
         self.bound_enlarge_scale = cfg["tracking"]["multiview_filter"]["bound_enlarge_scale"]
-        self.net = slam.net
-        self.video = slam.video
-        self.mode = slam.mode
 
-        self.H, self.W, self.fx, self.fy, self.cx, self.cy = slam.H, slam.W, slam.fx, slam.fy, slam.cx, slam.cy
+        self.video = video
 
     # NOTE chen: This distance can already be computed with a single function call in Lietorch
     def pose_dist(self, Tquad0: torch.Tensor, Tquad1: torch.Tensor) -> torch.Tensor:
@@ -116,6 +115,7 @@ class MultiviewFilter(nn.Module):
         )
         print(colored("[Multiview Filter]: " + msg, "cyan"))
 
+    # NOTE this uses the upscaled points at full resolution!
     def forward(self):
         """Filter out occluded, outliers and low density points using multiview consistency"""
 
@@ -181,6 +181,7 @@ class MultiviewFilter(nn.Module):
                 self.video.update_priority[:cur_t] += priority.detach()
                 self.video.mask_filtered[:cur_t] = valid.reshape(bs, ht, wd).detach()
                 self.video.disps_filtered[:cur_t] = disps.detach()
+                # TODO chen: delete the poses_filtered
                 self.video.poses_filtered[:cur_t] = poses.detach()
                 # Update the filter id
                 self.video.filtered_id[0] = cur_t

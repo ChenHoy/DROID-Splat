@@ -16,7 +16,7 @@ import cv2
 import open3d as o3d
 
 # Only shows errors, not warnings
-o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
+# o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
 
 from matplotlib.pyplot import get_cmap
 import matplotlib.pyplot as plt
