@@ -115,7 +115,7 @@ class GaussianModel:
             if depth_raw is None:
                 depth_raw = np.empty((cam.image_height, cam.image_width))
 
-            if self.config["Dataset"]["sensor_type"] == "monocular":
+            if self.config.Dataset.sensor_type == "monocular":
                 depth_raw = (
                     np.ones_like(depth_raw) + (np.random.randn(depth_raw.shape[0], depth_raw.shape[1]) - 0.5) * 0.05
                 ) * scale
@@ -127,13 +127,13 @@ class GaussianModel:
 
     def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False):
         if init:
-            downsample_factor = self.config["Dataset"]["pcd_downsample_init"]
+            downsample_factor = self.config.Dataset.pcd_downsample_init
         else:
-            downsample_factor = self.config["Dataset"]["pcd_downsample"]
-        point_size = self.config["Dataset"]["point_size"]
-        if "adaptive_pointsize" in self.config["Dataset"]:
-            if self.config["Dataset"]["adaptive_pointsize"]:
-                point_size = min(0.05, point_size * np.median(depth))
+            downsample_factor = self.config.Dataset.pcd_downsample
+
+        point_size = self.config.Dataset.get("point_size", 0.05)
+        if self.config.Dataset.get("adaptive_pointsize", False):
+            point_size = min(0.05, point_size * np.median(depth))
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
             rgb,
             depth,
