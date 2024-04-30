@@ -8,7 +8,6 @@ import numpy as np
 import torch
 import hydra
 
-from src import config
 from src.slam import SLAM
 from src.datasets import get_dataset
 
@@ -69,7 +68,6 @@ def run_slam(cfg):
     torch.multiprocessing.set_start_method("spawn")
     # Save state for reproducibility
     backup_source_code(os.path.join(output_folder, "code"))
-    config.save_config(cfg, f"{output_folder}/cfg.yaml")
 
     sys_print(f"\n\n** Running {cfg.data.input_folder} in {cfg.mode} mode!!! **\n\n")
     dataset = get_dataset(cfg, device=cfg.device)
