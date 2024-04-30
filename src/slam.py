@@ -90,7 +90,7 @@ class SLAM:
         self.multiview_filter = MultiviewFilter(cfg, self)
         self.backend = BackendWrapper(cfg, self)
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
-        # self.gaussian_mapper = GaussianMapper(cfg, self)
+        self.gaussian_mapper = GaussianMapper(cfg, self)
 
         self.do_evaluate = cfg.evaluate
         self.dataset = dataset
