@@ -15,9 +15,9 @@ do
   echo Running on $sc ...
   if [[ $MODE == "mono" ]]
   then
-    python run.py configs/Replica/${sc}_mono.yaml --device cuda:0 --mode $MODE --output ${OUT_DIR}/${sc}_mono --evaluate True
+    python run.py slam.input_folder=/media/data/Replica/${sc} slam.dataset=replica configs/data/Replica/replica_mono.yaml slam.evaluate=True slam.output_folder=${OUT_DIR}/${sc}_mono 
   else
-    python run.py configs/Replica/${sc}.yaml --device cuda:0 --mode $MODE --output ${OUT_DIR}/${sc} --evaluate True
+    python run.py slam.input_folder=/media/data/Replica/${sc} slam.dataset=replica configs/data/Replica/replica.yaml slam.evaluate=True slam.output_folder=${OUT_DIR}/${sc} 
   fi
   echo $sc done!
 done

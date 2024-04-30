@@ -116,6 +116,7 @@ class MultiviewFilter(nn.Module):
 
         cur_t = self.video.counter.value
         filtered_t = int(self.video.filtered_id.item())
+
         if filtered_t < cur_t and cur_t > self.warmup:
 
             # NOTE chen: we keep many computations inside the lock, because this used to raise a malloc error on my setup if not done

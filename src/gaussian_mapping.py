@@ -33,12 +33,12 @@ class GaussianMapper(object):
     SLAM from Rendering with 3D Gaussian Splatting.
     """
 
-    def __init__(self, cfg, slam, mapping_queue=None):
+    def __init__(self, cfg, slam):
         self.cfg = cfg
         self.slam = slam
         self.video = slam.video
-        self.device = cfg.slam.device
-        self.mode = cfg.slam.mode
+        self.device = cfg.device
+        self.mode = cfg.mode
         self.output = slam.output
         self.model_params = cfg.mapping.model_params
         self.opt_params = cfg.mapping.opt_params
@@ -58,7 +58,7 @@ class GaussianMapper(object):
         bg_color = [1, 1, 1]
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        if self.mapping_params.use_gui and not self.cfg.slam.evaluate:
+        if self.mapping_params.use_gui and not self.cfg.evaluate:
             self.q_main2vis = mp.Queue()
             self.q_vis2main = mp.Queue()
             self.params_gui = gui_utils.ParamsGUI(
@@ -84,7 +84,6 @@ class GaussianMapper(object):
 
         self.show_filtered = False
 
-        self.mapping_queue = mapping_queue
 
     def info(self, msg: str):
         print(colored("[Gaussian Mapper] " + msg, "magenta"))
@@ -159,11 +158,7 @@ class GaussianMapper(object):
         opt_params = []
         for cam in frames:
             opt_params.append(
-                {
-                    "params": [cam.cam_rot_delta],
-                    "lr": self.opt_params.cam_rot_delta,
-                    "name": "rot_{}".format(cam.uid),
-                }
+                {"params": [cam.cam_rot_delta], "lr": self.opt_params.cam_rot_delta, "name": "rot_{}".format(cam.uid)}
             )
             opt_params.append(
                 {
@@ -172,20 +167,8 @@ class GaussianMapper(object):
                     "name": "trans_{}".format(cam.uid),
                 }
             )
-            opt_params.append(
-                {
-                    "params": [cam.exposure_a],
-                    "lr": 0.01,
-                    "name": "exposure_a_{}".format(cam.uid),
-                }
-            )
-            opt_params.append(
-                {
-                    "params": [cam.exposure_b],
-                    "lr": 0.01,
-                    "name": "exposure_b_{}".format(cam.uid),
-                }
-            )
+            opt_params.append({"params": [cam.exposure_a], "lr": 0.01, "name": "exposure_a_{}".format(cam.uid)})
+            opt_params.append({"params": [cam.exposure_b], "lr": 0.01, "name": "exposure_b_{}".format(cam.uid)})
 
         return torch.optim.Adam(opt_params)
 
@@ -386,7 +369,7 @@ class GaussianMapper(object):
             keyframes = self.cameras[-self.n_last_frames :] + [self.cameras[i] for i in keyframes_idx]
         return keyframes, keyframes_idx
 
-    def _last_call(self):
+    def _last_call(self,mapping_queue: mp.Queue,received_item: mp.Event):
         """Do one last refinement over the map"""
 
         self.info("\nMapping refinement starting")
@@ -425,17 +408,19 @@ class GaussianMapper(object):
         plt.savefig(f"{self.output}/loss_{self.mode}.png")
 
         ## export the cameras and gaussians to the terminate process
-        if self.cfg.slam.evaluate:
-            self.mapping_queue.put(
+        if self.cfg.evaluate:
+            mapping_queue.put(
                 gui_utils.EvaluatePacket(
-                    pipeline_params=self.pipeline_params,
-                    cameras=self.cameras,
+                    pipeline_params=clone_obj(self.pipeline_params),
+                    cameras=self.cameras[:],
                     gaussians=clone_obj(self.gaussians),
-                    background=self.background,
+                    background=clone_obj(self.background),
                 )
             )
+            received_item.wait()  # Wait until the Packet got delivered
 
-    def __call__(self, the_end=False):
+
+    def __call__(self,mapping_queue: mp.Queue,received_item: mp.Event, the_end=False):
         self.cur_idx = int(self.video.filtered_id.item())
 
         if self.last_idx + self.delay < self.cur_idx and self.cur_idx > self.mapping_params.warmup:
@@ -489,5 +474,5 @@ class GaussianMapper(object):
             self.last_idx = self.cameras[-1].uid + 1
 
         elif the_end and self.last_idx + self.delay == self.cur_idx:
-            self._last_call()
+            self._last_call(mapping_queue=mapping_queue,received_item=received_item)
             return True

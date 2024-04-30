@@ -20,12 +20,9 @@ sleep_delay: 2.0 # Time delay to synchronize frontend and backend
 
 run_backend: True
 run_frontend: True
-run_multiview_filter: False
-run_mapping: False
+run_multiview_filter: True
+run_mapping: True
 run_visualization: True
 show_stream: False
 
 evaluate: False
-
-
-
