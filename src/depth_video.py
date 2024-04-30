@@ -28,7 +28,7 @@ class DepthVideo:
             self.model_id = 1
         else:
             raise Exception("Camera model not implemented! Choose either pinhole or mei model.")
-        self.opt_intr = cfg.slam.opt_intr
+        self.opt_intr = cfg.opt_intr
 
         self.counter = Value("i", 0)
         self.ready = Value("i", 0)
@@ -40,8 +40,8 @@ class DepthVideo:
         self.ht = ht
         wd = cfg.data.cam.W_out
         self.wd = wd
-        self.stereo = cfg.slam.mode == "stereo"
-        device = cfg.slam.device
+        self.stereo = cfg.mode == "stereo"
+        device = cfg.device
         self.device = device
         c = 1 if not self.stereo else 2
         self.scale_factor = 8
@@ -50,7 +50,9 @@ class DepthVideo:
 
         ### state attributes -> Raw map ###
         self.timestamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
+        # List for keeping track of updated frames for visualization
         self.dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
+        # List for keeping track of updated frames for Map Renderer
         self.mapping_dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
         self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float)
         self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
@@ -59,14 +61,18 @@ class DepthVideo:
         self.poses_gt = torch.zeros(buffer, 4, 4, device=device, dtype=torch.float).share_memory_()  # c2w matrix
         self.disps = torch.ones(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         self.disps_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
+        # Estimated Uncertainty weights for Optimization reduced for each node from factor graph
+        self.uncertainty = torch.zeros(buffer, ht // 8, wd // 8, device=device, dtype=torch.float)
+        self.uncertainty_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
 
         self.disps_sens = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         # Scale and shift parameters for ambiguous monocular depth
-        self.optimize_scales = cfg.slam.mode == "prgbd" # Optimze the scales and shifts for Pseudo-RGBD mode
+        self.optimize_scales = cfg.mode == "prgbd"  # Optimze the scales and shifts for Pseudo-RGBD mode
+        self.warmup_prior = 50  # cfg["tracking"]["warmup_prior"]
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
-        # In case we have an external groundtruth
-        # TODO chen: is this ever used right now?
+        # NOTE chen: This is redundant as is this is simply 1 / disps_sens
+        # TODO if we need to squeeze memory we can remove this
         self.depths_gt = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
 
         ### feature attributes ###
@@ -79,14 +85,17 @@ class DepthVideo:
         self.poses_gt[:] = torch.eye(4, dtype=torch.float, device=device)
 
         ### Additional flags for multi-view filter -> Clean map for rendering ###
-        self.poses_filtered = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # w2c quaterion
         self.disps_filtered = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
         self.mask_filtered = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
+        # FIXME do we already need this object? These are exactly the same as self.poses
+        self.poses_filtered = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # w2c quaterion
         self.poses_filtered[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
+
+        # Keep track of which frames have been filtered
         self.filtered_id = torch.tensor([-1], dtype=torch.int, device=device).share_memory_()
         self.update_priority = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
         self.bound = torch.zeros(1, 3, 2, device=device, dtype=torch.float).share_memory_()
-        # pose compensation from vitural to real
+        # pose compensation from virtual to real
         self.pose_compensate = torch.zeros(1, 7, dtype=torch.float, device=device).share_memory_()
         self.pose_compensate[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
 
@@ -114,7 +123,7 @@ class DepthVideo:
         if item[3] is not None:
             self.disps[index] = item[3]
 
-        if item[4] is not None:
+        if item[4] is not None and self.cfg.mode != "mono":
             self.depths_gt[index] = item[4]
             depth = item[4][..., 3::8, 3::8]
             self.disps_sens[index] = torch.where(depth > 0, 1.0 / depth, depth)
@@ -177,19 +186,19 @@ class DepthVideo:
             est_disp = self.disps_filtered[index].clone().to(device)  # [h, w]
             est_depth = 1.0 / (est_disp + 1e-7)
 
-            # origin alignment
-            w2c = lietorch.SE3(self.poses_filtered[index].clone()).to(device)  # Tw(droid)_to_c
-            c2w = lietorch.SE3(self.pose_compensate[0].clone()).to(w2c.device) * w2c.inv()
-            c2w = c2w.matrix()  # [4, 4]
+        # origin alignment
+        w2c = lietorch.SE3(self.poses_filtered[index].clone()).to(device)  # Tw(droid)_to_c
+        c2w = lietorch.SE3(self.pose_compensate[0].clone()).to(w2c.device) * w2c.inv()
+        c2w = c2w.matrix()  # [4, 4]
 
-            gt_c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
+        gt_c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
 
-            depth = est_depth
-            # gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
-            # depth = gt_depth
+        depth = est_depth
+        # gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
+        # depth = gt_depth
 
-            # if updated by mapping, the priority is decreased to lowest level, i.e., 0
-            self.update_priority[index] *= decay
+        # if updated by mapping, the priority is decreased to lowest level, i.e., 0
+        self.update_priority[index] *= decay
 
         return image, depth, c2w, gt_c2w, mask
 
@@ -216,6 +225,9 @@ class DepthVideo:
         disps_up = cvx_upsample(self.disps[ix].unsqueeze(dim=-1), mask)  # [b, h, w, 1]
         self.disps_up[ix] = disps_up.squeeze()  # [b, h, w]
 
+        uncertainty_up = cvx_upsample(self.uncertainty[ix].unsqueeze(-1), mask)  # [b, h, w, 1]
+        self.uncertainty_up[ix] = uncertainty_up.squeeze()  # [b, h, w]
+
     def normalize(self):
         """normalize depth and poses"""
         with self.get_lock():
@@ -224,7 +236,6 @@ class DepthVideo:
             self.disps[:cur_ix] /= s
             self.poses[:cur_ix, :3] *= s  # [tx, ty, tz, qx, qy, qz, qw]
             self.dirty[:cur_ix] = True
-            self.mapping_dirty[:cur_ix] = True
 
     def reproject(self, ii, jj):
         """project points from ii -> jj"""
@@ -244,6 +255,38 @@ class DepthVideo:
 
         return coords, valid_mask
 
+    def reduce_uncertainties(self, weights: torch.Tensor, ii: torch.Tensor, strategy: str = "avg") -> torch.Tensor:
+        """Given the factor graph for the scene, we optimize poses at different camera locations.
+        Each location/pose is a node in the graph and can have multiple edges to other nodes.
+        For each edge we have a predicted uncertainty weight map given the learned feature correlations.
+        We are interested in viewing these uncertainties or use them later on, as they should correlate
+        with moving objects and pixels/points that do not contribute to a good reconstruction.
+        Given the indices of an optimization window we reduce edges to get a single uncertainty estimate
+        for each frame.
+
+        args:
+        ---
+        weight [torch.Tensor]: Weight tensor of shape [len(nodes), 2, ht // 8, wd // 8]. Optimization weights for bundle adjustment.
+            Each point is a vector [u_x, u_y] \in [0, 1], which measures the uncertainty for x- and y-components.
+        ii [torch.Tensor]: Indices of source nodes (We go from i to j, i.e. we have edges e_ij) with same length as jj.
+        strategy [str]: How to reduce across edges. Choices: (avg, max). Given multiple uncertainty weight maps for
+            each pixel, it is unclear how to correctly reduce this. In the end these are optimal to compute correct camera motion
+            and static scene maps. Which edge contributes more to this goal is not straight-forward.
+        """
+        frames = ii.unique()
+        idx = []
+        for frame in frames:
+            idx.append(frame == ii)
+
+        frame_weights = [weights[ix] for ix in idx]
+        if strategy == "avg":
+            reduced = [weight.mean(dim=0) for weight in frame_weights]
+        elif strategy == "max":
+            reduced = [weight.max(dim=0) for weight in frame_weights]
+        else:
+            raise Exception("Invalid reduction strategy: {}! Use either 'avg' or 'max'".format(strategy))
+        return torch.stack(reduced), frames
+
     def reset_prior(self) -> None:
         """Adjust the prior according to optimized scales, then reset the scale parameters.
         This makes it possible to continue to optimize them, but still provide the correct disps_sens to the
@@ -251,6 +294,7 @@ class DepthVideo:
         """
         # Rescale the external disparities
         self.disps_sens = self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
+        torch.clamp_(self.disps_sens, min=0.001)
         # Reset the scale and shift parameters to initial state
         self.scales = torch.ones_like(self.scales)
         self.shifts = torch.zeros_like(self.shifts)
@@ -297,15 +341,26 @@ class DepthVideo:
         intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same
         lock = self.get_lock() if ba_type is None else self.get_ba_lock(ba_type)
         with lock:
+
+            # Store the uncertainty maps for source frames, that will get updated
+            uncertainty, idx = self.reduce_uncertainties(weight, ii)
+            # Uncertainties are for [x, y] directions -> Take norm to get single scalar
+            self.uncertainty[idx] = torch.norm(uncertainty, dim=1)
+
             # [t0, t1] window of bundle adjustment optimization
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
+
+            if self.optimize_scales and t1 <= self.warmup_prior:
+                disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
+            else:
+                disps_sens = self.disps_sens
 
             droid_backends.ba(
                 self.poses,
                 self.disps,
                 self.intrinsics[intrinsic_common_id],
-                self.disps_sens,
+                disps_sens,
                 target,
                 weight,
                 eta,
@@ -322,36 +377,44 @@ class DepthVideo:
             )
             self.disps.clamp_(min=0.001)  # Always make sure that Disparities are non-negative!!!
 
-    def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1):
+    def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 0.01):
         """Bundle adjustment over structure with a scalable prior.
 
         We keep the poses fixed, since this would create an unnecessary ambiguity and can make the system unstable!
         We optimize scale and shift parameters on top of the scene disparity.
         """
-
         lock = self.get_lock()
         with lock:
             # [t0, t1] window of bundle adjustment optimization
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
+            # Store the uncertainty maps for source frames, that will get updated
+            uncertainty, idx = self.reduce_uncertainties(weight, ii)
+            # Uncertainties are for [x, y] directions -> Take norm to get single scalar
+            self.uncertainty[idx] = torch.norm(uncertainty, dim=1)
+
             # MoBA
-            # TODO use CUDA kernel here instead of pure Python function
-            bundle_adjustment(
+            # Sanity check for non-negative disparities
+            self.disps.clamp_(min=0.001), self.disps_sens.clamp_(min=0.001)
+            droid_backends.ba(
+                self.poses,
+                self.disps,
+                self.intrinsics[0],
+                self.disps_sens,
                 target,
                 weight,
                 eta,
-                self.poses,
-                self.disps,
-                self.intrinsics,
                 ii,
                 jj,
                 t0,
                 t1,
-                iters=iters,
-                lm=lm,
-                ep=ep,
-                motion_only=True,
+                iters,
+                self.model_id,
+                lm,
+                ep,
+                True,
+                self.opt_intr,
             )
             # JDSA
             bundle_adjustment(
@@ -368,7 +431,7 @@ class DepthVideo:
                 self.disps_sens,
                 self.scales,
                 self.shifts,
-                iters=iters + 2, # Use slightly more iterations here, so we get the scales right for sure!
+                iters=iters + 2,  # Use slightly more iterations here, so we get the scales right for sure!
                 lm=lm,
                 ep=ep,
                 scale_prior=True,

@@ -170,11 +170,7 @@ class GaussianModel:
         features[:, 3:, 1:] = 0.0
 
         dist2 = (
-            torch.clamp_min(
-                distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
-                0.0000001,
-            )
-            * point_size
+            torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001) * point_size
         )
         scales = torch.log(torch.sqrt(dist2))[..., None]
         if not self.isotropic:
@@ -449,6 +445,8 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+        # FIXME highly suspsect of creating memory bug
+        # raises sometimes RuntimeError: out_ptr == out_accessor[thread_count_nonzero[tid + 1]].data()
         self.unique_kfIDs = self.unique_kfIDs[valid_points_mask.cpu()]
         self.n_obs = self.n_obs[valid_points_mask.cpu()]
 
@@ -541,6 +539,7 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
 
+        # NOTE these operations create a malloc error with wrong pytorch version
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()].repeat(N)
         new_n_obs = self.n_obs[selected_pts_mask.cpu()].repeat(N)
 
@@ -579,6 +578,7 @@ class GaussianModel:
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 
+        # NOTE these operations create a malloc error with wrong pytorch version
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()]
         new_n_obs = self.n_obs[selected_pts_mask.cpu()]
         self.densification_postfix(
@@ -607,8 +607,8 @@ class GaussianModel:
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
 
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-        self.prune_points(prune_mask)
 
+        self.prune_points(prune_mask)
         self.info(f"Pruning & densification added {self.get_xyz.shape[0] - n_g} gaussians")
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):

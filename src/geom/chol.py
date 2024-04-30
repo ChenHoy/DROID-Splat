@@ -1,4 +1,5 @@
 import torch
+from termcolor import colored
 import ipdb
 from einops import einsum, rearrange
 
@@ -31,12 +32,14 @@ class LUSolver(torch.autograd.Function):
             xs = torch.linalg.lu_solve(lu, pivots, b)
             ctx.save_for_backward(lu, pivots, xs)
             ctx.failed = False
+            success = True
         except Exception as e:
-            print(e)
+            print(colored("Warning. LU Decomposition failed!", "red"))
             ctx.failed = True
+            success = False
             xs = torch.zeros_like(b)
 
-        return xs
+        return xs, success
 
     @staticmethod
     def backward(ctx, grad_x):
@@ -60,12 +63,14 @@ class CholeskySolver(torch.autograd.Function):
             xs = torch.cholesky_solve(b, U)
             ctx.save_for_backward(U, xs)
             ctx.failed = False
+            success = True
         except Exception as e:
-            print(e)
+            print(colored("Warning. Cholesky Decomposition failed!", "red"))
+            success = False
             ctx.failed = True
             xs = torch.zeros_like(b)
 
-        return xs
+        return xs, success
 
     @staticmethod
     def backward(ctx, grad_x):
@@ -83,6 +88,7 @@ def show_matrix(A: torch.Tensor) -> None:
     import matplotlib.pyplot as plt
 
     plt.imshow(A[0].detach().cpu().numpy())
+    plt.grid(False)
     plt.show()
 
 
@@ -137,6 +143,7 @@ def schur_block_solve(
     lm: float = 1e-4,
     structure_only: bool = False,
     motion_only: bool = False,
+    return_state: bool = False,
 ):
     """Solve the sparse block-structured linear system Hx = v using the Schur complement,
     i.e. instead of solving a larger M*N x M*N system, we solve a smaller M x M system and N x N system,
@@ -152,23 +159,30 @@ def schur_block_solve(
 
     if structure_only:
         dZ = (Q * w).view(b, -1, 1, 1)
-        return dZ.float()
+        if return_state:
+            return dZ.float(), success
+        else:
+            return dZ.float()
 
     else:
         S = H - block_matmul(EQ, Et)
         y = v - block_matmul(EQ, w.unsqueeze(dim=2))
-        dX = cholesky_block_solve(S, y, ep=ep, lm=lm)
-        if torch.isnan(dX).any():
-            print("Cholesky Decomposition of Schur complement failed!")
-            dX = torch.zeros_like(dX)
+        dX, success = cholesky_block_solve(S, y, ep=ep, lm=lm)
 
         if motion_only:
-            return dX.float()
+            if return_state:
+                return dX.float(), success
+            else:
+                return dX.float()
 
         dZ = Q * (w - block_matmul(Et, dX).squeeze(dim=-1))
         dX = dX.view(b, -1, 6)
         dZ = dZ.view(b, -1, 1, 1)
-        return dX.float(), dZ.float()
+
+        if return_state:
+            return dX.float(), dZ.float(), success
+        else:
+            return dX.float(), dZ.float()
 
 
 def schur_solve(
@@ -209,15 +223,8 @@ def schur_solve(
     S = H - torch.matmul(EQ, E.mT)
     y = v - torch.matmul(EQ, w.squeeze(dim=-1))
 
-    # Damping
-    A = S + (ep + lm * S) * torch.eye(S.shape[1], device=S.device)
-    dX = Solver.apply(A, y)
-    if torch.isnan(dX).any():
-        print("Decomposition of Schur complement failed!")
-        dX = torch.zeros_like(dX)
-        success = False
-    else:
-        success = True
+    A = S + (ep + lm * S) * torch.eye(S.shape[1], device=S.device)  # Damping
+    dX, success = Solver.apply(A, y)
 
     if motion_only:
         if return_state:

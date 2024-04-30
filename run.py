@@ -14,12 +14,13 @@ from src.datasets import get_dataset
 
 """
 Run the SLAM system on a given dataset or on image folder.
-
-You can configure the system using .yaml configs. See docs for reference
+You can configure the system using .yaml configs. See docs for reference ...
 """
+
 
 def sys_print(msg: str) -> None:
     print(colored(msg, "white", "on_grey", attrs=["bold"]))
+
 
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -60,27 +61,23 @@ def backup_source_code(backup_directory):
     os.system("chmod -R g+w {}".format(backup_directory))
 
 
-@hydra.main(version_base = None, config_path="./configs/", config_name="slam")
+@hydra.main(version_base=None, config_path="./configs/", config_name="slam")
 def run_slam(cfg):
 
-    sys_print(f"\n\n** Running {cfg.data.input_folder} in {cfg.slam.mode} mode!!! **\n\n")
-
+    output_folder = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
     setup_seed(43)
     torch.multiprocessing.set_start_method("spawn")
-
     # Save state for reproducibility
-    backup_source_code(os.path.join(cfg.slam.output_folder, "code"))
-    config.save_config(cfg, f"{cfg.slam.output_folder}/cfg.yaml")
+    backup_source_code(os.path.join(output_folder, "code"))
+    config.save_config(cfg, f"{output_folder}/cfg.yaml")
 
-    # Load dataset
-    dataset = get_dataset(cfg, device=cfg.slam.device)
+    sys_print(f"\n\n** Running {cfg.data.input_folder} in {cfg.mode} mode!!! **\n\n")
+    dataset = get_dataset(cfg, device=cfg.device)
+    slam = SLAM(cfg, output_folder=output_folder)
 
-    # Run SLAM 
-    slam = SLAM(cfg)
-    slam.dataset = dataset
+    sys_print(f"Running on {len(dataset)} frames")
     slam.run(dataset)
     sys_print("Done!")
-
 
 
 if __name__ == "__main__":

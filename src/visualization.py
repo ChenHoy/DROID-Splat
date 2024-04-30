@@ -16,7 +16,7 @@ import cv2
 import open3d as o3d
 
 # Only shows errors, not warnings
-o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
+# o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
 
 from matplotlib.pyplot import get_cmap
 import matplotlib.pyplot as plt
@@ -42,6 +42,47 @@ CAM_POINTS = np.array(
 CAM_LINES = np.array([[1, 2], [2, 3], [3, 4], [4, 1], [1, 0], [0, 2], [3, 0], [0, 4], [5, 7], [7, 6]])
 
 
+def plot_3d(rgb: torch.Tensor, depth: torch.Tensor):
+    """Use Open3d to plot the 3D point cloud from the monocular depth and input image."""
+
+    def get_calib_heuristic(ht: int, wd: int) -> np.ndarray:
+        """On in-the-wild data we dont have any calibration file.
+        Since we optimize this calibration as well, we can start with an initial guess
+        using the heuristic from DeepV2D and other papers"""
+        cx, cy = wd // 2, ht // 2
+        fx, fy = wd * 1.2, wd * 1.2
+        return fx, fy, cx, cy
+
+    rgb = np.asarray(rgb.cpu())
+    depth = np.asarray(depth.cpu())
+    invalid = (depth < 0.001).flatten()
+    # Get 3D point cloud from depth map
+    depth = depth.squeeze()
+    h, w = depth.shape
+    x, y = np.meshgrid(np.arange(w), np.arange(h))
+    x, y = x.flatten(), y.flatten()
+    depth = depth.flatten()
+
+    # Convert to 3D points
+    fx, fy, cx, cy = get_calib_heuristic(h, w)
+    x3 = (x - cx) * depth / fx
+    y3 = (y - cy) * depth / fy
+    z3 = depth
+
+    # Convert to Open3D format
+    xyz = np.stack([x3, y3, z3], axis=1)
+    rgb = np.stack([rgb[0, :, :].flatten(), rgb[1, :, :].flatten(), rgb[2, :, :].flatten()], axis=1)
+    depth = depth[~invalid]
+    xyz = xyz[~invalid]
+    rgb = rgb[~invalid]
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(xyz)
+    pcd.colors = o3d.utility.Vector3dVector(rgb)
+
+    # Plot the point cloud
+    o3d.visualization.draw_geometries([pcd])
+
+
 def depth2rgb(depths: torch.Tensor, min_depth: float = 0.0, max_depth: float = 5.0) -> np.ndarray:
     """Convert a depth array to a color representation.
 
@@ -56,6 +97,23 @@ def depth2rgb(depths: torch.Tensor, min_depth: float = 0.0, max_depth: float = 5
     rgb = []
     for depth in depths:
         rgb.append(get_clipped_depth_visualization(depth, min_depth, max_depth))
+    return np.asarray(rgb)[..., :3]
+
+
+def uncertainty2rgb(weights: torch.Tensor, min_val: float = 0.0, cmap: str = "turbo") -> np.ndarray:
+    """Convert a depth array to a color representation.
+
+    args:
+    ---
+    depths [torch.Tensor]: Depth tensor of shape (N, H, W) or (H, W)
+    """
+    if weights.ndim == 2:
+        weights = weights.unsqueeze(0)
+
+    weights = weights.cpu().numpy()
+    rgb = []
+    for weight in weights:
+        rgb.append(array2rgb(weight, cmap=cmap, vmin=min_val))
     return np.asarray(rgb)[..., :3]
 
 
@@ -215,22 +273,52 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
     droid_visualization.camera_scale = 0.025
     droid_visualization.ix = 0
 
-    droid_visualization.filter_thresh = 0.005
+    # Thresholds for visualization filtering
+    droid_visualization.mv_filter_thresh = 0.005
+    droid_visualization.mv_filter_count = 4
+    droid_visualization.uncertainty_filter_on = True
+    droid_visualization.unc_filter_thresh = 0.2
+
     droid_visualization.do_reset = True
 
-    def increase_filter(vis):
-        droid_visualization.filter_thresh *= 2
+    def increase_mv_filter(vis):
+        droid_visualization.mv_filter_thresh *= 2
         with droid_visualization.video.get_lock():
             droid_visualization.video.dirty[: droid_visualization.video.counter.value] = True
 
-    def decrease_filter(vis):
-        droid_visualization.filter_thresh *= 0.5
+    def decrease_mv_filter(vis):
+        droid_visualization.mv_filter_thresh *= 0.5
         with droid_visualization.video.get_lock():
             droid_visualization.video.dirty[: droid_visualization.video.counter.value] = True
+
+    def increase_unc_filter(vis):
+        droid_visualization.unc_filter_thresh *= 2
+        with droid_visualization.video.get_lock():
+            droid_visualization.video.dirty[: droid_visualization.video.counter.value] = True
+
+    def decrease_unc_filter(vis):
+        droid_visualization.unc_filter_thresh *= 0.5
+        with droid_visualization.video.get_lock():
+            droid_visualization.video.dirty[: droid_visualization.video.counter.value] = True
+
+    def increase_mv_count(vis):
+        droid_visualization.mv_filter_count += 1
+        with droid_visualization.video.get_lock():
+            droid_visualization.video.dirty[: droid_visualization.video.counter.value] = True
+
+    def decrease_mv_count(vis):
+        # Count should be > 1!
+        if droid_visualization.mv_filter_count > 1:
+            droid_visualization.mv_filter_count -= 1
+            with droid_visualization.video.get_lock():
+                droid_visualization.video.dirty[: droid_visualization.video.counter.value] = True
 
     def deactivate_update(vis):
         with droid_visualization.video.get_lock():
             droid_visualization.video.dirty[:] = False
+
+    def deactivate_uncertainty(vis):
+        droid_visualization.uncertainty_filter_on = False
 
     def increase_camera(vis):
         droid_visualization.camera_scale *= 1 / 0.8
@@ -259,22 +347,24 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
 
         video.dirty[dirty_index] = False
 
-        # convert poses to 4x4 matrix
         poses = torch.index_select(video.poses, 0, dirty_index)
         disps = torch.index_select(video.disps, 0, dirty_index)
+        # convert poses to 4x4 matrix
         Ps = SE3(poses).inv().matrix().cpu().numpy()
-
         images = torch.index_select(video.images, 0, dirty_index)
-        # images = images.cpu()[:, [2, 1, 0], 3::8, 3::8].permute(0, 2, 3, 1)
         images = images.cpu()[:, ..., 3::8, 3::8].permute(0, 2, 3, 1)
         points = droid_backends.iproj(SE3(poses).inv().data, disps, video.intrinsics[0]).cpu()
 
-        thresh = droid_visualization.filter_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
-
+        thresh = droid_visualization.mv_filter_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
         count = droid_backends.depth_filter(video.poses, video.disps, video.intrinsics[0], dirty_index, thresh)
-
         count, disps = count.cpu(), disps.cpu()
-        masks = (count >= 2) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
+        # Only keep points that are consistent across multiple views and not too close by
+        masks = (count >= droid_visualization.mv_filter_count) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
+
+        if droid_visualization.uncertainty_filter_on:
+            weights = torch.index_select(video.uncertainty, 0, dirty_index)
+            masks2 = weights > droid_visualization.unc_filter_thresh
+            masks = masks & masks2.cpu()
 
         for i in range(len(dirty_index)):
             pose = Ps[i]
@@ -301,8 +391,8 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
             droid_visualization.cameras[ix] = cam_actor
 
             mask = masks[i].reshape(-1)
-            pts = points[i].reshape(-1, 3)[mask].cpu().numpy()
-            clr = images[i].reshape(-1, 3)[mask].cpu().numpy()
+            pts = points[i].reshape(-1, 3)[mask].numpy()
+            clr = images[i].reshape(-1, 3)[mask].numpy()
 
             ## add point actor ###
             point_actor = create_point_actor(pts, clr)
@@ -322,11 +412,16 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
     ### create Open3D visualization ###
     vis = o3d.visualization.VisualizerWithKeyCallback()
     vis.register_animation_callback(animation_callback)
-    vis.register_key_callback(ord("S"), increase_filter)
-    vis.register_key_callback(ord("A"), decrease_filter)
-    vis.register_key_callback(ord("Q"), deactivate_update)
+    vis.register_key_callback(ord("S"), increase_mv_filter)
+    vis.register_key_callback(ord("A"), decrease_mv_filter)
+    vis.register_key_callback(ord("V"), increase_mv_count)
+    vis.register_key_callback(ord("B"), decrease_mv_count)
+    vis.register_key_callback(ord("F"), increase_unc_filter)
+    vis.register_key_callback(ord("G"), decrease_unc_filter)
     vis.register_key_callback(ord("M"), increase_camera)
     vis.register_key_callback(ord("N"), decrease_camera)
+    vis.register_key_callback(ord("Q"), deactivate_update)
+    vis.register_key_callback(ord("U"), deactivate_uncertainty)
     vis.register_key_callback(ord("R"), start_stop_view_resetting)
 
     vis.create_window(height=540, width=960)

@@ -4,28 +4,25 @@ defaults:
  - tracking: tracking.yaml
  - data: Replica/replica_mono.yaml
 
-
-slam:
-  output_folder: "/output"
-  device: "cuda:0"
-  sync_method: strict
-  verbose: True
-  mode: "mono"  # 'mono', 'prgbd', 'rgbd'
-  stride: 1
-  opt_intr: True
-  evaluate: False
-
-  run_backend: True
-  run_frontend: True
-  run_multiview_filter: True
-  run_mapping: True
-  run_visualization: True
-  show_stream: False
-
-
-
 hydra:
+  run:
+    dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}
   job:
     chdir: False
+    name: mono_slam
 
+device: "cuda:0"
+sync_method: strict
+mode: "mono"  # 'mono', 'prgbd', 'rgbd'
+stride: 2
+opt_intr: False # Optimizes additional intrinsic parameters
+sleep_delay: 2.0 # Time delay to synchronize frontend and backend
 
+run_backend: True
+run_frontend: True
+run_multiview_filter: True
+run_mapping: True
+run_visualization: True
+show_stream: False
+
+evaluate: False
