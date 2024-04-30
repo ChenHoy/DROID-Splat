@@ -19,23 +19,18 @@ NOTE you can use this filter as a good density proxy for cleaning noisy point cl
 
 
 class MultiviewFilter(nn.Module):
-    def __init__(self, cfg, args, video):
+    def __init__(self, cfg, slam):
         super(MultiviewFilter, self).__init__()
 
-        self.args = args
         self.cfg = cfg
-        self.device = args.device
-        self.warmup = cfg["tracking"]["warmup"]
-
-        # Depth error < 0.01m
-        self.filter_thresh = cfg["tracking"]["multiview_filter"]["thresh"]
-        # Points viewed by at least 3 cameras
-        self.filter_visible_num = cfg["tracking"]["multiview_filter"]["visible_num"]
-
-        self.kernel_size = cfg["tracking"]["multiview_filter"]["kernel_size"]  # 3
-        self.bound_enlarge_scale = cfg["tracking"]["multiview_filter"]["bound_enlarge_scale"]
-
-        self.video = video
+        self.device = cfg.device
+        self.warmup = cfg.tracking.warmup
+        self.filter_thresh = cfg.tracking.multiview_filter.thresh  # Multiy view consistency threshold
+        # Points within threshold consistent in at least k frames
+        self.filter_visible_num = cfg.tracking.multiview_filter.visible_num
+        self.kernel_size = cfg.tracking.multiview_filter.kernel_size
+        self.bound_enlarge_scale = cfg.tracking.multiview_filter.bound_enlarge_scale
+        self.video = slam.video
 
     # NOTE chen: This distance can already be computed with a single function call in Lietorch
     def pose_dist(self, Tquad0: torch.Tensor, Tquad1: torch.Tensor) -> torch.Tensor:

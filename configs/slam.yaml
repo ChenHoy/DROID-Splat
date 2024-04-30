@@ -1,0 +1,31 @@
+defaults:
+ - _self_
+ - mapping: gaussian_mapping.yaml
+ - tracking: tracking.yaml
+ - data: Replica/replica_mono.yaml
+
+
+slam:
+  output_folder: "/output"
+  device: "cuda:0"
+  sync_method: strict
+  verbose: True
+  mode: "mono"  # 'mono', 'prgbd', 'rgbd'
+  stride: 1
+  opt_intr: True
+  evaluate: False
+
+  run_backend: True
+  run_frontend: True
+  run_multiview_filter: True
+  run_mapping: True
+  run_visualization: True
+  show_stream: False
+
+
+
+hydra:
+  job:
+    chdir: False
+
+

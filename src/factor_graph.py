@@ -187,6 +187,7 @@ class FactorGraph:
             self.video.timestamp[ix] = self.video.timestamp[ix + 1]
             self.video.images[ix] = self.video.images[ix + 1]
             self.video.dirty[ix] = self.video.dirty[ix + 1]
+            self.video.mapping_dirty[ix] = self.video.mapping_dirty[ix + 1]
             self.video.red[ix] = self.video.red[ix + 1]
             self.video.poses[ix] = self.video.poses[ix + 1]
             self.video.poses_gt[ix] = self.video.poses_gt[ix + 1]
@@ -578,9 +579,7 @@ class FactorGraph:
             )
 
     @torch.cuda.amp.autocast(enabled=False)
-    def prior_update_lowmem(
-        self, t0=None, t1=None, iters=2, steps=8, max_t=None, lm: float = 1e-5, ep: float = 1e-2, ba_type="dense"
-    ):
+    def prior_update_lowmem(self, t0=None, t1=None, iters=2, steps=8, max_t=None, lm: float = 1e-5, ep: float = 1e-2):
         """run update operator on factor graph - reduced memory implementation"""
         cur_t = self.video.counter.value
 

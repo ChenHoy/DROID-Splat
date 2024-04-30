@@ -1,6 +1,5 @@
-verbose: False
 dataset: "folder"
-mode: "mono"
+mode: $mode
 stride: 1
 mapping:
   device: "cuda:0"

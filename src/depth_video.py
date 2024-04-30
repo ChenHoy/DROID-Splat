@@ -16,22 +16,19 @@ class DepthVideo:
     Data structure of multiple buffers to keep track of indices, poses, disparities, images, external disparities and more
     """
 
-    def __init__(self, cfg, args):
+    def __init__(self, cfg):
         self.cfg = cfg
-        self.args = args
-        self.device = device = args.device
 
         ### Intrinsics / Calibration ###
-        # NOTE you almost always use a pinhole model
-        if args.camera_model == "pinhole":
+        if cfg.data.cam.camera_model == "pinhole":
             self.n_intr = 4
             self.model_id = 0
-        elif args.camera_model == "mei":
+        elif cfg.data.cam.camera_model == "mei":
             self.n_intr = 5
             self.model_id = 1
         else:
             raise Exception("Camera model not implemented! Choose either pinhole or mei model.")
-        self.opt_intr = args.opt_intr
+        self.opt_intr = cfg.opt_intr
 
         self.counter = Value("i", 0)
         self.ready = Value("i", 0)
@@ -39,17 +36,24 @@ class DepthVideo:
         # NOTE we have multiple lock to avoid deadlocks between bundle adjustment and frontend loop closure
         self.ba_lock = {"dense": Value("i", 0), "loop": Value("i", 0)}
         self.global_ba_lock = Value("i", 0)
-
-        self.ht = ht = cfg["cam"]["H_out"]
-        self.wd = wd = cfg["cam"]["W_out"]
-        self.stereo = cfg["mode"] == "stereo"
+        ht = cfg.data.cam.H_out
+        self.ht = ht
+        wd = cfg.data.cam.W_out
+        self.wd = wd
+        self.stereo = cfg.mode == "stereo"
+        device = cfg.device
+        self.device = device
         c = 1 if not self.stereo else 2
-        self.scale_factor = s = 8
-        buffer = cfg["tracking"]["buffer"]
+        self.scale_factor = 8
+        s = self.scale_factor
+        buffer = cfg.tracking.buffer
 
         ### state attributes -> Raw map ###
         self.timestamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
+        # List for keeping track of updated frames for visualization
         self.dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
+        # List for keeping track of updated frames for Map Renderer
+        self.mapping_dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
         self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float)
         self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
         self.red = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
@@ -63,11 +67,12 @@ class DepthVideo:
 
         self.disps_sens = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         # Scale and shift parameters for ambiguous monocular depth
-        self.optimize_scales = cfg["mode"] == "prgbd"  # Optimze the scales and shifts for Pseudo-RGBD mode
+        self.optimize_scales = cfg.mode == "prgbd"  # Optimze the scales and shifts for Pseudo-RGBD mode
+        self.warmup_prior = 50  # cfg["tracking"]["warmup_prior"]
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
-        # In case we have an external groundtruth
-        # TODO chen: is this ever used right now?
+        # NOTE chen: This is redundant as is this is simply 1 / disps_sens
+        # TODO if we need to squeeze memory we can remove this
         self.depths_gt = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
 
         ### feature attributes ###
@@ -85,6 +90,7 @@ class DepthVideo:
         # FIXME do we already need this object? These are exactly the same as self.poses
         self.poses_filtered = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # w2c quaterion
         self.poses_filtered[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
+
         # Keep track of which frames have been filtered
         self.filtered_id = torch.tensor([-1], dtype=torch.int, device=device).share_memory_()
         self.update_priority = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
@@ -117,11 +123,9 @@ class DepthVideo:
         if item[3] is not None:
             self.disps[index] = item[3]
 
-        if item[4] is not None:
+        if item[4] is not None and self.cfg.mode != "mono":
             self.depths_gt[index] = item[4]
             depth = item[4][..., 3::8, 3::8]
-            # Clamp negative depth to a small value
-            depth.clamp_(min=0.001)
             self.disps_sens[index] = torch.where(depth > 0, 1.0 / depth, depth)
             # If we have a prior, we initialize disparity with the prior
             self.disps[index] = self.disps_sens[index].clone()
@@ -290,8 +294,7 @@ class DepthVideo:
         """
         # Rescale the external disparities
         self.disps_sens = self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
-        # Always ensure that disparities are non-negative!!!
-        self.disps_sens.clamp_(min=0.001)
+        torch.clamp_(self.disps_sens, min=0.001)
         # Reset the scale and shift parameters to initial state
         self.scales = torch.ones_like(self.scales)
         self.shifts = torch.zeros_like(self.shifts)
@@ -348,11 +351,16 @@ class DepthVideo:
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
+            if self.optimize_scales and t1 <= self.warmup_prior:
+                disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
+            else:
+                disps_sens = self.disps_sens
+
             droid_backends.ba(
                 self.poses,
                 self.disps,
                 self.intrinsics[intrinsic_common_id],
-                self.disps_sens,
+                disps_sens,
                 target,
                 weight,
                 eta,
@@ -369,7 +377,7 @@ class DepthVideo:
             )
             self.disps.clamp_(min=0.001)  # Always make sure that Disparities are non-negative!!!
 
-    def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1):
+    def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 0.01):
         """Bundle adjustment over structure with a scalable prior.
 
         We keep the poses fixed, since this would create an unnecessary ambiguity and can make the system unstable!
@@ -387,6 +395,8 @@ class DepthVideo:
             self.uncertainty[idx] = torch.norm(uncertainty, dim=1)
 
             # MoBA
+            # Sanity check for non-negative disparities
+            self.disps.clamp_(min=0.001), self.disps_sens.clamp_(min=0.001)
             droid_backends.ba(
                 self.poses,
                 self.disps,
@@ -406,7 +416,6 @@ class DepthVideo:
                 True,
                 self.opt_intr,
             )
-
             # JDSA
             bundle_adjustment(
                 target,
@@ -422,7 +431,7 @@ class DepthVideo:
                 self.disps_sens,
                 self.scales,
                 self.shifts,
-                iters=iters + 2,
+                iters=iters + 2,  # Use slightly more iterations here, so we get the scales right for sure!
                 lm=lm,
                 ep=ep,
                 scale_prior=True,

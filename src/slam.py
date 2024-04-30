@@ -17,8 +17,8 @@ import torch.multiprocessing as mp
 from lietorch import SE3
 
 from .droid_net import DroidNet
-from .frontend import Tracker
-from .backend import BundleAdjustment
+from .frontend import FrontendWrapper
+from .backend import BackendWrapper
 from .depth_video import DepthVideo
 from .multiview_filter import MultiviewFilter
 from .visualization import droid_visualization, depth2rgb, uncertainty2rgb
@@ -42,20 +42,18 @@ class SLAM:
     We combine these building blocks in a multiprocessing environment.
     """
 
-    def __init__(self, args, cfg):
+    def __init__(self, cfg, dataset=None, output_folder=None):
         super(SLAM, self).__init__()
-        self.args = args
         self.cfg = cfg
-        self.device = args.device
-        self.mode = cfg["mode"]
-        self.only_tracking = cfg["only_tracking"]
+        self.device = cfg.get("device", torch.device("cuda:0"))
+        self.mode = cfg.mode
+        self.create_out_dirs(output_folder)
 
-        self.create_out_dirs(args, cfg)
         self.update_cam(cfg)
         self.load_bound(cfg)
 
         self.net = DroidNet()
-        self.load_pretrained(cfg["tracking"]["pretrained"])
+        self.load_pretrained(cfg.tracking.pretrained)
         self.net.to(self.device).eval()
         self.net.share_memory()
 
@@ -77,43 +75,39 @@ class SLAM:
         self.visualizing_finished = torch.zeros((1)).int()
         self.visualizing_finished.share_memory_()
 
-        # Dummy for pause/interrupts
-        # NOTE chen: Use this to synchronize frontend and backend
-        # TODO make configurable
-        self.sleep_time = 3  # Time for giving delays
-        # Sanity check for keeping the load balanced between frontend & backend
-        self.max_ram_usage = 0.9  # Use only 90% of max. RAM with frontend/backend
-        self.plot_uncertainty = True
+        # Insert a dummy delay to snychronize frontend and backend as needed
+        self.sleep_time = cfg.get("sleep_delay", 3)
+        # Delete backend when hitting this threshold, so we can keep going with just frontend
+        self.max_ram_usage = cfg.get("max_ram_usage", 0.9)
+        self.plot_uncertainty = cfg.get("plot_uncertainty", False)  # Show the optimization uncertainty maps
 
         # Stream the images into the main thread
         self.input_pipe = mp.Queue()
 
         # store images, depth, poses, intrinsics (shared between process)
-        # NOTE: we can use this for getting both gt and rendered images
-        self.video = DepthVideo(cfg, args)
-
-        # Worker process functions
-        self.tracker = Tracker(cfg, args, self)
-        self.multiview_filter = MultiviewFilter(cfg, args, self.video)
-        self.dense_ba = BundleAdjustment(cfg, args, self)
+        self.video = DepthVideo(cfg)  # NOTE: we can use this for getting both gt and rendered images
+        self.frontend = FrontendWrapper(cfg, self)
+        self.multiview_filter = MultiviewFilter(cfg, self)
+        self.backend = BackendWrapper(cfg, self)
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
-        # self.gaussian_mapper = GaussianMapper(cfg, args, self)
+        # self.gaussian_mapper = GaussianMapper(cfg, self)
 
-        self.do_evaluate = cfg["evaluate"]
-        # self.do_evaluate = cfg.slam.evaluate
-        self.dataset = None
-        # NOTE chen: Use 5.0 for indoor datasets and 50.0 (TartanAir) / 100.0 (KITTI) for outdoor scenes
-        self.max_depth_visu = 50.0  # Cut of value to show a consistent depth stream
+        self.do_evaluate = cfg.evaluate
+        self.dataset = dataset
+
+        if cfg.data.dataset in ["kitti", "tartanair", "euroc"]:
+            self.max_depth_visu = 50.0  # Cut of value to show a consistent depth stream
+        else:
+            self.max_depth_visu = 5.0
 
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
 
-    def create_out_dirs(self, args, cfg: DictConfig) -> None:
-        if args.output is None:
-            self.output = cfg["data"]["output"]
+    def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
+        if output_folder is not None:
+            self.output = output_folder
         else:
-            self.output = args.output
-        # self.output = cfg.slam.output_folder
+            self.output = "./outputs/"
 
         os.makedirs(self.output, exist_ok=True)
         os.makedirs(f"{self.output}/logs/", exist_ok=True)
@@ -127,12 +121,12 @@ class SLAM:
         such as resize or edge crop
         """
         # resize the input images to crop_size(variable name used in lietorch)
-        H, W = float(cfg["cam"]["H"]), float(cfg["cam"]["W"])
-        fx, fy = cfg["cam"]["fx"], cfg["cam"]["fy"]
-        cx, cy = cfg["cam"]["cx"], cfg["cam"]["cy"]
+        H, W = float(cfg.data.cam.H), float(cfg.data.cam.W)
+        fx, fy = cfg.data.cam.fx, cfg.data.cam.fy
+        cx, cy = cfg.data.cam.cx, cfg.data.cam.cy
 
-        h_edge, w_edge = cfg["cam"]["H_edge"], cfg["cam"]["W_edge"]
-        H_out, W_out = cfg["cam"]["H_out"], cfg["cam"]["W_out"]
+        h_edge, w_edge = cfg.data.cam.H_edge, cfg.data.cam.W_edge
+        H_out, W_out = cfg.data.cam.H_out, cfg.data.cam.W_out
 
         self.fx = fx * (W_out + w_edge * 2) / W
         self.fy = fy * (H_out + h_edge * 2) / H
@@ -151,8 +145,8 @@ class SLAM:
         Args:
             cfg [dict], parsed config dict
         """
-        # self.bound = torch.from_numpy(np.array(cfg.data.bound)).float()
-        self.bound = torch.from_numpy(np.array(cfg["mapping"]["bound"])).float()
+        # scale the bound if there is a global scaling factor
+        self.bound = torch.from_numpy(np.array(cfg.data.bound)).float()
 
     def load_pretrained(self, pretrained: str) -> None:
         self.info(f"Load pretrained checkpoint from {pretrained}!")
@@ -179,11 +173,13 @@ class SLAM:
             timestamp, image, depth, intrinsic, gt_pose = frame
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
-            # Transmit the incoming stream to another visualization thread
-            input_queue.put(image)
-            input_queue.put(depth)
 
-            self.tracker(timestamp, image, depth, intrinsic, gt_pose)
+            if self.cfg.show_stream:
+                # Transmit the incoming stream to another visualization thread
+                input_queue.put(image)
+                input_queue.put(depth)
+
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose)
 
         self.tracking_finished += 1
         self.all_finished += 1
@@ -199,94 +195,94 @@ class SLAM:
         In order to keep the system going, we simply dont use the backend until we can afford it again.
         """
         used_mem, free_mem = self.get_ram_usage()
-        if used_mem > max_ram and self.dense_ba is not None:
+        if used_mem > max_ram and self.backend is not None:
             print(colored(f"[Main]: Warning: Deleting Backend due to high memory usage [{used_mem} %]!", "red"))
             print(colored(f"[Main]: Warning: Warning: Got only {free_mem/ 1024 ** 3} GB left!", "red"))
-            del self.dense_ba
-            self.dense_ba = None
+            del self.backend
+            self.backend = None
             gc.collect()
             torch.cuda.empty_cache()
 
         # NOTE chen: if we deleted the backend due to memory issues we likely have not a lot of capacity for left backend
         # only use backend again once we have some slack -> 50% free RAM (12GB in use)
-        if self.dense_ba is None and used_mem <= min_ram:
+        if self.backend is None and used_mem <= min_ram:
             self.info("Reinstantiating Backend ...")
-            self.dense_ba = BundleAdjustment(self.cfg, self.args, self)
-            self.dense_ba.to(self.device)
+            self.backend = BackendWrapper(self.cfg, self.args, self)
+            self.backend.to(self.device)
 
-    def backend(self, rank, dont_run=False):
+    def global_ba(self, rank, run=False):
         self.info("Full Bundle Adjustment thread started!")
         self.all_trigered += 1
 
-        while self.tracking_finished < 1 and not dont_run:
+        while self.tracking_finished < 1 and run:
 
             # Only run backend if we have enough RAM for it
             self.ram_safeguard_backend(max_ram=self.max_ram_usage)
-            if self.dense_ba is not None:
-                self.dense_ba()
+            if self.backend is not None:
+                if self.backend.enable_loop:
+                    self.backend(local_graph=self.frontend.optimizer.graph)
+                else:
+                    self.backend()
                 sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
         # Run one last time after tracking finished
-        if not dont_run and self.dense_ba is not None:
+        if run and self.backend is not None:
             with self.video.get_lock():
                 t_end = self.video.counter.value
 
             msg = "Optimize full map: [{}, {}]!".format(0, t_end)
-            self.dense_ba.info(msg)
-            _, _ = self.dense_ba.backend.dense_ba(t_start=0, t_end=t_end, steps=6)
-            _, _ = self.dense_ba.backend.dense_ba(t_start=0, t_end=t_end, steps=6)
+            self.backend.info(msg)
+            _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
+            _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
 
         self.backend_finished += 1
         self.all_finished += 1
         self.info("Full Bundle Adjustment done!")
 
     # TODO update the multiview_filter to include uncertainty
-    def multiview_filtering(self, rank, dont_run=False):
+    def multiview_filtering(self, rank, run=False):
         self.info("Multiview Filtering thread started!")
         self.all_trigered += 1
 
-        while (self.tracking_finished < 1 or self.backend_finished < 1) and not dont_run:
+        while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
             self.multiview_filter()
 
         self.multiview_filtering_finished += 1
         self.all_finished += 1
         self.info("Multiview Filtering Done!")
 
-    def gaussian_mapping(self, rank, dont_run=False):
+    def gaussian_mapping(self, rank, run=True):
         self.info("Gaussian Mapping thread started!")
         self.all_trigered += 1
 
-        # NOTE chen: We run rendering one last time even after backend is done for finetuning
-        # at some point we have to think about whether this makes sense or if rendering could be even better
-        while self.tracking_finished < 1 and self.backend_finished < 1 and not dont_run:
+        while self.tracking_finished < 1 and self.backend_finished < 1 and run:
             self.gaussian_mapper()
 
         # Run for one last time after everything else finished
         finished = False
-        if not dont_run:
-            while not finished:
-                finished = self.gaussian_mapper(the_end=True)
+        while not finished and run:
+            finished = self.gaussian_mapper(the_end=True)
 
         self.gaussian_mapping_finished += 1
         self.all_finished += 1
         self.info("Gaussian Mapping done!")
 
-    def visualizing(self, rank, dont_run=False):
+    def visualizing(self, rank, run=True):
         self.info("Visualization thread started!")
         self.all_trigered += 1
 
-        while (self.tracking_finished < 1 or self.backend_finished < 1) and (not dont_run):
+        while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
             droid_visualization(self.video, device=self.device, save_root=self.output)
 
         self.visualizing_finished += 1
         self.all_finished += 1
         self.info("Visualization done!")
 
-    def show_stream(self, rank, input_queue: mp.Queue) -> None:
+    def show_stream(self, rank, input_queue: mp.Queue, run: bool = False) -> None:
         self.info("OpenCV Image stream thread started!")
         self.all_trigered += 1
 
-        while self.tracking_finished < 1 or self.backend_finished < 1:
+        while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
             if not input_queue.empty():
                 try:
                     rgb = input_queue.get()
@@ -399,17 +395,33 @@ class SLAM:
 
         self.info("Terminate done!")
 
+    def test(self, stream):
+        """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
+
+        processes = [
+            # mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
+            mp.Process(target=self.visualizing, args=(1, False))
+        ]
+
+        self.num_running_thread[0] += len(processes)
+        for p in processes:
+            p.start()
+
+        for frame in tqdm(stream):
+            timestamp, image, depth, intrinsic, gt_pose = frame
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose)
+
     def run(self, stream):
         # TODO visualizing and guassian mapping cannot be run at the same time, because they both access the dirty_index
         # -> introduce multiple indices so we can keep track of what we already visualized and what we already put into the renderer
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
-            mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
+            mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream)),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
-            mp.Process(target=self.backend, args=(2, False)),
-            # mp.Process(target=self.multiview_filtering, args=(3, False)),
-            mp.Process(target=self.visualizing, args=(4, False)),
-            # mp.Process(target=self.gaussian_mapping, args=(5, False)),
+            mp.Process(target=self.global_ba, args=(2, self.cfg.run_backend)),
+            mp.Process(target=self.multiview_filtering, args=(3, self.cfg.run_multiview_filter)),
+            mp.Process(target=self.visualizing, args=(4, self.cfg.run_visualization)),
+            mp.Process(target=self.gaussian_mapping, args=(5, self.cfg.run_mapping)),
         ]
 
         self.num_running_thread[0] += len(processes)
@@ -428,18 +440,3 @@ class SLAM:
                 break
 
         self.terminate(processes, stream)
-
-    def test(self, stream):
-
-        processes = [
-            # mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
-            mp.Process(target=self.visualizing, args=(1, False))
-        ]
-
-        self.num_running_thread[0] += len(processes)
-        for p in processes:
-            p.start()
-
-        for frame in tqdm(stream):
-            timestamp, image, depth, intrinsic, gt_pose = frame
-            self.tracker(timestamp, image, depth, intrinsic, gt_pose)

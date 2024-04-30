@@ -6,6 +6,7 @@
 This repository borrows from the following work  
 - "**GO-SLAM: Global Optimization for Consistent 3D Instant Reconstruction, Zhang et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
 - "**Deep geometry-aware camera self-calibration from video, Hagemann et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
+- "**Gaussian Splatting SLAM, Matsuki et al**",  [CVPR 2024](https://cvpr.thecvf.com/)
 
 
 ## :clapper: Introduction
@@ -30,6 +31,17 @@ This is a deep-learning-based dense visual SLAM framework that achieves **real-t
   booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision},
   pages={3438--3448},
   year={2023}
+}
+```
+
+```bibtex
+@misc{matsuki2024gaussian,
+      title={Gaussian Splatting SLAM}, 
+      author={Hidenobu Matsuki and Riku Murai and Paul H. J. Kelly and Andrew J. Davison},
+      year={2024},
+      eprint={2312.06741},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV}
 }
 ```
 
@@ -188,12 +200,21 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
   - [x] Implement Gauss-Newton updates in Python on combined objective of Reprojection error and Depth prior loss with fixed pose graph
   - [x] Use a mixed residual objective in a true least-squares objective
 - [x] FIX bug in ellipsoid renderer
-- [ ] FIX bug in Gaussian Mapper and Multiview filter
-    - [ ] Which array creates the memory access error?
-    - [ ] How can we resolve this?
+- [x] FIX memory error in CUDA kernel
+    - This turned out to be a problem in Eigen. You cant damp the sparse system matrix with a dense diagonal matrix using the += operator.
+    - Instead iterating over the diagonal elements is safe and still super fast
+- [x] FIX bug in Gaussian Mapper and Multiview filter
+    - [x] Which array creates the memory access error? -> Multi-thread acces on video data structure needs to be locked
+    - [x] How can we resolve this? -> Lock indexing common data, do not mix .cpu() calls when indexing on GPU arrays!
+- [x] FIX instable SLAM system on TartanAir scenes
+    - [x] Move loop closure away from frontend into backend  
+        -> This makes more sense, as the frontend would suddenly grow without control and not optimize only locally
+    - [x] Safeguard the Backend to avoid OOM in case the scene gets too big
+    - [x] Make system more memory efficient -> Empty cache in frontend as speed/memory tradeoff
 - [ ] FIX bug in scale optimization / Python BA on outdoor scenes
     - [ ] Optimization turns instable over longer windows and large scenes. What is the source?
     - [ ] Fix scale parameters after optimizing them once?
+- [ ] Use both multi-view consistency and uncertainty to filter the map before sending to Renderer
 - [ ] Backpropagate the pose loss from the Rendering objective into the SLAM tracking
     - [x] Optimize poses with additional optimizer
     - [ ] Evaluate optimized poses with new metrics
