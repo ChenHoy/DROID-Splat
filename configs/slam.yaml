@@ -18,11 +18,11 @@ stride: 2
 opt_intr: False # Optimizes additional intrinsic parameters
 sleep_delay: 2.0 # Time delay to synchronize frontend and backend
 
-run_backend: True
+run_backend: False
 run_frontend: True
-run_multiview_filter: False
-run_mapping: False
-run_visualization: True
+run_multiview_filter: True
+run_mapping: True
+run_visualization: False
 show_stream: False
 
 evaluate: False
