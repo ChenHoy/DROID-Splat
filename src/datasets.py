@@ -432,12 +432,14 @@ class CoFusion(BaseDataset):
 
 
 class TUM_RGBD(BaseDataset):
-    def __init__(self, cfg, args, device="cuda:0"):
-        super(TUM_RGBD, self).__init__(cfg, args, device)
+    def __init__(self, cfg, device="cuda:0"):
+        super(TUM_RGBD, self).__init__(cfg, device)
         self.color_paths, self.depth_paths, self.poses = self.loadtum(self.input_folder, frame_rate=32)
-        stride = cfg["stride"]
-        self.color_paths = self.color_paths[::stride]
-        self.depth_paths = self.depth_paths[::stride]
+        stride = cfg.slam.stride
+        end_frame = 1000 # Dynamic after 1000 frames
+        self.color_paths = self.color_paths[:end_frame:stride] 
+        self.depth_paths = self.depth_paths[:end_frame:stride]
+        self.poses = None if self.poses is None else self.poses[:end_frame:stride]
         self.n_img = len(self.color_paths)
 
     def parse_list(self, filepath, skiprows=0):

@@ -150,16 +150,17 @@ class GaussianMapper(object):
         """
         Get all new cameras from the video.
         """
-        for idx in range(self.last_idx, self.cur_idx - self.delay):
-            color, depth, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
-            color = color.permute(2, 0, 1)
-            intrinsics = self.video.intrinsics[0] * self.video.scale_factor
-            cam = self.camera_from_frame(idx, color, depth, intrinsics, c2w)
-            cam.update_RT(cam.R_gt, cam.T_gt) # Assuming we found the best pose in tracking
+        with self.video.get_lock():
+            for idx in range(self.last_idx, self.cur_idx - self.delay):
+                color, depth, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
+                color = color.permute(2, 0, 1)
+                intrinsics = self.video.intrinsics[0] * self.video.scale_factor
+                cam = self.camera_from_frame(idx, color, depth, intrinsics, c2w)
+                cam.update_RT(cam.R_gt, cam.T_gt) # Assuming we found the best pose in tracking
 
-            self.new_cameras.append(cam)
-            if len(self.new_cameras) >= self.mapping_params.max_cameras:
-                return
+                self.new_cameras.append(cam)
+                if len(self.new_cameras) >= self.mapping_params.max_cameras:
+                    return
         
     def camera_from_frame(
         self, idx: int, image: torch.Tensor, depth: torch.Tensor, intrinsic: torch.Tensor, gt_pose: torch.Tensor
@@ -361,8 +362,8 @@ class GaussianMapper(object):
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
             if self.last_idx > self.n_last_frames and (iter + 1) % self.pruning_params.prune_every == 0:
-                # if self.mode != "rgbd":
-                #     self.covisibility_pruning() # Covisibility based pruning for recently added gaussians 
+                if self.mode != "rgbd":
+                    self.covisibility_pruning() # Covisibility based pruning for recently added gaussians 
                 self.gaussians.densify_and_prune( # General pruning based on opacity and size + densification
                 pruning_params.densify_grad_threshold,
                 pruning_params.opacity_th,
@@ -503,7 +504,7 @@ class GaussianMapper(object):
             #     if param_group["name"] == "xyz":
             #         print(param_group["lr"])
 
-            if self.last_idx % 1 == 0:
+            if self.last_idx % 1 == 0 and self.last_idx > self.n_last_frames:
                 self.final_covisibility()
                 
                 

@@ -436,7 +436,7 @@ class SLAM:
             mp.Process(target=self.backend, args=(2, self.cfg.slam.run_backend)),
             mp.Process(target=self.multiview_filtering, args=(3, self.cfg.slam.run_multiview_filter)),
             mp.Process(target=self.visualizing, args=(4, self.cfg.slam.run_visualization)),
-            mp.Process(target=self.mapping_gui, args=(5, self.cfg.slam.run_mapping_gui and self.cfg.slam.run_mapping)),
+            mp.Process(target=self.mapping_gui, args=(5, self.cfg.slam.run_mapping_gui and self.cfg.slam.run_mapping and not self.cfg.slam.evaluate)),
             mp.Process(target=self.gaussian_mapping, args=(6, self.cfg.slam.run_mapping)),
         ]
 
