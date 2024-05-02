@@ -47,6 +47,8 @@ class DepthVideo:
         self.scale_factor = 8
         s = self.scale_factor
         buffer = cfg.tracking.buffer
+        # Whether we upsample the predictions or not
+        self.upsampled = cfg.tracking.upsample
 
         ### state attributes -> Raw map ###
         self.timestamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
@@ -85,8 +87,16 @@ class DepthVideo:
         self.poses_gt[:] = torch.eye(4, dtype=torch.float, device=device)
 
         ### Additional flags for multi-view filter -> Clean map for rendering ###
-        self.disps_filtered = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
-        self.mask_filtered = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
+        if self.cfg.tracking.upsample:
+            self.disps_filtered = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
+            self.mask_filtered = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
+        else:
+            self.disps_filtered = torch.zeros(
+                buffer, ht // s, wd // s, device=device, dtype=torch.float
+            ).share_memory_()
+            self.mask_filtered = torch.zeros(
+                buffer, ht // s, wd // s, device=device, dtype=torch.float
+            ).share_memory_()
         # FIXME do we already need this object? These are exactly the same as self.poses
         self.poses_filtered = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # w2c quaterion
         self.poses_filtered[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
@@ -181,8 +191,18 @@ class DepthVideo:
         """dense mapping operations to transfer a part of the video to the Rendering module"""
 
         with self.mapping.get_lock():
-            image = self.images[index].clone().permute(1, 2, 0).contiguous().to(device)  # [h, w, 3]
+            if self.upsampled:
+                image = self.images[index].clone().permute(1, 2, 0).contiguous().to(device)  # [h, w, 3]
+                intrinsics = self.intrinsics[0].clone().contiguous().to(device) * self.scale_factor  # [4]
+            else:
+                # Color is always stored in the original resolution, downsample here to match
+                image = (
+                    self.images[index, ..., 3::8, 3::8].clone().permute(1, 2, 0).contiguous().to(device)
+                )  # [h // s, w // s, 3]
+                intrinsics = self.intrinsics[0].clone().contiguous().to(device)  # [4]
+
             mask = self.mask_filtered[index].clone().to(device)
+            # gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
             est_disp = self.disps_filtered[index].clone().to(device)  # [h, w]
             est_depth = 1.0 / (est_disp + 1e-7)
 
@@ -194,13 +214,12 @@ class DepthVideo:
         gt_c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
 
         depth = est_depth
-        # gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
         # depth = gt_depth
 
         # if updated by mapping, the priority is decreased to lowest level, i.e., 0
         self.update_priority[index] *= decay
 
-        return image, depth, c2w, gt_c2w, mask
+        return image, depth, intrinsics, c2w, gt_c2w, mask
 
     # TODO Backpropagate an updated map from Renderer to the DepthVideo
     # TODO chen: this needs to assume that the Renderer actually produces a better state than from the feature maps / optical flow estimates

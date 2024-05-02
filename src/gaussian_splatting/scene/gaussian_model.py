@@ -61,7 +61,7 @@ class GaussianModel:
 
         self.rotation_activation = torch.nn.functional.normalize
 
-        self.config = config
+        self.cfg = config
         self.ply_input = None
 
         self.isotropic = False
@@ -101,8 +101,7 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_pcd_from_image(self, cam_info, init=False, scale=2.0, depthmap=None):
-        cam = cam_info
+    def create_pcd_from_image(self, cam, init=False, scale=2.0, depthmap=None):
         image_ab = (torch.exp(cam.exposure_a)) * cam.original_image + cam.exposure_b
         image_ab = torch.clamp(image_ab, 0.0, 1.0)
         rgb_raw = (image_ab * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
@@ -115,7 +114,7 @@ class GaussianModel:
             if depth_raw is None:
                 depth_raw = np.empty((cam.image_height, cam.image_width))
 
-            if self.config.Dataset.sensor_type == "monocular":
+            if self.cfg.sensor_type == "monocular":
                 depth_raw = (
                     np.ones_like(depth_raw) + (np.random.randn(depth_raw.shape[0], depth_raw.shape[1]) - 0.5) * 0.05
                 ) * scale
@@ -127,12 +126,12 @@ class GaussianModel:
 
     def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False):
         if init:
-            downsample_factor = self.config.Dataset.pcd_downsample_init
+            downsample_factor = self.cfg.pcd_downsample_init
         else:
-            downsample_factor = self.config.Dataset.pcd_downsample
+            downsample_factor = self.cfg.pcd_downsample
 
-        point_size = self.config.Dataset.get("point_size", 0.05)
-        if self.config.Dataset.get("adaptive_pointsize", False):
+        point_size = self.cfg.get("point_size", 0.05)
+        if self.cfg.get("adaptive_pointsize", False):
             point_size = min(0.05, point_size * np.median(depth))
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
             rgb,

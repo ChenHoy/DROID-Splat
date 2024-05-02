@@ -306,7 +306,7 @@ class SLAM:
                 # Plot the uncertainty on top
                 with self.video.get_lock():
                     t_cur = max(0, self.video.counter.value - 1)
-                    if self.cfg["tracking"]["upsample"]:
+                    if self.cfg.tracking.get("upsample", False):
                         uncertanity_cur = self.video.uncertainty_up[t_cur].clone()
                     else:
                         uncertanity_cur = self.video.uncertainty[t_cur].clone()

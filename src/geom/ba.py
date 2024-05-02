@@ -200,16 +200,15 @@ def bundle_adjustment(
             ba_function = BA
 
     #### Bundle Adjustment Loop
-    disps.clamp_(min=0.001)  # Disparities should never be negative
+    disps.clamp_(min=0.001), disps_sens.clamp_(min=0.001)
     for i in range(iters):
         ba_function(*args, **skwargs, ep=ep, lm=lm)
         disps.clamp_(min=0.001)  # Disparities should never be negative
 
-    ####
-
-    # Update data structure
+    #### Update data structure
+    # Remove the batch dimension again
     poses = Gs.data[0]
-    disps = disps[0]  # Remove the batch dimension again
+    disps = disps[0]
     if scale_prior:
         scales = scales[0]
         shifts = shifts[0]
