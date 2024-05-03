@@ -30,7 +30,6 @@ NOTE this could a be standalone SLAM system itself, but we use it on top of an o
 """
 
 
-# TODO try to rewrite their GUI, because it does not work reliably when interacting with it
 class GaussianMapper(object):
     """
     SLAM from Rendering with 3D Gaussian Splatting.
@@ -48,7 +47,7 @@ class GaussianMapper(object):
         self.mapping_iters = cfg.mapping.mapping_iters
         self.use_gui = cfg.mapping.use_gui
         self.save_renders = cfg.mapping.save_renders
-        self.warmup = cfg.mapping.warmup
+        self.warmup = max(cfg.mapping.warmup, cfg.tracking.warmup)
         self.batch_mode = cfg.mapping.batch_mode  # Take a batch of all unupdated frames at once
 
         self.optimize_poses = cfg.mapping.optimize_poses
@@ -58,6 +57,9 @@ class GaussianMapper(object):
         # Always take n last frames from current index and optimize additional random frames globally
         self.n_last_frames = self.kf_mng_params.n_last_frames
         self.n_rand_frames = self.kf_mng_params.n_rand_frames
+
+        self.filter_uncertainty = cfg.mapping.filter_uncertainty
+        self.filter_multiview = cfg.mapping.filter_multiview
 
         self.loss_params = cfg.mapping.loss
 
@@ -91,9 +93,6 @@ class GaussianMapper(object):
         self.initialized = False
         self.projection_matrix = None
 
-        # TODO chen: what is this used for?
-        self.show_filtered = False
-
     def info(self, msg: str):
         print(colored("[Gaussian Mapper] " + msg, "magenta"))
 
@@ -102,24 +101,19 @@ class GaussianMapper(object):
 
         with self.video.get_lock():
             poses = torch.index_select(self.video.poses, 0, idx)
-
             if self.video.upsampled:
                 disps = torch.index_select(self.video.disps_up, 0, idx)
                 intrinsics = self.video.intrinsics[0] * self.video.scale_factor
             else:
                 disps = torch.index_select(self.video.disps, 0, idx)
                 intrinsics = self.video.intrinsics[0]
+
             thresh = bin_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
             count = droid_backends.depth_filter(poses, disps, intrinsics, idx, thresh)
 
         # Only take pixels where multiple points are consistent across views and they do not have an outlier disparity
         mask = (count >= count_thresh) & (disps > min_disp_thresh * disps.mean(dim=[1, 2], keepdim=True))
         return mask
-
-    # TODO
-    def uncertainty_filter(self, idx: int, thresh: float = 0.1):
-        """Filter parts of the video based on the estimated uncertainty of the SLAM system"""
-        raise NotImplementedError()
 
     def camera_from_gt(self, queue: mp.Queue):
         """Extract a frame from the Queue and use the gt pose for creation"""
@@ -138,14 +132,10 @@ class GaussianMapper(object):
 
     def camera_from_video(self, idx):
         """Extract Camera objects from a part of the video."""
-        color, depth, intrinsics, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
-        mv_consistent = self.depth_filter(
-            idx,
-            count_thresh=self.kf_mng_params.filter.mv_count_thresh,
-            bin_thresh=self.kf_mng_params.filter.bin_thresh,
+        self.video.filter_map(
+            min_count=self.kf_mng_params.filter.mv_count_thresh, bin_thresh=self.kf_mng_params.filter.bin_thresh
         )
-        self.info(f"Valid points: {100* mv_consistent.sum()/mv_consistent.numel()} %")
-        depth[~mv_consistent] = 0.0  # These pixels will not be considered in loss computation
+        color, depth, intrinsics, c2w, _ = self.video.get_mapping_item(idx, self.device)
         return self.camera_from_frame(idx, color, depth, intrinsics, c2w)
 
     def camera_from_frame(
@@ -192,7 +182,7 @@ class GaussianMapper(object):
             to_add = range(self.last_idx, self.cur_idx - self.delay)
 
         for idx in to_add:
-            color, depth, intrinsics, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
+            color, depth, intrinsics, c2w, _ = self.video.get_mapping_item(idx, self.device)
             color = color.permute(2, 0, 1)
 
             cam = self.camera_from_frame(idx, color, depth, intrinsics, c2w)
@@ -218,7 +208,6 @@ class GaussianMapper(object):
 
         return torch.optim.Adam(opt_params)
 
-    # TODO since we filter afterwards as well, should we remove the depth_filter here?
     def frame_updater(self):
         """Gets the list of frames and updates the depth and pose based on the video."""
         all_cameras = self.cameras + self.new_cameras
@@ -227,30 +216,17 @@ class GaussianMapper(object):
         with self.video.get_lock():
             (dirty_index,) = torch.where(self.video.mapping_dirty.clone())
             dirty_index = dirty_index[dirty_index < self.cur_idx - self.delay]
-
-            if self.video.upsampled:
-                disps = torch.index_select(self.video.disps_up.clone().detach(), dim=0, index=all_idxs)
-            else:
-                disps = torch.index_select(self.video.disps.clone().detach(), dim=0, index=all_idxs)
-        mv_consistent = self.depth_filter(
-            all_idxs,
-            count_thresh=self.kf_mng_params.filter.mv_count_thresh,
-            bin_thresh=self.kf_mng_params.filter.bin_thresh,
-        )
-        depths = 1 / (disps + 1e-7)
-        depths[~mv_consistent] = 0.0
-
-        # Only update existing cameras
+        # Only update already inserted cameras
         to_update = dirty_index[torch.isin(dirty_index, all_idxs)]
 
         self.info(f"Updating frames {to_update}")
         for idx in to_update:
-            _, _, _, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
+            _, depth, _, c2w, _ = self.video.get_mapping_item(idx, self.device)
             cam = all_cameras[idx]
             w2c = torch.inverse(c2w)
             R = w2c[:3, :3].unsqueeze(0).detach()
             T = w2c[:3, 3].detach()
-            cam.depth = depths[idx].detach()
+            cam.depth = depth.detach()
             cam.update_RT(R, T)
 
         self.video.mapping_dirty[to_update] = False
@@ -298,10 +274,10 @@ class GaussianMapper(object):
             opacity, n_touched = render_pkg["opacity"], render_pkg["n_touched"]
 
             loss += self.mapping_loss(image, depth, view)
-            # TODO Only take into account last frames and not random ones
-            # TODO chen: try to remove the if statement and see if results change much
-            if self.last_idx - view.uid < self.n_last_frames:
-                self.occ_aware_visibility[view.uid] = (n_touched > 0).long()
+            # TODO chen: why do we need this?
+            # Only take into account last frames and not random ones
+            # if self.last_idx - view.uid < self.n_last_frames:
+            self.occ_aware_visibility[view.uid] = (n_touched > 0).long()
 
         # Regularize scale changes of the Gaussians
         scaling = self.gaussians.get_scaling
@@ -320,13 +296,13 @@ class GaussianMapper(object):
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
             if self.last_idx > self.n_last_frames and (iter + 1) % self.kf_mng_params.prune_every == 0:
-                # self.prune_gaussians() # Covisibility based pruning for recently added gaussians
-                self.gaussians.densify_and_prune(  # General pruning based on opacity and size + densification
-                    kf_mng_params.densify_grad_threshold,
-                    kf_mng_params.gaussian_th,
-                    kf_mng_params.gaussian_extent,
-                    kf_mng_params.size_threshold,
-                )
+                self.prune_gaussians()  # Covisibility based pruning for recently added gaussians
+                # self.gaussians.densify_and_prune(  # General pruning based on opacity and size + densification
+                #     kf_mng_params.densify_grad_threshold,
+                #     kf_mng_params.gaussian_th,
+                #     kf_mng_params.gaussian_extent,
+                #     kf_mng_params.size_threshold,
+                # )
 
             self.gaussians.optimizer.step()
             self.gaussians.optimizer.zero_grad()
@@ -438,12 +414,26 @@ class GaussianMapper(object):
 
     def __call__(self, mapping_queue: mp.Queue, received_item: mp.Event, the_end=False):
 
-        self.cur_idx = int(self.video.filtered_id.item())
+        # self.cur_idx = int(self.video.filtered_id.item())
+        self.cur_idx = self.video.counter.value
         if self.last_idx + self.delay < self.cur_idx and self.cur_idx > self.warmup:
 
+            # Filter map based on multiview_consistency and uncertainty
+            # NOTE This could be improved by only filtering the new and existing cameras instead of video.mapping_dirty
+            self.video.filter_map(
+                min_count=self.kf_mng_params.filter.mv_count_thresh,
+                bin_thresh=self.kf_mng_params.filter.bin_thresh,
+                unc_threshold=self.kf_mng_params.filter.confidence_thresh,
+                use_multiview_consistency=self.filter_multiview,
+                use_uncertainty=self.filter_uncertainty,
+            )
+
+            # TODO chen: what happens if the map undergoes radical changes in the SLAM system?
+            # e.g. a loop closure that rapidly changes the scale of the map
+            # would this destory the Gaussians as well?
             self.get_new_cameras()  # Add new cameras
             self.info(f"Added {len(self.new_cameras)} new cameras: {[cam.uid for cam in self.new_cameras]}")
-            self.frame_updater()  # Update cameras with information from SLAM system
+            self.frame_updater()  # Update all cameras with new information from SLAM system
 
             for cam in self.new_cameras:
                 if not self.initialized:

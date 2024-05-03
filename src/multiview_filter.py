@@ -177,19 +177,10 @@ class MultiviewFilter(nn.Module):
             points_filtered = points.reshape(-1, 3)[valid.reshape(-1)]
             new_bound = self.get_bound_from_pointcloud(points_filtered)
 
-            # cur_t is the current last visited frame in the video
-            # TODO chen: what do we do with these?
-            priority = self.pose_dist(self.video.poses_filtered[:cur_t].detach(), poses)
-
             with self.video.mapping.get_lock():
-                self.video.update_priority[:cur_t] += priority.detach()
-                self.video.mask_filtered[:cur_t] = valid.reshape(bs, ht, wd).detach()
-                self.video.disps_filtered[:cur_t] = disps.detach()
-                # TODO chen: delete the poses_filtered
-                self.video.poses_filtered[:cur_t] = poses.detach()
+                self.video.disps_clean[:cur_t] = disps.detach()
                 # Update the filter id
                 self.video.filtered_id[0] = cur_t
-                self.video.bound[0] = new_bound
 
             self.info(new_bound, is_consistent, filtered_t, cur_t)
             del points, is_consistent, poses, disps

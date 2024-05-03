@@ -1,17 +1,18 @@
-warmup: 15 # Wait until tracking gets to this frame
+warmup: 10 # Wait until tracking gets to this frame
 delay: 2 # Delay between tracking and mapping
-mapping_iters: 10 # Optimization iterations for selected views
+mapping_iters: 6 # Optimization iterations for selected views
 refinement_iters: 50 # Final Optimization iterations for all views
 use_gui: True
-batch_mode: True # Only update a constant sized batch of frames
+batch_mode: False # Only update a constant sized batch of frames
 save_renders: False
 use_spherical_harmonics: False
 
-filter_depth: False # TODO activate this option
-filter_uncertainty: False # TODO
+filter_multiview: False
+filter_uncertainty: True 
 
+# TODO use these two flags to snychronize the updated map and poses back into the SLAM system
 optimize_poses: False
-update_frames: True # TODO when is this used?
+feedback_mapping: False
 
 init_lr: 6.0
 
