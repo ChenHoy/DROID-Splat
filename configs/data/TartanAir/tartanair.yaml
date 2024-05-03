@@ -1,6 +1,5 @@
-verbose: False
 dataset: 'tartanair'
-mode: 'mono'
+mode: $mode
 bound: [[-10.0, 10.0], [-10.0, 10.0], [-10.0, 10.0]]
 input_folder: /media/data/TartanAir/seasidetown/Easy/P000
 

@@ -1,10 +1,9 @@
 verbose: False
 dataset: 'replica'
-mode: 'mono'
+mode: $mode
 stride: 1
 input_folder: "/media/data/Replica/office0"
 bound: [[-2.0, 2.0], [-2.0, 2.0], [-2.0, 2.0]]
-
 
 cam:
   ### original camera parameters
@@ -21,14 +20,3 @@ cam:
   png_depth_scale: 6553.5 #for depth image in png format
   camera_model: "pinhole"
   ### target/output camera settings, camera_size -> resize -> crop -> target_size
-
-
-Dataset:
-  sensor_type: 'depth'
-  pcd_downsample: 64
-  pcd_downsample_init: 32
-  adaptive_pointsize: True
-  point_size: 0.05
-  type: 'replica'
-
-

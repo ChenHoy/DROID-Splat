@@ -1,9 +1,9 @@
 verbose: False
 dataset: 'replica'
-mode: 'rgbd'
+mode: $mode
+stride: 1
 input_folder: "/media/data/Replica/office0"
 bound: [[-5.0, 5.0], [-5.0, 5.0], [-5.0, 5.0]]
-
 
 cam:
   ### original camera parameters
