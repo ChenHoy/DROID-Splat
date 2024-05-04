@@ -2,6 +2,7 @@ name: go-slam
 channels:
   - rusty1s
   - pytorch
+  - pytorch3d
   - nvidia
   - open3d-admin
   - conda-forge
@@ -12,6 +13,7 @@ dependencies:
   - pytorch=2.1
   - cudatoolkit
   - tensorboard
+  - pytorch3d
   - scipy
   - opencv
   - tqdm
