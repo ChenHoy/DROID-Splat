@@ -358,7 +358,7 @@ class SLAM:
         ## Trajectory filler
         timestamps = [i for i in range(len(stream))]
         camera_trajectory = self.traj_filler(stream)  # w2cs
-        w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
+        w2w = SE3(self.video.poses_clean[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
         camera_trajectory = w2w * camera_trajectory.inv()
         traj_est = camera_trajectory.data.cpu().numpy()
         estimate_c2w_list = camera_trajectory.matrix().data.cpu()
@@ -381,7 +381,7 @@ class SLAM:
             stream=stream,
         )
 
-        self.info("ATE: {}".format(result_ate))
+        # self.info("ATE: {}".format(result_ate))
 
         trajectory_df = pd.DataFrame([result_ate])
         trajectory_df.to_csv(os.path.join(eval_path, "trajectory_results.csv"), index=False)
