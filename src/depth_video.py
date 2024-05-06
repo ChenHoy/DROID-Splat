@@ -72,7 +72,6 @@ class DepthVideo:
         self.disps_sens = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         # Scale and shift parameters for ambiguous monocular depth
         self.optimize_scales = cfg.mode == "prgbd"  # Optimze the scales and shifts for Pseudo-RGBD mode
-        self.warmup_prior = 50  # cfg["tracking"]["warmup_prior"]
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
         # NOTE chen: This is redundant as is this is simply 1 / disps_sens
@@ -222,7 +221,8 @@ class DepthVideo:
             if len(dirty_index) == 0:
                 return
 
-            # Check for multiview consistency not in the whole map, but only in the neighborhood of the frames to update
+            # Check for multiview consistency not in the whole map, but also not only in a few local frames
+            # -> Pad to neighborhoods, so we can get many consistent points
             dirty_index = self.pad_indices(dirty_index, radius=radius)
 
             if self.upsampled:
@@ -239,8 +239,6 @@ class DepthVideo:
         mask = torch.ones_like(disps, dtype=torch.bool)
         if use_multiview_consistency:
             # Only take pixels where multiple points are consistent across views and they do not have an outlier disparity
-            # NOTE chen: this needs to be locked in order to avoid illegal memory access
-            # with self.get_lock():
             thresh = bin_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
             if self.upsampled:
                 count = droid_backends.depth_filter(self.poses, self.disps_up, intrinsics, dirty_index, thresh)
@@ -257,8 +255,8 @@ class DepthVideo:
         self.disps_clean[dirty_index] = disps
         self.filtered_id = max(dirty_index.max().item(), self.filtered_id)
 
-    def get_mapping_item(self, index, device="cuda:0", decay=0.1):
-        """dense mapping operations to transfer a part of the video to the Rendering module"""
+    def get_mapping_item(self, index, device="cuda:0"):
+        """Get a part of the video to transfer to the Rendering module"""
 
         with self.mapping.get_lock():
             if self.upsampled:
@@ -283,11 +281,50 @@ class DepthVideo:
 
         return image, depth, intrinsics, c2w, gt_c2w
 
-    # TODO Backpropagate an updated map from Renderer to the DepthVideo
-    # TODO chen: this needs to assume that the Renderer actually produces a better state than from the feature maps / optical flow estimates
-    def set_mapping_item(self, index, pose=None, depth=None):
+    # TODO how to trust which system more?
+    # i) Frontend + Backend should handle loop closures more gracefully and works based on Optical Flow
+    # ii) Rendering should be more accurate for finegrained structures and used more information for pose optimization
+    # -> How to make sure we dont get into a deadlock or diverge?
+    # TODO are poses now in the correct format?
+    def set_mapping_item(self, index, poses: Optional[torch.Tensor] = None, depths: Optional[torch.Tensor] = None):
+        """Set a part of the video from the Rendering module"""
+
+        # TODO test this
+        def matrix_to_lie(matrix: torch.Tensor) -> lietorch.SE3:
+            """Transforms a 4x4 homogenous matrix into a 7D lie vector, see https://github.com/princeton-vl/lietorch/issues/14"""
+            import pytorch3d
+
+            # Ensure we always have a batched tensor
+            if matrix.ndim == 2:
+                matrix = matrix.unsqueeze(0)
+
+            quat = pytorch3d.transforms.matrix_to_quaternion(matrix[:, :3, :3])
+            quat = torch.cat((quat[:, 1:], quat[:, 0][None]), 0)  # swap real first to real last
+            trans = matrix[:, :3, 3]
+            vec = torch.cat((trans, quat), 0)
+            return lietorch.SE3.InitFromVec(vec)
+
+        assert poses is not None or depths is not None, "Either poses or depths must be provided!"
+
         with self.get_lock():
-            pass
+
+            if depths is not None:
+                assert len(index) == len(depths), "Number of depths must match the number of indices!"
+
+                depths.clamp_(min=0.001, max=1000.0) # Sanity
+                disps = 1.0 / (depths + 1e-7)
+                if self.upsampled:
+                    self.disps_up[index] = disps.clone().to(self.device)
+                else:
+                    self.disps[index] = disps.clone().to(self.device)
+
+            if poses is not None:
+                assert len(index) == len(poses), "Number of poses must match the number of indices!"
+
+                c2w = poses.clone().to(self.device)  # [4, 4] homogenous matrix
+                # FIXME: How to correctly initialize a 4x4 homogenous matrix for SE3 in lietorch?
+                c2w = matrix_to_lie(c2w)  # [7, 1] Lie element
+                self.poses[index] = c2w.inv()  # Our data structure stores in w2c convention
 
     @staticmethod
     def format_indices(ii, jj, device="cuda"):
@@ -377,8 +414,8 @@ class DepthVideo:
         self.disps_sens = self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
         torch.clamp_(self.disps_sens, min=0.001)
         # Reset the scale and shift parameters to initial state
-        self.scales = torch.ones_like(self.scales)
-        self.shifts = torch.zeros_like(self.shifts)
+        self.scales = torch.ones_like(self.scales, device=self.device)
+        self.shifts = torch.zeros_like(self.shifts, device=self.device)
 
     def distance(self, ii=None, jj=None, beta=0.3, bidirectional=True):
         """frame distance metric, where distance = sqrt((u(ii) - u(jj->ii))^2 + (v(ii) - v(jj->ii))^2)"""
@@ -432,7 +469,7 @@ class DepthVideo:
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
-            if self.optimize_scales and t1 <= self.warmup_prior:
+            if self.optimize_scales:
                 disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
             else:
                 disps_sens = self.disps_sens
@@ -517,4 +554,5 @@ class DepthVideo:
                 ep=ep,
                 scale_prior=True,
                 structure_only=True,
+                alpha=alpha,
             )

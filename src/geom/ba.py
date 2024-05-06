@@ -166,7 +166,7 @@ def bundle_adjustment(
     structure_only: bool = False,
     motion_only: bool = False,
     scale_prior: bool = False,
-    alpha: float = 1.0,
+    alpha: float = 0.01,
 ) -> None:
     """Wrapper function around different bundle adjustment methods."""
 
@@ -188,9 +188,10 @@ def bundle_adjustment(
         ba_function = MoBA
         skwargs = {}
     else:
-        skwargs = {"all_disps_sens": disps_sens, "eta": damping, "alpha": alpha}
+        skwargs = {"all_disps_sens": disps_sens, "eta": damping}
         if scale_prior:
             skwargs["all_scales"], skwargs["all_shifts"] = scales, shifts
+            skwargs["alpha"] = alpha
             if structure_only:
                 ba_function = BA_prior_no_motion
             else:
@@ -597,7 +598,7 @@ def BA_prior(
     all_shifts: torch.Tensor,
     ep: float = 0.1,
     lm: float = 1e-4,
-    alpha: float = 0.001,
+    alpha: float = 0.01,
     reweight_prior: bool = False,
 ):
     """Bundle Adjustment for optimizing with a depth prior.

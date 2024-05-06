@@ -71,12 +71,12 @@ class BackendWrapper(torch.nn.Module):
                 motion_only=False,
                 local_graph=local_graph,
             )
+            msg = "Loop BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
         else:
             _, n_edges = self.optimizer.dense_ba(
                 t_start=t_start, t_end=t_end, steps=self.steps, iters=self.iters, motion_only=False
             )
-
-        msg = "Full BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
+            msg = "Full BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
         self.info(msg)
         self.last_t = cur_t
 
@@ -95,7 +95,7 @@ class Backend:
         self.update_op = net.update
 
         self.upsample = cfg.tracking.get("upsample", False)
-        self.beta = cfg.tracking.get("beta", 0.3)  # Balance rotation and translation for distance computation
+        self.beta = cfg.tracking.get("beta", 0.7)  # Balance rotation and translation for distance computation
         self.backend_thresh = cfg.tracking.backend.get("thresh", 20.0)
         self.backend_radius = cfg.tracking.backend.get("radius", 2)
         self.backend_nms = cfg.tracking.backend.get("nms", 0)
@@ -121,7 +121,7 @@ class Backend:
         # If you have a large map, then keep this number really high or else the drift could mess up the map
         # NOTE chen: Using only the frontend keeps sometimes a better global scale than mixing frontend + backend if loop closures are missed!
         # max_factors = (int(self.video.stereo) + (self.backend_radius + 2) * 2) * n # From GO-SLAM
-        max_factors = 16 * t_end  # From DROID-SLAM
+        max_factors = 16 * n  # From DROID-SLAM
 
         graph = FactorGraph(
             self.video,
