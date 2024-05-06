@@ -1,6 +1,6 @@
 warmup: 10 # Wait until tracking gets to this frame
 delay: 2 # Delay between tracking and mapping
-mapping_iters: 6 # Optimization iterations for selected views
+mapping_iters: 11 # Optimization iterations for selected views
 refinement_iters: 50 # Final Optimization iterations for all views
 use_gui: True
 batch_mode: False # Only update a constant sized batch of frames
@@ -18,10 +18,10 @@ init_lr: 6.0
 
 # Strategy for adding / pruning Gaussians
 keyframes:
-  n_last_frames: 5 # Always optimize the last n frames
-  n_rand_frames: 5 # Optimize random global frames on top
+  n_last_frames: 10 # Always optimize the last n frames
+  n_rand_frames: 10 # Optimize random global frames on top
   default_batch_size: 3 # Only add 5 frames at once to increase latency when batch_mode is deactivated
-  prune_every: 15 # How often to prune gaussians
+  prune_every: 10 # How often to prune gaussians
   visibility_th: 5 # Gaussians should be pruned based on covisibility
   prune_last: 5
 
