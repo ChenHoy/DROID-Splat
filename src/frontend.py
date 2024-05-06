@@ -1,41 +1,81 @@
-import torch
+import gc
 from copy import deepcopy
 from termcolor import colored
 from time import gmtime, strftime, time
 
+import torch
+
 from .factor_graph import FactorGraph
+from .motion_filter import MotionFilter
+
+
+class FrontendWrapper(torch.nn.Module):
+    """
+    Wrapper class for SLAM frontend tracking.
+    """
+
+    def __init__(self, cfg, slam):
+        super(FrontendWrapper, self).__init__()
+        self.cfg = cfg
+        self.device = cfg.device
+        self.net = slam.net
+        self.video = slam.video
+
+        # filter incoming frames so that there is enough motion
+        self.frontend_window = cfg.tracking.frontend.window
+        filter_thresh = cfg.tracking.motion_filter.thresh
+        self.motion_filter = MotionFilter(self.net, self.video, thresh=filter_thresh, device=self.device)
+        self.optimizer = Frontend(self.net, self.video, self.cfg)
+
+    @torch.no_grad()
+    def forward(self, timestamp, image, depth, intrinsic, gt_pose=None):
+        """Add new keyframes according to apparent motion and run a local bundle adjustment optimization"""
+
+        ### check there is enough motion
+        self.motion_filter.track(timestamp, image, depth, intrinsic, gt_pose=gt_pose)
+        # local bundle adjustment
+        self.optimizer()
 
 
 class Frontend:
     def __init__(self, net, video, cfg):
         self.video = video
+        self.device = video.device
         self.update_op = net.update
+
+        # NOTE chen: This reduces memory a lot but increases run-time! This potentially saves ~5GB,
+        # but its nearly 2x run-time
+        self.release_cache = cfg.tracking.frontend.get("release_cache", False)
 
         # Frontend variables
         self.is_initialized = False
         self.count = 0
         self.max_age = 25
-        self.iters1, self.iters2 = 4, 2
-        self.warmup = cfg["tracking"]["warmup"]
-        self.upsample = cfg["tracking"]["upsample"]
-        self.beta = cfg["tracking"]["beta"]
-        self.frontend_max_factors = cfg["tracking"]["frontend"]["max_factors"]
-        self.frontend_nms = cfg["tracking"]["frontend"]["nms"]
-        self.keyframe_thresh = cfg["tracking"]["frontend"]["keyframe_thresh"]
-        self.frontend_window = cfg["tracking"]["frontend"]["window"]
-        self.frontend_thresh = cfg["tracking"]["frontend"]["thresh"]
-        self.frontend_radius = cfg["tracking"]["frontend"]["radius"]
-        self.enable_loop = cfg["tracking"]["frontend"]["enable_loop"]
-        self.last_loop_t = -1
+        self.warmup = cfg.tracking.get("warmup", 8)
+        self.upsample = cfg.tracking.get("upsample", True)
+
+        self.beta = cfg.tracking.get("beta", 0.3)
+        self.frontend_max_factors = cfg.tracking.frontend.get("max_factors", 100)
+        self.frontend_nms = cfg.tracking.frontend.get("nms", 2)
+        self.keyframe_thresh = cfg.tracking.frontend.get("keyframe_thresh", 4.0)
+        self.frontend_window = cfg.tracking.frontend.get("window", 25)
+        self.frontend_thresh = cfg.tracking.frontend.get("thresh", 16.0)
+        self.frontend_radius = cfg.tracking.frontend.get("radius", 2)
+
+        self.steps1 = cfg.tracking.frontend.get("steps1", 4)
+        self.steps2 = cfg.tracking.frontend.get("steps2", 2)
+        self.iters = cfg.tracking.frontend.get("iters", 4)
 
         # Loop closure parameters
-        self.enable_loop = True
-        self.last_loop_t = -1
-        self.loop_window = cfg["tracking"]["backend"]["loop_window"]
-        self.loop_radius = cfg["tracking"]["backend"]["loop_radius"]
-        self.loop_nms = cfg["tracking"]["backend"]["loop_nms"]
-        self.loop_thresh = cfg["tracking"]["backend"]["loop_thresh"]
+        # NOTE chen: I dont recommend using loop closures in the frontend because this can
+        # lead to big spikes in memory usage. It is preferable to use this in the backend
+        self.enable_loop = cfg.tracking.frontend.get("use_loop_closure", False)
+        self.loop_window = cfg.tracking.frontend.get("loop_window", 100)
+        self.loop_radius = cfg.tracking.frontend.get("loop_radius", 2)
+        self.loop_nms = cfg.tracking.frontend.get("loop_nms", 1)
+        self.loop_thresh = cfg.tracking.frontend.get("loop_thresh", 20.0)
 
+        self.last_loop_t = -1
         # Local optimization window
         self.t0, self.t1 = 0, 0
 
@@ -43,16 +83,34 @@ class Frontend:
         self.graph = FactorGraph(
             video,
             net.update,
-            device=cfg.slam.device,
+            device=cfg.device,
             corr_impl="volume",
             max_factors=self.frontend_max_factors,
             upsample=self.upsample,
         )
 
+    def loop_info(self, t0: int, t1: int, n_kf: int, n_edges: int) -> None:
+        msg = "Loop BA: [{}, {}]; Current Keyframe is {}, last is {}. Using {} KFs and {} edges!".format(
+            t0, t1, t1, self.last_loop_t, n_kf, n_edges
+        )
+        self.info(msg)
+
+    def info(self, msg: str):
+        print(colored("[Frontend] " + msg, "yellow"))
+
+    def get_ram_usage(self):
+        free_mem, total_mem = torch.cuda.mem_get_info(device=self.device)
+        used_mem = 1 - (free_mem / total_mem)
+        return used_mem, free_mem
+
     @torch.no_grad()
     def loop_closure_update(self, t_start, t_end, steps=6, motion_only=False, lm=1e-4, ep=1e-1):
         """Perform an update on the graph with loop closure awareness. This uses a higher step size
         for optimization than the dense bundle adjustment of the backend and rest of frontend.
+
+        NOTE chen: this should be used with caution, if you have a longer video / larger map, then using
+        loop closures in the frontend can lead to sudden high spikes in RAM! It seems much safer
+        to use loop closures in the backend with a fixed optimization window size to not get surprised.
         """
         max_factors = 8 * self.loop_window
         t_start_loop = max(0, t_end - self.loop_window)
@@ -81,10 +139,41 @@ class Frontend:
 
         return t_end - t_start_loop, n_edges
 
-    def _loop_info(self, t_start, cur_t, n_kf):
-        now = "[Frontend] {} - Loop BA".format(strftime("%Y-%m-%d %H:%M:%S", gmtime()))
-        msg = f"\n\n {now} : [{t_start}, {cur_t}]; Current Keyframe is {cur_t}, last is {self.last_loop_t}."
-        print(colored(msg + f" {n_kf} KFs, last KF is {self.last_loop_t}! \n", "yellow"))
+    @torch.no_grad()
+    def global_scale_optimization(
+        self, t_start, t_end, steps=4, lm=1e-4, ep=1e-1, radius: int = 200, nms: int = 2, thresh: float = 10.0
+    ):
+        """Optimize the scene globally with the pure Python code for scale optimization. This optimizes poses and structure
+        in a block-coordinate descent way."""
+        assert self.graph.scale_priors == True, "You need to set scale_priors to True when using this function!"
+        assert self.video.optimize_scales == True, "You need to set scale_priors to True when using this function!"
+
+        if t_end is None:
+            t_end = self.video.counter.value
+        n = t_end - t_start
+        max_factors = 16 * t_end  # From DROID-SLAM
+
+        graph = FactorGraph(
+            self.video,
+            self.update_op,
+            device=self.device,
+            corr_impl="volume",
+            max_factors=max_factors,
+            upsample=self.upsample,
+        )
+        n_edges = graph.add_proximity_factors(rad=radius, nms=nms, beta=self.beta, thresh=thresh, remove=False)
+        print(colored(f"[Backend] Performing full scale prior optimization over map with: {n_edges} edges!", "blue"))
+        graph.prior_update_lowmem(t0=t_start, t1=t_end, steps=steps, lm=lm, ep=ep)
+        print(colored("[Backend] Done!", "blue"))
+
+        # Empty cache immediately and release memory
+        graph.clear_edges()
+        del graph
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        with self.video.get_lock():
+            self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
 
     def __update(self):
         """add edges, perform update"""
@@ -108,17 +197,18 @@ class Frontend:
             remove=True,
         )
 
+        # NOTE chen: Dont do this with a prior, because it will be harder to correct the scales
         # Condition video.disps based on external sensor data if given before optimizing
-        self.video.disps[self.t1 - 1] = torch.where(
-            self.video.disps_sens[self.t1 - 1] > 0,
-            self.video.disps_sens[self.t1 - 1],
-            self.video.disps[self.t1 - 1],
-        )
+        if not self.video.optimize_scales:
+            self.video.disps[self.t1 - 1] = torch.where(
+                self.video.disps_sens[self.t1 - 1] > 0,
+                self.video.disps_sens[self.t1 - 1],
+                self.video.disps[self.t1 - 1],
+            )
 
         # Frontend Bundle Adjustment to optimize the current local window
-        # This is run for k1 iterations
-        for itr in range(self.iters1):
-            self.graph.update(t0=None, t1=None, use_inactive=True)
+        for itr in range(self.steps1):
+            self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True)
 
         # set initial pose for next frame
         d = self.video.distance([self.t1 - 3], [self.t1 - 2], beta=self.beta, bidirectional=True)
@@ -130,30 +220,37 @@ class Frontend:
             with self.video.get_lock():
                 self.video.counter.value -= 1
                 self.t1 -= 1
-        # Optimize again for k2 iterations (This time we do this loop aware)
+        # Optimize again (This time we do this loop aware)
         else:
             cur_t = self.video.counter.value
-            t_start = 0
             if self.enable_loop and cur_t > self.frontend_window:
-                n_kf, n_edge = self.loop_closure_update(
-                    t_start=0,
-                    t_end=cur_t,
-                    steps=self.iters2,
-                    motion_only=False,
-                )
-                self._loop_info(t_start, cur_t, n_kf)
+                ### 2nd update
+                n_kf, n_edges = self.loop_closure_update(t_start=0, t_end=cur_t, steps=self.iters2, motion_only=False)
+                self.loop_info(0, cur_t, n_kf, n_edges)
                 self.last_loop_t = cur_t
-
             else:
-                for itr in range(self.iters2):
-                    self.graph.update(t0=None, t1=None, use_inactive=True)
+                t0 = max(1, self.graph.ii.min().item() + 1)
+                t1 = max(self.graph.ii.max().item(), self.graph.jj.max().item()) + 1
+                msg = "Running frontend over [{}, {}] with {} factors.".format(t0, t1, self.graph.ii.numel())
+                self.info(msg)
+
+                ### 2nd update
+                for itr in range(self.steps2):
+                    self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True)
+
+        # Manually free memory here as this builds up over time
+        if self.release_cache:
+            used_mem, total_mem = torch.cuda.mem_get_info(device=self.device)
+            if used_mem >= 0.8:
+                torch.cuda.empty_cache()
+                gc.collect()
 
         # set pose for next iteration
         self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
         self.video.disps[self.t1] = self.video.disps[self.t1 - 1].mean()
 
         ### update visualization
-        # Sanity check, because I think sometimes the loop_ba results in [] for ii
+        # NOTE chen: Sanity check, because this was sometimes []
         if self.graph.ii.numel() > 0:
             self.video.dirty[self.graph.ii.min() : self.t1] = True
             self.video.mapping_dirty[self.graph.ii.min() : self.t1] = True
@@ -198,11 +295,11 @@ class Frontend:
         # Initialize
         if not self.is_initialized and self.video.counter.value == self.warmup:
             self.__initialize()
-            print(colored("[Frontend] Initialized!", "yellow"))
+            self.info("Initialized!")
 
         # Update
         elif self.is_initialized and self.t1 < self.video.counter.value:
             self.__update()
-            
+
         else:
             pass

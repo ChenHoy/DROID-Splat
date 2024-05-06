@@ -1,5 +1,6 @@
 import os
 from termcolor import colored
+
 import torch
 import torch.multiprocessing as mp
 import open3d as o3d
@@ -27,47 +28,6 @@ NOTE this could a be standalone SLAM system itself, but we use it as finetuning 
 """
 
 
-def plot_3d(rgb: torch.Tensor, depth: torch.Tensor):
-    """Use Open3d to plot the 3D point cloud from the monocular depth and input image."""
-
-    def get_calib_heuristic(ht: int, wd: int) -> np.ndarray:
-        """On in-the-wild data we dont have any calibration file.
-        Since we optimize this calibration as well, we can start with an initial guess
-        using the heuristic from DeepV2D and other papers"""
-        cx, cy = wd // 2, ht // 2
-        fx, fy = wd * 1.2, wd * 1.2
-        return fx, fy, cx, cy
-
-    rgb = np.asarray(rgb.cpu())
-    depth = np.asarray(depth.cpu())
-    invalid = (depth < 0.001).flatten()
-    # Get 3D point cloud from depth map
-    depth = depth.squeeze()
-    h, w = depth.shape
-    x, y = np.meshgrid(np.arange(w), np.arange(h))
-    x, y = x.flatten(), y.flatten()
-    depth = depth.flatten()
-
-    # Convert to 3D points
-    fx, fy, cx, cy = get_calib_heuristic(h, w)
-    x3 = (x - cx) * depth / fx
-    y3 = (y - cy) * depth / fy
-    z3 = depth
-
-    # Convert to Open3D format
-    xyz = np.stack([x3, y3, z3], axis=1)
-    rgb = np.stack([rgb[0, :, :].flatten(), rgb[1, :, :].flatten(), rgb[2, :, :].flatten()], axis=1)
-    depth = depth[~invalid]
-    xyz = xyz[~invalid]
-    rgb = rgb[~invalid]
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(xyz)
-    pcd.colors = o3d.utility.Vector3dVector(rgb)
-
-    # Plot the point cloud
-    o3d.visualization.draw_geometries([pcd])
-
-
 class GaussianMapper(object):
     """
     SLAM from Rendering with 3D Gaussian Splatting.
@@ -77,8 +37,8 @@ class GaussianMapper(object):
         self.cfg = cfg
         self.slam = slam
         self.video = slam.video
-        self.device = cfg.slam.device
-        self.mode = cfg.slam.mode
+        self.device = cfg.device
+        self.mode = cfg.mode
         self.output = slam.output
         self.model_params = cfg.mapping.model_params
         self.opt_params = cfg.mapping.opt_params
@@ -131,18 +91,6 @@ class GaussianMapper(object):
 
         # FIXME chen: the depth filter is not used correctly here!
         # TODO come up with a better way to filter points or use enough views
-
-        # if self.setup.filter_depth:
-        #     mask = self.depth_filter(idx)
-        #     msg = "Filtered {}% of the points".format(100 * (1 - mask.sum() / mask.numel()))
-        #     self.info(msg)
-
-        #     if self.show_filtered:
-        #         filt_col = color * mask
-        #         filt_col[0, ~mask] = 255
-        #         plot_3d(filt_col, depth)
-
-        #     depth = depth * mask
 
         return self.camera_from_frame(idx, color, depth, intrinsics, c2w)
 
@@ -208,11 +156,7 @@ class GaussianMapper(object):
         opt_params = []
         for cam in frames:
             opt_params.append(
-                {
-                    "params": [cam.cam_rot_delta],
-                    "lr": self.opt_params.cam_rot_delta,
-                    "name": "rot_{}".format(cam.uid),
-                }
+                {"params": [cam.cam_rot_delta], "lr": self.opt_params.cam_rot_delta, "name": "rot_{}".format(cam.uid)}
             )
             opt_params.append(
                 {
@@ -221,20 +165,8 @@ class GaussianMapper(object):
                     "name": "trans_{}".format(cam.uid),
                 }
             )
-            opt_params.append(
-                {
-                    "params": [cam.exposure_a],
-                    "lr": 0.01,
-                    "name": "exposure_a_{}".format(cam.uid),
-                }
-            )
-            opt_params.append(
-                {
-                    "params": [cam.exposure_b],
-                    "lr": 0.01,
-                    "name": "exposure_b_{}".format(cam.uid),
-                }
-            )
+            opt_params.append({"params": [cam.exposure_a], "lr": 0.01, "name": "exposure_a_{}".format(cam.uid)})
+            opt_params.append({"params": [cam.exposure_b], "lr": 0.01, "name": "exposure_b_{}".format(cam.uid)})
 
         return torch.optim.Adam(opt_params)
 
@@ -267,7 +199,6 @@ class GaussianMapper(object):
 
         mask = (count >= 1) & (disps > 0.05 * disps.mean(dim=[1, 2], keepdim=True))
 
-
         self.info(f"Valid points: {100* mask.sum()/mask.numel()} %")
         return mask
 
@@ -286,6 +217,8 @@ class GaussianMapper(object):
             poses = torch.index_select(self.video.poses.detach(), dim=0, index=all_idxs)
             disps = torch.index_select(self.video.disps_up.detach(), dim=0, index=all_idxs)
             intrinsics = self.video.intrinsics[0] * self.video.scale_factor
+
+        self.info(f"Updating frames {dirty_index}")
 
         depths = 1 / (disps + 1e-7)
 
@@ -308,10 +241,11 @@ class GaussianMapper(object):
             T = w2c[:3, 3].detach()
             cam.depth = depths[idx].detach()
             cam.update_RT(R, T)
-        
+
         self.video.mapping_dirty[dirty_index] = False
 
     def plot_centers(self) -> None:
+        """Plot the optimized 3D Gaussians as a point cloud"""
         means = self.gaussians.get_xyz.detach().cpu().numpy()
         rgb = self.gaussians.get_features[:, 0, :].detach().cpu().numpy()
         rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min())
@@ -321,6 +255,7 @@ class GaussianMapper(object):
         o3d.visualization.draw_geometries([pcd])
 
     def save_render(self, cam: Camera, render_path: str) -> None:
+        """Save a rendered frame"""
         render_pkg = render(cam, self.gaussians, self.pipeline_params, self.background)
         rgb = np.uint8(255 * render_pkg["render"].detach().cpu().numpy().transpose(1, 2, 0))
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -371,8 +306,8 @@ class GaussianMapper(object):
                 pruning_params.size_threshold,
                 )
 
-
             self.gaussians.optimizer.step()
+
             self.gaussians.optimizer.zero_grad()
             self.gaussians.update_learning_rate(10*self.last_idx) # Only taking keyframes, the update is to small
 
@@ -412,11 +347,11 @@ class GaussianMapper(object):
         for _, visibility in self.occ_aware_visibility.items():
             self.gaussians.n_obs += visibility.cpu()
 
-        mask = self.gaussians.unique_kfIDs >= sorted_frames[self.pruning_params.prune_last - 1] # Gaussians added on the last prune_last frames
+        mask = (
+            self.gaussians.unique_kfIDs >= sorted_frames[self.pruning_params.prune_last - 1]
+        )  # Gaussians added on the last prune_last frames
 
-        to_prune = torch.logical_and(
-            self.gaussians.n_obs <= self.pruning_params.visibility_th, mask
-        )
+        to_prune = torch.logical_and(self.gaussians.n_obs <= self.pruning_params.visibility_th, mask)
         self.gaussians.prune_points(to_prune.cuda())
         for idx in new_idx:
             self.occ_aware_visibility[idx] = self.occ_aware_visibility[idx][~to_prune]
@@ -456,8 +391,23 @@ class GaussianMapper(object):
             keyframes_idx = np.arange(len(self.cameras))
         else:
             keyframes_idx = np.random.choice(len(self.cameras) - self.n_last_frames, self.n_rand_frames, replace=False)
-            keyframes = self.cameras[-self.n_last_frames:] + [self.cameras[i] for i in keyframes_idx]
+            keyframes = self.cameras[-self.n_last_frames :] + [self.cameras[i] for i in keyframes_idx]
         return keyframes, keyframes_idx
+
+    def _last_call(self,mapping_queue: mp.Queue,received_item: mp.Event):
+        """Do one last refinement over the map"""
+
+        self.info("\nMapping refinement starting")
+        for iter in range(self.mapping_params.refinement_iters):
+            loss = self.mapping_step(
+                iter,
+                self.cameras,
+                self.pruning_params.refinement,
+                densify=False,
+                optimize_poses=self.mapping_params.optimize_poses,
+            )
+            self.loss_list.append(loss / len(self.cameras))
+
 
     def __call__(self, the_end=False):
         self.cur_idx = int(self.video.filtered_id.item()) 
@@ -531,6 +481,10 @@ class GaussianMapper(object):
             self.cameras += self.new_cameras
             self.new_cameras = []
 
+        elif the_end and self.last_idx + self.delay == self.cur_idx:
+            self._last_call(mapping_queue=mapping_queue,received_item=received_item)
+            return True
+
         elif the_end and self.last_idx == self.cur_idx - self.delay:
             self.info("Mapping refinement starting")
             self.final_covisibility(threshold=3)
@@ -561,12 +515,12 @@ class GaussianMapper(object):
                     )
 
 
-            self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
-            self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
+        self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
+        self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
 
-            if self.mapping_params.save_renders:
-                for cam in self.cameras:
-                    self.save_render(cam, f"{self.output}/renders/final/{cam.uid}.png")
+        if self.mapping_params.save_renders:
+            for cam in self.cameras:
+                self.save_render(cam, f"{self.output}/renders/final/{cam.uid}.png")
 
             fig, ax = plt.subplots()
             ax.set_title("Loss per frame evolution")
@@ -583,16 +537,19 @@ class GaussianMapper(object):
 
             self.info(f"Final loss: {self.loss_list[-1]}")
 
-            if self.cfg.slam.evaluate:
-                ## export the cameras and gaussians to the terminate process
-                self.mapping_queue.put(
-                    gui_utils.EvaluatePacket(
-                        pipeline_params=self.pipeline_params,
-                        cameras=self.cameras,
-                        gaussians=clone_obj(self.gaussians),
-                        background=self.background,
-                    )
+        ## export the cameras and gaussians to the terminate process
+        if self.cfg.evaluate:
+            mapping_queue.put(
+                gui_utils.EvaluatePacket(
+                    pipeline_params=clone_obj(self.pipeline_params),
+                    cameras=self.cameras[:],
+                    gaussians=clone_obj(self.gaussians),
+                    background=clone_obj(self.background),
                 )
+            )
+            received_item.wait()  # Wait until the Packet got delivered
 
-            return True
-        
+
+    
+
+

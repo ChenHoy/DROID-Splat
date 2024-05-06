@@ -109,6 +109,7 @@ class GaussianPacket:
         self.finish = finish
         self.kf_window = kf_window
 
+
     def resize_img(self, img, width):
         if img is None:
             return None
@@ -134,6 +135,7 @@ class GaussianPacket:
         return symm
 
 
+# TODO is this the proper way to do it?
 def get_latest_queue(q):
     message = None
     while True:
@@ -169,21 +171,32 @@ class ParamsGUI:
 
 
 class EvaluatePacket:
-    '''
+    """
     This class is used to pass params from the gaussian_mapper to the terminate thread
     for evaluation
-    '''
-    def __init__(
-        self,
-        pipeline_params=None,
-        background=None,
-        gaussians=None,
-        cameras=None,
-    ):
+    """
+
+    def __init__(self, pipeline_params=None, background=None, gaussians=None, cameras=None):
+        self.has_gaussians = False
+        if gaussians is not None:
+            self.has_gaussians = True
+            self.get_xyz = gaussians.get_xyz.detach().clone()
+            self.active_sh_degree = gaussians.active_sh_degree
+            self.get_opacity = gaussians.get_opacity.detach().clone()
+            self.get_scaling = gaussians.get_scaling.detach().clone()
+            self.get_rotation = gaussians.get_rotation.detach().clone()
+            self.max_sh_degree = gaussians.max_sh_degree
+            self.get_features = gaussians.get_features.detach().clone()
+
+            self._rotation = gaussians._rotation.detach().clone()
+            self.rotation_activation = torch.nn.functional.normalize
+            self.unique_kfIDs = gaussians.unique_kfIDs.clone()
+            self.n_obs = gaussians.n_obs.clone()
+
         self.pipeline_params = pipeline_params
         self.background = background
-        self.gaussians = gaussians
         self.cameras = cameras
+        self.gaussians = gaussians
 
     def __str__(self) -> str:
-        print("Im getting something: {} {}".format(self.pipeline_params, self.cameras.shape))
+        print("Im getting something: {} {}".format(self.pipeline_params, len(self.cameras)))

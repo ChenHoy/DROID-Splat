@@ -147,7 +147,7 @@ def eval_ate(
         trj_data["trj_est"] = trj_est
         trj_data["trj_gt"] = trj_gt
 
-        plot_dir = os.path.join(save_dir, "plot")
+        plot_dir = os.path.join(save_dir, "trajectory-plots")
         mkdir_p(plot_dir)
 
         label_evo = "final" if final else "{:04}".format(iterations)
@@ -226,7 +226,7 @@ def eval_rendering(
     """
     mapper: GaussianMapper
     """
-    interval = 5
+    interval = 1
     img_pred, img_gt, saved_frame_idx = [], [], []
     end_idx = len(frames) - 1 if iteration == "final" or "before_opt" else iteration
     psnr_array, ssim_array, lpips_array = [], [], []
@@ -235,12 +235,7 @@ def eval_rendering(
     """
     Runs this only for frames that are not keyframes
     """
-    print(
-        "Calculating metrics on non-keyframes. Total keyframes: ",
-        len(kf_indices),
-        "Step used for evaluation: ",
-        interval,
-    )
+
     for idx in range(0, end_idx, interval):
         if idx in kf_indices:
             continue

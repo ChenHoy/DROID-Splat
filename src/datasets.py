@@ -85,7 +85,7 @@ class BaseDataset(Dataset):
     def __init__(self, cfg, device="cuda:0"):
         super(BaseDataset, self).__init__()
         self.name = cfg.data.dataset
-        self.stereo = cfg.slam.mode == "stereo"
+        self.stereo = cfg.mode == "stereo"
         self.device = device
         self.png_depth_scale = cfg.data.cam.png_depth_scale
         self.n_img = -1
@@ -191,36 +191,34 @@ class ImageFolder(BaseDataset):
         stride = cfg["stride"]
         # Get either jpg or png files
         input_images = os.path.join(self.input_folder, "images", "*.jpg")
-        input_depths = os.path.join(self.input_folder, "depthany-vitl-indoor", "*.npy")
         self.color_paths = sorted(glob.glob(input_images))
-        self.depth_paths = sorted(glob.glob(input_depths))
         # Look for alternative image extensions
         if len(self.color_paths) == 0:
             input_images = os.path.join(self.input_folder, "images", "*.png")
             self.color_paths = sorted(glob.glob(input_images))
+        self.color_paths = self.color_paths[::stride]
 
-        if len(self.depth_paths) == 0:
-            self.depth_paths = None
-        else:
+        depth_paths = os.path.join(self.input_folder, "zoed-nk", "*.npy")
+        if len(depth_paths) != 0:
+            self.depth_paths = sorted(glob.glob(depth_paths))
+            self.depth_paths = self.depth_paths[::stride]
             assert len(self.depth_paths) == len(
                 self.color_paths
             ), "Number of depth maps does not match number of images"
-            self.depth_paths = self.depth_paths[::stride]
-        self.color_paths = self.color_paths[::stride]
-        self.n_img = len(self.color_paths)
 
+        self.n_img = len(self.color_paths)
         assert self.n_img > 0, f"No images found in {self.input_folder}"
 
 
 class Replica(BaseDataset):
     def __init__(self, cfg, device="cuda:0"):
         super(Replica, self).__init__(cfg, device)
-        stride = cfg.slam.stride
+        stride = cfg.stride
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/frame*.jpg")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
-        if cfg.slam.mode == "prgbd":
+        if cfg.mode == "prgbd":
             self.depth_paths = sorted(
                 # glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
                 glob.glob(os.path.join(self.input_folder, "depthany-vitl-indoor/frame*.npy"))
@@ -258,18 +256,15 @@ class Replica(BaseDataset):
 class TartanAir(BaseDataset):
     def __init__(self, cfg, device="cuda:0"):
         super(TartanAir, self).__init__(cfg, device)
-        stride = cfg.slam.stride
+        stride = cfg.stride
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_left/*.png")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
-        #print("found {} images".format(self.n_img))
         # For Pseudo RGBD, we use monocular depth predictions in another folder
-        if cfg.slam.mode == "prgbd":
+        if cfg.mode == "prgbd":
             self.depth_paths = sorted(
-                glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy")) # Use ZoeDepth predictions
-                # glob.glob(
-                #     os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy")
-                # )  # Use DepthAnything predictions
+                glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy"))
+                # glob.glob(os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy"))
             )
             assert (
                 len(self.depth_paths) == self.n_img

@@ -1,6 +1,8 @@
 from typing import Optional
-import numpy as np
+import gc
 from copy import deepcopy
+
+import numpy as np
 
 import torch
 from .modules import CorrBlock, AltCorrBlock
@@ -118,7 +120,11 @@ class FactorGraph:
             and self.corr is not None
             and remove
         ):
-            ix = torch.arange(len(self.age))[torch.argsort(self.age, descending=False).cpu()]
+            # NOTE chen: this cpu() call might be dangerous, but malloc() errors are non-deterministic on my setup
+            # ix = torch.arange(len(self.age))[torch.argsort(self.age, descending=False).cpu()]
+            ix = torch.arange(len(self.age), device=self.device)[
+                torch.argsort(self.age, descending=False).to(self.device)
+            ]
             self.rm_factors(ix >= self.max_factors - ii.shape[0], store=True)
 
         net = self.video.nets[ii].to(self.device).unsqueeze(dim=0)
@@ -273,10 +279,7 @@ class FactorGraph:
                 es.append((j, i))
                 di, dj = i - t0, j - t1
                 d[di, dj] = np.inf
-                d[
-                    max(0, di - nms) : min(ilen, di + nms + 1),
-                    max(0, dj - nms) : min(jlen, dj + nms + 1),
-                ] = np.inf
+                d[max(0, di - nms) : min(ilen, di + nms + 1), max(0, dj - nms) : min(jlen, dj + nms + 1)] = np.inf
 
         # distance from small to big
         vals, ix = torch.sort(d.reshape(-1), descending=False)
@@ -302,14 +305,12 @@ class FactorGraph:
                 (j, i),
             ]
 
-            d[
-                max(0, di - nms) : min(ilen, di + nms + 1),
-                max(0, dj - nms) : min(jlen, dj + nms + 1),
-            ] = np.inf
+            d[max(0, di - nms) : min(ilen, di + nms + 1), max(0, dj - nms) : min(jlen, dj + nms + 1)] = np.inf
 
         ii, jj = torch.tensor(es, device=self.device).unbind(dim=-1)
 
         self.add_factors(ii, jj, remove)
+        return len(self.ii)
 
     def add_loop_aware_proximity_factors(
         self,
@@ -324,6 +325,15 @@ class FactorGraph:
         remove: bool = True,
         max_factors: int = 200,  # This is variable in loop closure vs. normal
     ):
+        """
+        Add more connections in graph for high-similarity / low motion distance frames in
+        hopes of automatically closing loops.
+
+        NOTE the loop aware proximity factors have diff properties:
+        i) they help with loop closures slightly by adding more factors
+        ii) they make the system a little less stable, new parts of the map with diff. scales are merged for longer somehow
+        iii) they slightly reduce the speed of the system and add more memory
+        """
         if t_start_loop is None:
             t_start_loop = t_start
         assert t_start_loop >= t_start, "Loop start cannot be smaller than lower window bound!"
@@ -338,7 +348,8 @@ class FactorGraph:
         jj = jj.reshape(-1)
 
         d = self.video.distance(ii, jj, beta=beta)
-        rawd = deepcopy(d).reshape(ilen, jlen)
+        # rawd = deepcopy(d).reshape(ilen, jlen)
+        rawd = d.clone().reshape(ilen, jlen)
         d[ii - radius < jj] = np.inf
         d[d > thresh] = np.inf
         d = d.reshape(ilen, jlen)
@@ -356,10 +367,7 @@ class FactorGraph:
                 es.append((j, i))
                 di, dj = i - t_start_loop, j - t_start
                 d[di, dj] = np.inf
-                d[
-                    max(0, di - nms) : min(ilen, di + nms + 1),
-                    max(0, dj - nms) : min(jlen, dj + nms + 1),
-                ] = np.inf
+                d[max(0, di - nms) : min(ilen, di + nms + 1), max(0, dj - nms) : min(jlen, dj + nms + 1)] = np.inf
 
         # distance from small to big
         vals, ix = torch.sort(d.reshape(-1), descending=False)
@@ -383,15 +391,8 @@ class FactorGraph:
             if loop:
                 sub_es = []
                 num_loop = 0
-                for si in range(
-                    max(i - n_neighboring, t_start_loop),
-                    min(i + n_neighboring + 1, t_end),
-                ):
-                    for sj in range(
-                        max(j - n_neighboring, t_start),
-                        min(j + n_neighboring + 1, t_end),
-                    ):
-                        # FIXME this thresh is somehow set to a really high value, e.g. 25.0 in GO-SLAM configs?!
+                for si in range(max(i - n_neighboring, t_start_loop), min(i + n_neighboring + 1, t_end)):
+                    for sj in range(max(j - n_neighboring, t_start), min(j + n_neighboring + 1, t_end)):
                         if rawd[(si - t_start_loop), (sj - t_start)] <= thresh:
                             num_loop += 1
                             if si != sj:
@@ -408,10 +409,7 @@ class FactorGraph:
                     (j, i),
                 ]
 
-            d[
-                max(0, di - nms) : min(ilen, di + nms + 1),
-                max(0, dj - nms) : min(jlen, dj + nms + 1),
-            ] = np.inf
+            d[max(0, di - nms) : min(ilen, di + nms + 1), max(0, dj - nms) : min(jlen, dj + nms + 1)] = np.inf
 
         if len(es) < 3:
             return 0
@@ -426,7 +424,7 @@ class FactorGraph:
         self,
         t0=None,
         t1=None,
-        iters=2,
+        iters=4,
         use_inactive=False,
         lm=1e-4,
         ep=0.1,
@@ -446,9 +444,10 @@ class FactorGraph:
 
         self.net, delta, weight, damping, upmask = self.update_op(self.net, self.inp, corr, motion, self.ii, self.jj)
 
-        if t0 is None:  # the first keyframe (i.e., 0) should be fixed
+        if t0 is None:
             t0 = max(1, self.ii.min().item() + 1)
-        t0 = max(1, t0)
+        t0 = max(1, t0)  # Always fix the first pose in the video!
+
         if t1 is None:
             t1 = max(self.ii.max().item(), self.jj.max().item()) + 1
 
@@ -558,6 +557,14 @@ class FactorGraph:
                 self.weight[:, v] = weight.float()
                 self.damping[torch.unique(iis, sorted=True)] = damping
 
+            # Free memory manually
+            del corr1
+            del coords1
+            del delta
+            del upmask
+            torch.cuda.empty_cache()
+            gc.collect()
+
             damping_index = torch.arange(t0, t1).long().to(self.ii.device)
             damping_index = torch.unique(torch.cat([damping_index, self.ii], dim=0), sorted=True)
             damping = 0.2 * self.damping[damping_index].contiguous() + EPS
@@ -571,10 +578,77 @@ class FactorGraph:
                 target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep, motion_only, ba_type=ba_type
             )
 
-            # for visualization
-            self.video.dirty[:t] = True
-            # for mapping
-            self.video.mapping_dirty[:t] = True
+    @torch.cuda.amp.autocast(enabled=False)
+    def prior_update_lowmem(self, t0=None, t1=None, iters=2, steps=8, max_t=None, lm: float = 1e-5, ep: float = 1e-2):
+        """run update operator on factor graph - reduced memory implementation"""
+        cur_t = self.video.counter.value
+
+        # alternate corr implementation
+        t = max_t if max_t is not None else cur_t
+
+        sel_index = torch.arange(0, cur_t + 2)
+        # rig = 1(mono); 2(stereo)
+        num, rig, ch, ht, wd = self.video.fmaps[sel_index].shape
+        corr_op = AltCorrBlock(self.video.fmaps[sel_index].view(1, num * rig, ch, ht, wd))
+
+        if t0 is None:  # the first keyframe (i.e., 0) should be fixed
+            t0 = max(1, self.ii.min().item() + 1)
+        t0 = max(1, t0)
+        if t1 is None:
+            t1 = max(self.ii.max().item(), self.jj.max().item()) + 1
+
+        for step in range(steps):
+            with torch.cuda.amp.autocast(enabled=False):
+                # [batch, N, h, w, 2]
+                coords1, mask = self.video.reproject(self.ii, self.jj)
+                motion = torch.cat([coords1 - self.coords0, self.target - coords1], dim=-1)
+                motion = motion.permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
+
+            s = 13  # This is 8 in original DROID-SLAM implementation
+            for i in range(self.ii.min(), self.ii.max() + 1, s):
+                v = (self.ii >= i) & (self.ii < i + s)
+                if v.sum() < 1:
+                    continue
+
+                iis = self.ii[v]
+                jjs = self.jj[v]
+
+                # for stereo case, i.e., rig=2, each video.fmaps contain both left and right feature maps
+                # edge ii == jj means stereo pair, corr1: [B, N, (2r+1)^2 * num_levels, H, W]
+                corr1 = corr_op(coords1[:, v], rig * iis, rig * jjs + (iis == jjs).long())
+
+                with torch.cuda.amp.autocast(enabled=True):
+                    # [B, N, C, H, W], [B, N, H, W, 2],[B, N, H, W, 2], [B, s, H, W], [B, s, 8*9*9, H, W]
+                    net, delta, weight, damping, upmask = self.update_op(
+                        self.net[:, v], self.video.inps[None, iis], corr1, motion[:, v], iis, jjs
+                    )
+
+                    if self.upsample:
+                        self.video.upsample(torch.unique(iis, sorted=True), upmask)
+
+                self.net[:, v] = net
+                self.target[:, v] = coords1[:, v] + delta.float()
+                self.weight[:, v] = weight.float()
+                self.damping[torch.unique(iis, sorted=True)] = damping
+
+            # Free memory manually
+            del corr1
+            del coords1
+            del delta
+            del upmask
+            torch.cuda.empty_cache()
+            gc.collect()
+
+            damping_index = torch.arange(t0, t1).long().to(self.ii.device)
+            damping_index = torch.unique(torch.cat([damping_index, self.ii], dim=0), sorted=True)
+            damping = 0.2 * self.damping[damping_index].contiguous() + EPS
+
+            target = self.target.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
+            weight = self.weight.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
+
+            # dense bundle adjustment, fix the first keyframe, while optimize within [1, t]
+            # NOTE we need to pass the ba_type here to lock the threads correctly
+            self.video.ba_prior(target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep)
 
     @torch.cuda.amp.autocast(enabled=True)
     def update_fast(self, t0=None, t1=None, iters=2, steps=8, motion_only=False):

@@ -6,6 +6,7 @@
 This repository borrows from the following work  
 - "**GO-SLAM: Global Optimization for Consistent 3D Instant Reconstruction, Zhang et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
 - "**Deep geometry-aware camera self-calibration from video, Hagemann et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
+- "**Gaussian Splatting SLAM, Matsuki et al**",  [CVPR 2024](https://cvpr.thecvf.com/)
 
 
 ## :clapper: Introduction
@@ -30,6 +31,17 @@ This is a deep-learning-based dense visual SLAM framework that achieves **real-t
   booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision},
   pages={3438--3448},
   year={2023}
+}
+```
+
+```bibtex
+@misc{matsuki2024gaussian,
+      title={Gaussian Splatting SLAM}, 
+      author={Hidenobu Matsuki and Riku Murai and Paul H. J. Kelly and Andrew J. Davison},
+      year={2024},
+      eprint={2312.06741},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV}
 }
 ```
 
@@ -202,6 +214,7 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
 - [ ] FIX bug in scale optimization / Python BA on outdoor scenes
     - [ ] Optimization turns instable over longer windows and large scenes. What is the source?
     - [ ] Fix scale parameters after optimizing them once?
+- [ ] Use both multi-view consistency and uncertainty to filter the map before sending to Renderer
 - [ ] Backpropagate the pose loss from the Rendering objective into the SLAM tracking
     - [x] Optimize poses with additional optimizer
     - [ ] Evaluate optimized poses with new metrics
