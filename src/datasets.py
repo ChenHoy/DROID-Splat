@@ -304,12 +304,12 @@ class TartanAir(BaseDataset):
 class KITTI(BaseDataset):
     def __init__(self, cfg, device="cuda:0"):
         super(KITTI, self).__init__(cfg, device)
-        stride = cfg.slam.stride
+        stride = cfg.stride
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_2/*.png")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
-        if cfg.slam.mode == "prgbd":
+        if cfg.mode == "prgbd":
             self.depth_paths = sorted(
                 glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy")) # Use ZoeDepth predictions
                 # glob.glob(
@@ -430,7 +430,7 @@ class TUM_RGBD(BaseDataset):
     def __init__(self, cfg, device="cuda:0"):
         super(TUM_RGBD, self).__init__(cfg, device)
         self.color_paths, self.depth_paths, self.poses = self.loadtum(self.input_folder, frame_rate=32)
-        stride = cfg.slam.stride
+        stride = cfg.stride
         end_frame = 1000 # Dynamic after 1000 frames
         self.color_paths = self.color_paths[:end_frame:stride] 
         self.depth_paths = self.depth_paths[:end_frame:stride]

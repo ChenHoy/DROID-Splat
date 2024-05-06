@@ -3,7 +3,7 @@ mapping_iters: 100 # At each new frame, the selected views are optimized for thi
 refinement_iters: 100 # Once at the end, all views are optimized for this many iterations
 optimize_last: 10
 optimize_rand: 10
-max_cameras: 1
+max_cameras: 5
 
 optimize_poses: False
 update_frames: True

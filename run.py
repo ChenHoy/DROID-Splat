@@ -71,7 +71,7 @@ def run_slam(cfg):
 
     sys_print(f"\n\n** Running {cfg.data.input_folder} in {cfg.mode} mode!!! **\n\n")
     dataset = get_dataset(cfg, device=cfg.device)
-    slam = SLAM(cfg, output_folder=output_folder)
+    slam = SLAM(cfg)
 
     sys_print(f"Running on {len(dataset)} frames")
     slam.run(dataset)

@@ -33,7 +33,7 @@ class GaussianMapper(object):
     SLAM from Rendering with 3D Gaussian Splatting.
     """
 
-    def __init__(self, cfg, slam, mapping_queue=None, gui_qs=None):
+    def __init__(self, cfg, slam, gui_qs=None):
         self.cfg = cfg
         self.slam = slam
         self.video = slam.video
@@ -56,12 +56,14 @@ class GaussianMapper(object):
         self.gaussians.init_lr(6.0)
         self.gaussians.training_setup(self.opt_params)
 
+        bg_color = [1, 1, 1]
+        self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if gui_qs is not None:
-            bg_color = [1, 1, 1]
-            self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
             self.q_main2vis, self.q_vis2main = gui_qs
             self.use_gui = True
+        else:
+            self.use_gui = False
 
 
         self.cameras = []
@@ -76,23 +78,10 @@ class GaussianMapper(object):
 
         self.show_filtered = False
 
-        if mapping_queue is not None:
-            self.mapping_queue = mapping_queue
 
     def info(self, msg: str):
         print(colored("[Gaussian Mapper] " + msg, "magenta"))
 
-    # TODO only take object here if dirty_index is set to see if this is a new updated frame
-    def camera_from_video(self, idx):
-        """Takes the frame data from the video and returns a Camera object."""
-        color, depth, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
-        color = color.permute(2, 0, 1)
-        intrinsics = self.video.intrinsics[0] * self.video.scale_factor
-
-        # FIXME chen: the depth filter is not used correctly here!
-        # TODO come up with a better way to filter points or use enough views
-
-        return self.camera_from_frame(idx, color, depth, intrinsics, c2w)
 
     def get_new_cameras(self):
         """
@@ -218,7 +207,7 @@ class GaussianMapper(object):
             disps = torch.index_select(self.video.disps_up.detach(), dim=0, index=all_idxs)
             intrinsics = self.video.intrinsics[0] * self.video.scale_factor
 
-        self.info(f"Updating frames {dirty_index}")
+        #self.info(f"Updating frames {dirty_index}")
 
         depths = 1 / (disps + 1e-7)
 
@@ -382,8 +371,6 @@ class GaussianMapper(object):
         self.info(f"Final pruning removed {mask.sum()} gaussians")
         
 
-
-
     def select_keyframes(self):
         # Select n_last_frames and other n_rand_frames
         if len(self.cameras) <= self.n_last_frames + self.n_rand_frames:
@@ -394,10 +381,11 @@ class GaussianMapper(object):
             keyframes = self.cameras[-self.n_last_frames :] + [self.cameras[i] for i in keyframes_idx]
         return keyframes, keyframes_idx
 
-    def _last_call(self,mapping_queue: mp.Queue,received_item: mp.Event):
+    def _last_call(self, mapping_queue: mp.Queue, received_item: mp.Event):
         """Do one last refinement over the map"""
 
         self.info("\nMapping refinement starting")
+        self.final_covisibility(threshold=3)
         for iter in range(self.mapping_params.refinement_iters):
             loss = self.mapping_step(
                 iter,
@@ -408,8 +396,46 @@ class GaussianMapper(object):
             )
             self.loss_list.append(loss / len(self.cameras))
 
+            if self.use_gui:
+                    self.q_main2vis.put(
+                        gui_utils.GaussianPacket(
+                            gaussians=clone_obj(self.gaussians),
+                        )
+                    )
+        self.info("Mapping refinement finished")
 
-    def __call__(self, the_end=False):
+        self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
+        self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
+
+        if self.mapping_params.save_renders:
+            for cam in self.cameras:
+                self.save_render(cam, f"{self.output}/renders/final/{cam.uid}.png")
+
+        fig, ax = plt.subplots(2,1)
+        ax[0].set_title("Loss per frame evolution")
+        ax[0].set_yscale("log")
+        ax[0].plot(self.loss_list)
+
+        ax[1].set_yscale("log")
+        ax[1].set_title(f"Mode: {self.mode}. Optimize poses: {self.mapping_params.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
+        ax[1].plot(self.loss_list[-self.mapping_params.refinement_iters:])
+        plt.savefig(f"{self.output}/loss_{self.mode}.png")
+
+        self.info(f"Final mapping loss: {self.loss_list[-1]}")
+
+        ## export the cameras and gaussians to the terminate process
+        if self.cfg.evaluate:
+            mapping_queue.put(
+                gui_utils.EvaluatePacket(
+                    pipeline_params=clone_obj(self.pipeline_params),
+                    cameras=self.cameras[:],
+                    gaussians=clone_obj(self.gaussians),
+                    background=clone_obj(self.background),
+                )
+            )
+            received_item.wait()  # Wait until the Packet got delivered
+
+    def __call__(self, mapping_queue: mp.Queue,received_item: mp.Event, the_end=False):
         self.cur_idx = int(self.video.filtered_id.item()) 
 
         if self.cur_idx <= self.mapping_params.warmup: # Not starting mapping yet
@@ -428,7 +454,6 @@ class GaussianMapper(object):
             # Filter depth and update pose for dirty and new cameras
             self.frame_updater() 
 
-
             for cam in self.new_cameras:
                 if not self.initialized:
                     self.initialized = True
@@ -437,7 +462,7 @@ class GaussianMapper(object):
                 else:
                     n_g = self.gaussians.get_xyz.shape[0]
                     self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=False)
-                    self.info(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians based on view {cam.uid}")
+                    #self.info(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians based on view {cam.uid}")
 
 
 
@@ -454,7 +479,7 @@ class GaussianMapper(object):
             #     if param_group["name"] == "xyz":
             #         print(param_group["lr"])
 
-            if self.last_idx % 1 == 0 and self.last_idx > self.n_last_frames:
+            if self.last_idx % 5 == 0 and self.last_idx > self.n_last_frames:
                 self.final_covisibility()
                 
                 
@@ -485,69 +510,10 @@ class GaussianMapper(object):
             self._last_call(mapping_queue=mapping_queue,received_item=received_item)
             return True
 
-        elif the_end and self.last_idx == self.cur_idx - self.delay:
-            self.info("Mapping refinement starting")
-            self.final_covisibility(threshold=3)
-
-            for iter in range(self.mapping_params.refinement_iters):
-                loss = self.mapping_step(
-                    iter,
-                    self.cameras,
-                    self.pruning_params.refinement,
-                    densify=False,
-                    optimize_poses=self.mapping_params.optimize_poses,
-                )
-                self.loss_list.append(loss / len(self.cameras))
-
-                if self.use_gui:
-                    self.q_main2vis.put(
-                        gui_utils.GaussianPacket(
-                            gaussians=clone_obj(self.gaussians),
-                        )
-                    )
-            self.info("Mapping refinement finished")
-
-            if self.use_gui:
-                    self.q_main2vis.put(
-                        gui_utils.GaussianPacket(
-                            gaussians=clone_obj(self.gaussians),
-                        )
-                    )
 
 
-        self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
-        self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
-
-        if self.mapping_params.save_renders:
-            for cam in self.cameras:
-                self.save_render(cam, f"{self.output}/renders/final/{cam.uid}.png")
-
-            fig, ax = plt.subplots()
-            ax.set_title("Loss per frame evolution")
-            ax.set_yscale("log")
-            ax.plot(self.loss_list)
-            plt.savefig(f"{self.output}/all_loss_{self.mode}.png")
 
 
-            fig, ax = plt.subplots()
-            ax.set_yscale("log")
-            ax.set_title(f"Mode: {self.mode}. Optimize poses: {self.mapping_params.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
-            ax.plot(self.loss_list[-self.mapping_params.refinement_iters:])
-            plt.savefig(f"{self.output}/refinement_loss_{self.mode}.png")
-
-            self.info(f"Final loss: {self.loss_list[-1]}")
-
-        ## export the cameras and gaussians to the terminate process
-        if self.cfg.evaluate:
-            mapping_queue.put(
-                gui_utils.EvaluatePacket(
-                    pipeline_params=clone_obj(self.pipeline_params),
-                    cameras=self.cameras[:],
-                    gaussians=clone_obj(self.gaussians),
-                    background=clone_obj(self.background),
-                )
-            )
-            received_item.wait()  # Wait until the Packet got delivered
 
 
     

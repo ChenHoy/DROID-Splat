@@ -14,17 +14,18 @@ hydra:
 device: "cuda:0"
 sync_method: strict
 mode: "mono"  # 'mono', 'prgbd', 'rgbd'
-stride: 2
+stride: 1
+output_folder: ./outputs/
 opt_intr: False # Optimizes additional intrinsic parameters
 sleep_delay: 2.0 # Time delay to synchronize frontend and backend
 
-  run_backend: True
-  run_frontend: True
-  run_multiview_filter: True
-  run_mapping: True
-  run_visualization: False
-  run_mapping_gui: True
+run_backend: True
+run_frontend: True
+run_multiview_filter: True
+run_mapping: True
+run_visualization: True
+run_mapping_gui: True
 
-  show_stream: False
+show_stream: False
 
 evaluate: False

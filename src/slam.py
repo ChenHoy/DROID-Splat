@@ -57,14 +57,13 @@ class SLAM:
     We combine these building blocks in a multiprocessing environment.
     """
 
-    def __init__(self, cfg, dataset=None, output_folder=None):
+    def __init__(self, cfg, dataset=None):
         super(SLAM, self).__init__()
-
+    
         self.cfg = cfg
         self.device = cfg.get("device", torch.device("cuda:0"))
         self.mode = cfg.mode
-        self.create_out_dirs(output_folder)
-
+        self.create_out_dirs()
         self.update_cam(cfg)
         self.load_bound(cfg)
 
@@ -118,7 +117,7 @@ class SLAM:
             self.max_depth_visu = 5.0
 
 
-        if cfg.slam.run_mapping_gui:
+        if cfg.run_mapping_gui and cfg.run_mapping and not cfg.evaluate:
             self.q_main2vis = mp.Queue()
             self.q_vis2main = mp.Queue()
             self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs = (self.q_main2vis, self.q_vis2main))
@@ -137,9 +136,9 @@ class SLAM:
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
 
-    def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
-        if output_folder is not None:
-            self.output = output_folder
+    def create_out_dirs(self) -> None:
+        if self.cfg.output_folder is not None:
+            self.output = self.cfg.output_folder
         else:
             self.output = "./outputs/"
 
@@ -295,8 +294,6 @@ class SLAM:
         self.all_trigered += 1
 
         while self.tracking_finished < 1 and run:
-            while self.hang_on > 0:
-                sleep(1.0)
             self.gaussian_mapper(mapping_queue, received_mapping)
 
         # Run for one last time after everything finished
@@ -329,7 +326,7 @@ class SLAM:
         self.info("Mapping GUI done!")
 
 
-    def show_stream(self, rank, input_queue: mp.Queue) -> None:
+    def show_stream(self, rank, input_queue: mp.Queue, run=True) -> None:
         self.info("OpenCV Image stream thread started!")
         self.all_trigered += 1
 
@@ -463,7 +460,7 @@ class SLAM:
             os.path.join(self.output, "checkpoints/go.ckpt"),
         )
 
-    def terminate(self, processes: List, stream=None,gaussian_mapper_last_state=None):
+    def terminate(self, processes: List, stream=None, gaussian_mapper_last_state=None):
         """fill poses for non-keyframe images and evaluate"""
         self.info("Initiating termination ...")
 
@@ -502,13 +499,13 @@ class SLAM:
         # -> introduce multiple indices so we can keep track of what we already visualized and what we already put into the renderer
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
-            mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
-            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe)),
-            mp.Process(target=self.backend, args=(2, self.cfg.slam.run_backend)),
-            mp.Process(target=self.multiview_filtering, args=(3, self.cfg.slam.run_multiview_filter)),
-            mp.Process(target=self.visualizing, args=(4, self.cfg.slam.run_visualization)),
-            mp.Process(target=self.mapping_gui, args=(5, self.cfg.slam.run_mapping_gui and self.cfg.slam.run_mapping and not self.cfg.slam.evaluate)),
-            mp.Process(target=self.gaussian_mapping, args=(6, self.cfg.slam.run_mapping)),
+            mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
+            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Frontend Tracking"),
+            mp.Process(target=self.global_ba, args=(2, self.cfg.run_backend),name="Backend"),
+            mp.Process(target=self.multiview_filtering, args=(3, self.cfg.run_multiview_filter),name="Multiview Filtering"),
+            mp.Process(target=self.visualizing, args=(4, self.cfg.run_visualization), name="Visualizing"), ## Andrei NOTE: always disable visualization when running evaluation
+            mp.Process(target=self.mapping_gui, args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate), name="Mapping GUI"),
+            mp.Process(target=self.gaussian_mapping, args=(6, self.cfg.run_mapping, self.mapping_queue, self.received_mapping), name="Gaussian Mapping"),
         ]
 
         self.num_running_thread[0] += len(processes)
