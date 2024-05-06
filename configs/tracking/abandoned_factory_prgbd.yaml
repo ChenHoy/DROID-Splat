@@ -1,0 +1,54 @@
+pretrained: ./pretrained/droid.pth
+
+buffer: 500
+beta: 0.7
+warmup: 12
+upsample: True
+
+motion_filter:
+  thresh: 5.0  # add as keyframe if avg flow >= 4.0 pixels
+
+multiview_filter:
+  thresh: 0.01  # depth error < 0.01m
+  visible_num: 2  # points viewed by at least 2 cameras
+  kernel_size: inf
+  bound_enlarge_scale: 1.20
+
+frontend:
+  thresh: 20.0 
+  radius: 1
+  window: 40 
+  nms: 0
+
+  steps1: 4 # 1st outer loop with feature correlation
+  steps2: 2 # 2nd outer loop with feature correlation
+  iters: 4 # Actual BA iterations
+  keyframe_thresh: 4.0  # remove keyframe if avg flow < 4.0 pixels
+  max_factors: 100  # num of edges within local ba
+
+  use_loop_closure: False
+  loop_window: 100
+  loop_thresh: 20.0  # only consider edge with avg flow < x pixels
+  loop_radius: 1
+  loop_nms: 12
+  release_cache: False # Tradeoff: memory vs. speed, This can save up to ~5GB
+
+
+
+backend:
+
+  thresh: 30.0  
+  radius: 2
+  nms: 2
+  # used for loop detection
+  loop_window: 250
+  loop_thresh: 30.0  
+  loop_radius: 2
+  loop_nms: 5
+
+
+  warmup: null
+  window: 200 # Dont optimize more keyframes to avoid OOM
+  steps: 8
+  iters: 2
+  use_loop_closure: False

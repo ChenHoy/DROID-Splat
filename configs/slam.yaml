@@ -21,10 +21,10 @@ sleep_delay: 2.0 # Time delay to synchronize frontend and backend
 
 run_frontend: True # This should always be True!
 run_backend: True
-run_mapping: True
-run_visualization: False
+run_mapping: False
+run_visualization: True
 run_mapping_gui: True
 
-show_stream: False
+show_stream: True
 
 evaluate: False

@@ -46,7 +46,6 @@ class GaussianMapper(object):
         self.delay = cfg.mapping.delay  # Delay between tracking and mapping
         self.refinement_iters = cfg.mapping.refinement_iters
         self.mapping_iters = cfg.mapping.mapping_iters
-        self.use_gui = cfg.mapping.use_gui
         self.save_renders = cfg.mapping.save_renders
         self.warmup = max(cfg.mapping.warmup, cfg.tracking.warmup)
         self.batch_mode = cfg.mapping.batch_mode  # Take a batch of all unupdated frames at once
@@ -140,7 +139,7 @@ class GaussianMapper(object):
         height, width = image.shape[1:]
         gt_pose = torch.linalg.inv(gt_pose)  # They invert the poses in the dataloader
         znear = 0.01
-        zfar = 1000.0  # TODO make this configurable?
+        zfar = 1000.0  # TODO make this configurable? 
         fovx = focal2fov(fx, width)
         fovy = focal2fov(fy, height)
 
@@ -291,6 +290,7 @@ class GaussianMapper(object):
             if self.last_idx > self.n_last_frames and (iter + 1) % self.kf_mng_params.prune_every == 0:
                 # if self.mode != "rgbd":
                 #     self.covisibility_pruning() # Covisibility based pruning for recently added gaussians 
+                # NOTE leon: monogs uses this covisibility pruning because they dont have such a good depth estimation
                 self.gaussians.densify_and_prune( # General pruning based on opacity and size + densification
                 kf_mng_params.densify_grad_threshold,
                 kf_mng_params.opacity_th,
@@ -300,13 +300,14 @@ class GaussianMapper(object):
 
             self.gaussians.optimizer.step()
             self.gaussians.optimizer.zero_grad()
-            self.gaussians.update_learning_rate(10*self.last_idx) # TODO leon: Only taking keyframes, the update is to small
+            self.gaussians.update_learning_rate(iter)
 
             if optimize_poses:
                 pose_optimizer.step()
                 pose_optimizer.zero_grad()
                 for view in frames:
                     update_pose(view)
+
 
             return loss.item()
 
@@ -454,7 +455,7 @@ class GaussianMapper(object):
 
             # TODO chen: what happens if the map undergoes radical changes in the SLAM system?
             # e.g. a loop closure that rapidly changes the scale of the map
-            # would this destory the Gaussians as well?
+            # would this destroy the Gaussians as well?
             self.get_new_cameras()  # Add new cameras
             self.last_idx = self.new_cameras[-1].uid + 1
 
@@ -485,11 +486,8 @@ class GaussianMapper(object):
                 )
                 self.loss_list.append(loss / len(frames))
 
-            # for param_group in self.gaussians.optimizer.param_groups:
-            #     if param_group["name"] == "xyz":
-            #         print(param_group["lr"])
 
-            if self.last_idx % 1 == 0 and self.last_idx > self.n_last_frames:
+            if self.last_idx % 1 == 0 and self.last_idx > self.n_last_frames: # TODO leon: is it necessary at every frame?
                 self.abs_visibility_prune()
                 
                 

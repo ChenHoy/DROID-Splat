@@ -1,7 +1,8 @@
 dataset: 'tartanair'
 mode: $mode
 bound: [[-10.0, 10.0], [-10.0, 10.0], [-10.0, 10.0]]
-input_folder: /media/data/TartanAir/seasidetown/Easy/P000
+#input_folder: /media/data/TartanAir/seasidetown/Easy/P000
+input_folder: /media/data/TartanAir/abandonedfactory/Easy/P000/
 
 
 cam:
