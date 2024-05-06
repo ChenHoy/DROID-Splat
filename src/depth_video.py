@@ -1,5 +1,7 @@
 import ipdb
+from termcolor import colored
 from copy import deepcopy
+from typing import Optional
 
 import torch
 from torch.multiprocessing import Value
@@ -47,6 +49,8 @@ class DepthVideo:
         self.scale_factor = 8
         s = self.scale_factor
         buffer = cfg.tracking.buffer
+        # Whether we upsample the predictions or not
+        self.upsampled = cfg.tracking.upsample
 
         ### state attributes -> Raw map ###
         self.timestamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
@@ -54,9 +58,9 @@ class DepthVideo:
         self.dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
         # List for keeping track of updated frames for Map Renderer
         self.mapping_dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
+
         self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float)
         self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
-        self.red = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
         self.poses = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # w2c quaterion
         self.poses_gt = torch.zeros(buffer, 4, 4, device=device, dtype=torch.float).share_memory_()  # c2w matrix
         self.disps = torch.ones(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
@@ -75,6 +79,9 @@ class DepthVideo:
         # TODO if we need to squeeze memory we can remove this
         self.depths_gt = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
 
+        # FIXME chen: what is this for?
+        self.red = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
+
         ### feature attributes ###
         self.fmaps = torch.zeros(buffer, c, 128, ht // s, wd // s, dtype=torch.half, device=device).share_memory_()
         self.nets = torch.zeros(buffer, 128, ht // s, wd // s, dtype=torch.half, device=device).share_memory_()
@@ -85,19 +92,18 @@ class DepthVideo:
         self.poses_gt[:] = torch.eye(4, dtype=torch.float, device=device)
 
         ### Additional flags for multi-view filter -> Clean map for rendering ###
-        self.disps_filtered = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
-        self.mask_filtered = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
-        # FIXME do we already need this object? These are exactly the same as self.poses
-        self.poses_filtered = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # w2c quaterion
-        self.poses_filtered[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
+        if self.cfg.tracking.upsample:
+            self.disps_clean = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
+        else:
+            self.disps_clean = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
+        # Poses that have been finetuned by the Rendering module, we could reassign these back to the DepthVideo
+        self.poses_clean = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # w2c quaterion
+        self.poses_clean[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
 
         # Keep track of which frames have been filtered
-        self.filtered_id = torch.tensor([-1], dtype=torch.int, device=device).share_memory_()
-        self.update_priority = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
-        self.bound = torch.zeros(1, 3, 2, device=device, dtype=torch.float).share_memory_()
-        # pose compensation from virtual to real
-        self.pose_compensate = torch.zeros(1, 7, dtype=torch.float, device=device).share_memory_()
-        self.pose_compensate[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
+        self.filtered_id = torch.tensor([0], dtype=torch.int, device=device).share_memory_()
+        # FIXME chen: this used to be -1 to always get the latest, but now we go consistently forward
+        # self.filtered_id = torch.tensor([-1], dtype=torch.int, device=device).share_memory_()
 
     def get_lock(self):
         return self.counter.get_lock()
@@ -171,40 +177,115 @@ class DepthVideo:
         with self.get_lock():
             self.__item_setter(self.counter.value, item)
 
-    def get_bound(self):
-        with self.mapping.get_lock():
-            bound = self.bound[0]
+    def pad_indices(self, indices: torch.Tensor, radius: int = 3) -> torch.Tensor:
+        """Given a sequence of indices, we want to include surrounding indices as well within a radius.
+        This is useful, as when we want to compute multi-view consistency we need to consider surrounding frames.
+        Since we dont want do this for the whole map all the time, we only pad a given list of indices.
+        """
+        padded_indices = []
+        last_frame = (
+            indices.max().item()
+        )  # Dont pad past the sequence, because we might not have visited these frames at all
+        for ix in indices:
+            padded_indices.append(
+                torch.arange(max(0, ix - radius), min(last_frame, ix + radius + 1), device=indices.device)
+            )
+        padded_indices = torch.cat(padded_indices)
+        return torch.unique(padded_indices)
 
-        return bound
+    # TODO how to speed up the system here?
+    # this is called every time we use the renderer
+    # Should we maybe only use this scarcily?
+    def filter_map(
+        self,
+        idx: Optional[torch.Tensor] = None,
+        radius: int = 2,
+        min_count: int = 2,
+        bin_thresh: float = 0.1,
+        min_disp_thresh: float = 0.01,
+        unc_threshold: float = 0.1,
+        use_multiview_consistency: bool = True,
+        use_uncertainty: bool = True,
+    ) -> None:
+        """Filter the map based on consistency across multiple views and uncertainty.
+        Normally this is done based on only a selected few views. We extend the selection with a local neighborhood
+        to achieve a better estimate of consistent points.
+        """
+
+        with self.get_lock():
+            if idx is None:
+                (dirty_index,) = torch.where(self.mapping_dirty.clone())
+                dirty_index = dirty_index
+            else:
+                dirty_index = idx
+
+            if len(dirty_index) == 0:
+                return
+
+            # Check for multiview consistency not in the whole map, but only in the neighborhood of the frames to update
+            dirty_index = self.pad_indices(dirty_index, radius=radius)
+
+            if self.upsampled:
+                disps = torch.index_select(self.disps_up, 0, dirty_index).clone()
+                intrinsics = self.intrinsics[0] * self.scale_factor
+                if use_uncertainty:
+                    unc = torch.index_select(self.uncertainty_up, 0, dirty_index).clone()
+            else:
+                disps = torch.index_select(self.disps, 0, dirty_index).clone()
+                intrinsics = self.intrinsics[0]
+                if use_uncertainty:
+                    unc = torch.index_select(self.uncertainty, 0, dirty_index).clone()
+
+        mask = torch.ones_like(disps, dtype=torch.bool)
+        if use_multiview_consistency:
+            # Only take pixels where multiple points are consistent across views and they do not have an outlier disparity
+            # NOTE chen: this needs to be locked in order to avoid illegal memory access
+            # with self.get_lock():
+            thresh = bin_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
+            if self.upsampled:
+                count = droid_backends.depth_filter(self.poses, self.disps_up, intrinsics, dirty_index, thresh)
+            else:
+                count = droid_backends.depth_filter(self.poses, self.disps, intrinsics, dirty_index, thresh)
+            mv_mask = (count >= min_count) & (disps > min_disp_thresh * disps.mean(dim=[1, 2], keepdim=True))
+            mask = mask & mv_mask
+
+        if use_uncertainty:
+            unc_mask = unc > unc_threshold
+            mask = mask & unc_mask
+
+        disps[~mask] = 0.0  # Filter away invalid points
+        self.disps_clean[dirty_index] = disps
+        self.filtered_id = max(dirty_index.max().item(), self.filtered_id)
 
     def get_mapping_item(self, index, device="cuda:0", decay=0.1):
         """dense mapping operations to transfer a part of the video to the Rendering module"""
 
         with self.mapping.get_lock():
-            image = self.images[index].clone().permute(1, 2, 0).contiguous().to(device)  # [h, w, 3]
-            mask = self.mask_filtered[index].clone().to(device)
-            est_disp = self.disps_filtered[index].clone().to(device)  # [h, w]
+            if self.upsampled:
+                image = self.images[index].clone().permute(1, 2, 0).contiguous().to(device)  # [h, w, 3]
+                intrinsics = self.intrinsics[0].clone().contiguous().to(device) * self.scale_factor  # [4]
+            else:
+                # Color is always stored in the original resolution, downsample here to match
+                image = self.images[index, ..., 3::8, 3::8].clone().permute(1, 2, 0).contiguous().to(device)
+                intrinsics = self.intrinsics[0].clone().contiguous().to(device)  # [4]
+
+            # gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
+            est_disp = self.disps_clean[index].clone().to(device)  # [h, w]
             est_depth = 1.0 / (est_disp + 1e-7)
 
         # origin alignment
-        w2c = lietorch.SE3(self.poses_filtered[index].clone()).to(device)  # Tw(droid)_to_c
-        c2w = lietorch.SE3(self.pose_compensate[0].clone()).to(w2c.device) * w2c.inv()
-        c2w = c2w.matrix()  # [4, 4]
+        w2c = lietorch.SE3(self.poses[index].clone()).to(device)  # Tw(droid)_to_c
+        c2w = w2c.inv().matrix()  # [4, 4]
 
         gt_c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
-
         depth = est_depth
-        # gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
         # depth = gt_depth
 
-        # if updated by mapping, the priority is decreased to lowest level, i.e., 0
-        self.update_priority[index] *= decay
-
-        return image, depth, c2w, gt_c2w, mask
+        return image, depth, intrinsics, c2w, gt_c2w
 
     # TODO Backpropagate an updated map from Renderer to the DepthVideo
     # TODO chen: this needs to assume that the Renderer actually produces a better state than from the feature maps / optical flow estimates
-    def set_item_from_mapping(self, index, pose=None, depth=None):
+    def set_mapping_item(self, index, pose=None, depth=None):
         with self.get_lock():
             pass
 

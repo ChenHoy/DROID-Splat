@@ -123,9 +123,13 @@ class MultiviewFilter(nn.Module):
             with self.video.get_lock():
                 dirty_index = torch.arange(0, cur_t).long().to(self.device)
                 poses = torch.index_select(self.video.poses.detach(), dim=0, index=dirty_index)
-                disps = torch.index_select(self.video.disps_up.detach(), dim=0, index=dirty_index)
                 common_intrinsic_id = 0  # we assume the intrinsics are consistent within one scene
-                intrinsic = self.video.intrinsics[common_intrinsic_id].detach() * self.video.scale_factor
+                if self.cfg.tracking.upsample:
+                    intrinsic = self.video.intrinsics[common_intrinsic_id].detach() * self.video.scale_factor
+                    disps = torch.index_select(self.video.disps_up.detach(), dim=0, index=dirty_index)
+                else:
+                    intrinsic = self.video.intrinsics[common_intrinsic_id].detach()
+                    disps = torch.index_select(self.video.disps.detach(), dim=0, index=dirty_index)
                 w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(self.device)
 
                 points = droid_backends.iproj((w2w * SE3(poses).inv()).data, disps, intrinsic)  # [b, h, w 3]
@@ -137,7 +141,11 @@ class MultiviewFilter(nn.Module):
             is_consistent = count >= self.filter_visible_num
             # filter out far points
             is_consistent = is_consistent & (disps > 0.01 * disps.mean(dim=[1, 2], keepdim=True))
-            if is_consistent.sum() < 100:  # Do not filter away small scenes
+            if self.cfg.tracking.upsample:
+                min_num_points = 100
+            else:
+                min_num_points = 10
+            if is_consistent.sum() < min_num_points:  # Do not filter away small scenes
                 return
             bound = self.get_bound_from_pointcloud(points.reshape(-1, 3)[is_consistent.reshape(-1)])  # [3, 2]
 
@@ -161,7 +169,7 @@ class MultiviewFilter(nn.Module):
                     .squeeze(dim=1)
                 )  # [b, h, w]
 
-            if is_consistent_padded.sum() < 100:  # Do not filter away small scenes
+            if is_consistent_padded.sum() < min_num_points:  # Do not filter away small scenes
                 return
 
             is_in_bounds = self.in_bound(points.reshape(-1, 3), bound)  # N'
@@ -169,19 +177,10 @@ class MultiviewFilter(nn.Module):
             points_filtered = points.reshape(-1, 3)[valid.reshape(-1)]
             new_bound = self.get_bound_from_pointcloud(points_filtered)
 
-            # cur_t is the current last visited frame in the video
-            # TODO chen: what do we do with these?
-            priority = self.pose_dist(self.video.poses_filtered[:cur_t].detach(), poses)
-
             with self.video.mapping.get_lock():
-                self.video.update_priority[:cur_t] += priority.detach()
-                self.video.mask_filtered[:cur_t] = valid.reshape(bs, ht, wd).detach()
-                self.video.disps_filtered[:cur_t] = disps.detach()
-                # TODO chen: delete the poses_filtered
-                self.video.poses_filtered[:cur_t] = poses.detach()
+                self.video.disps_clean[:cur_t] = disps.detach()
                 # Update the filter id
                 self.video.filtered_id[0] = cur_t
-                self.video.bound[0] = new_bound
 
             self.info(new_bound, is_consistent, filtered_t, cur_t)
             del points, is_consistent, poses, disps

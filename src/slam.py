@@ -33,7 +33,6 @@ from .droid_net import DroidNet
 from .frontend import FrontendWrapper
 from .backend import BackendWrapper
 from .depth_video import DepthVideo
-from .multiview_filter import MultiviewFilter
 from .visualization import droid_visualization, depth2rgb, uncertainty2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .gaussian_mapping import GaussianMapper
@@ -43,12 +42,12 @@ from .gaussian_splatting.gui import gui_utils, slam_gui
 from multiprocessing import Manager
 from .gaussian_splatting.multiprocessing_utils import clone_obj
 
+
 class SLAM:
     """SLAM system which bundles together multiple building blocks:
         - Frontend Tracker based on a Motion filter, which successively inserts new frames into a map
             within a local optimization window
         - Backend Bundle Adjustment, which optimizes the map over a global optimization window
-        - Multiview Filtering, which refines the map by filtering out outliers
         - Gaussian Mapping, which optimizes the map into multiple 3D Gaussian
             based on a dense rendering objective
         - Visualizers for showing the incoming RGB(D) stream, the current pose graph,
@@ -81,8 +80,6 @@ class SLAM:
         self.all_finished.share_memory_()
         self.tracking_finished = torch.zeros((1)).int()
         self.tracking_finished.share_memory_()
-        self.multiview_filtering_finished = torch.zeros((1)).int()
-        self.multiview_filtering_finished.share_memory_()
         self.gaussian_mapping_finished = torch.zeros((1)).int()
         self.gaussian_mapping_finished.share_memory_()
         self.backend_finished = torch.zeros((1)).int()
@@ -102,7 +99,6 @@ class SLAM:
         # store images, depth, poses, intrinsics (shared between process)
         self.video = DepthVideo(cfg)  # NOTE: we can use this for getting both gt and rendered images
         self.frontend = FrontendWrapper(cfg, self)
-        self.multiview_filter = MultiviewFilter(cfg, self)
         self.backend = BackendWrapper(cfg, self)
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
 
@@ -148,7 +144,7 @@ class SLAM:
         os.makedirs(f"{self.output}/renders/final", exist_ok=True)
         os.makedirs(f"{self.output}/mesh", exist_ok=True)
         os.makedirs(f"{self.output}/evaluation", exist_ok=True)
-        
+
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
 
@@ -276,28 +272,17 @@ class SLAM:
         self.all_finished += 1
         self.info("Full Bundle Adjustment done!")
 
-    # TODO update the multiview_filter to include uncertainty
-    def multiview_filtering(self, rank, run=False):
-        self.info("Multiview Filtering thread started!")
-        self.all_trigered += 1
-
-        while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
-            self.multiview_filter()
-
-        self.multiview_filtering_finished += 1
-        self.all_finished += 1
-        self.info("Multiview Filtering Done!")
-
-
     def gaussian_mapping(self, rank, run, mapping_queue: mp.Queue, received_mapping: mp.Event):
         self.info("Gaussian Mapping Triggered!")
         self.all_trigered += 1
 
         while self.tracking_finished < 1 and run:
             self.gaussian_mapper(mapping_queue, received_mapping)
+            sleep(self.sleep_time / 2)
 
         # Run for one last time after everything finished
         finished = False
+        print("Waiting for Gaussian Mapping to finish ...")
         while not finished and run:
             finished = self.gaussian_mapper(mapping_queue, received_mapping, True)
 
@@ -354,7 +339,7 @@ class SLAM:
                 # Plot the uncertainty on top
                 with self.video.get_lock():
                     t_cur = max(0, self.video.counter.value - 1)
-                    if self.cfg["tracking"]["upsample"]:
+                    if self.cfg.tracking.get("upsample", False):
                         uncertanity_cur = self.video.uncertainty_up[t_cur].clone()
                     else:
                         uncertanity_cur = self.video.uncertainty[t_cur].clone()
@@ -367,13 +352,13 @@ class SLAM:
 
     def evaluate(self, stream, gaussian_mapper_last_state):
 
-        eval_path = os.path.join(self.output,"evaluation")
+        eval_path = os.path.join(self.output, "evaluation")
 
         def stringify_config():
             tbr = "Config: "
 
             if self.cfg.run_backend:
-                tbr +="Backend"
+                tbr += "Backend"
             if self.cfg.run_frontend:
                 tbr += " Frontend"
             if self.cfg.run_mapping:
@@ -392,8 +377,9 @@ class SLAM:
             eval_path,
             gaussian_mapper_last_state.pipeline_params,
             gaussian_mapper_last_state.background,
-            kf_indices=[], ## NOTE: all frames are keyframes
-            iteration="final",) ## NOTE: only for printing additional messages
+            kf_indices=[],  ## NOTE: all frames are keyframes
+            iteration="final",
+        )  ## NOTE: only for printing additional messages
 
         #### ------------------- ####
         ### Trajectory evaluation ###
@@ -403,7 +389,7 @@ class SLAM:
         ## Trajectory filler
         timestamps = [i for i in range(len(stream))]
         camera_trajectory = self.traj_filler(stream)  # w2cs
-        w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
+        w2w = SE3(self.video.poses_clean[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
         camera_trajectory = w2w * camera_trajectory.inv()
         traj_est = camera_trajectory.data.cpu().numpy()
         estimate_c2w_list = camera_trajectory.matrix().data.cpu()
@@ -426,14 +412,14 @@ class SLAM:
             stream=stream,
         )
 
-        self.info("ATE: {}".format(result_ate))
+        # self.info("ATE: {}".format(result_ate))
 
         trajectory_df = pd.DataFrame([result_ate])
         trajectory_df.to_csv(os.path.join(eval_path, "trajectory_results.csv"), index=False)
 
         #### ------------------- ####
         ## Joint metrics file ##
-        columns = ["config",'dataset','mode', "psnr", "ssim", "lpips","ape"]
+        columns = ["config", "dataset", "mode", "psnr", "ssim", "lpips", "ape"]
         data = [
             [
                 stringify_config(),
@@ -442,12 +428,12 @@ class SLAM:
                 rendering_result["mean_psnr"],
                 rendering_result["mean_ssim"],
                 rendering_result["mean_lpips"],
-                result_ate['mean']
+                result_ate["mean"],
             ]
         ]
 
         df = pd.DataFrame(data, columns=columns)
-        df.to_csv(os.path.join(eval_path,"evaluation_results.csv"), index=False)
+        df.to_csv(os.path.join(eval_path, "evaluation_results.csv"), index=False)
 
     def save_state(self):
         self.info("Saving checkpoints...")
@@ -468,8 +454,7 @@ class SLAM:
             p.join()
             self.info("Terminated process {}".format(p.name))
 
-
-        self.save_state()## this is not reached
+        # self.save_state()  ## this is not reached
         print("Evaluation: {}".format(self.do_evaluate))
         if self.do_evaluate:
             self.info("Doing evaluation!")
@@ -502,7 +487,6 @@ class SLAM:
             mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Frontend Tracking"),
             mp.Process(target=self.global_ba, args=(2, self.cfg.run_backend),name="Backend"),
-            mp.Process(target=self.multiview_filtering, args=(3, self.cfg.run_multiview_filter),name="Multiview Filtering"),
             mp.Process(target=self.visualizing, args=(4, self.cfg.run_visualization), name="Visualizing"), ## Andrei NOTE: always disable visualization when running evaluation
             mp.Process(target=self.mapping_gui, args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate), name="Mapping GUI"),
             mp.Process(target=self.gaussian_mapping, args=(6, self.cfg.run_mapping, self.mapping_queue, self.received_mapping), name="Gaussian Mapping"),
@@ -515,14 +499,14 @@ class SLAM:
         # Wait for all processes to have finished before terminating and for final mapping update to be transmitted
         while self.mapping_queue.empty() and self.all_finished < self.num_running_thread:
             pass
-            
+
         ###
         # Perform intermediate computations you would want to do, e.g. return the last map for evaluation
         # Since all processes run here until finished, this requires some add. multi-threading flags for synchronization
         ###
 
         # Receive the final update, so we can do something with it ...
-        
+
         a = self.mapping_queue.get()
         gaussian_mapper_last_state = clone_obj(a)
         self.received_mapping.set()
@@ -534,6 +518,4 @@ class SLAM:
             if self.num_running_thread == 1 and self.tracking_finished > 0:
                 break
 
-
-
-        self.terminate(processes,stream,gaussian_mapper_last_state)
+        self.terminate(processes, stream, gaussian_mapper_last_state)

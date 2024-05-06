@@ -188,7 +188,6 @@ class FactorGraph:
             self.video.images[ix] = self.video.images[ix + 1]
             self.video.dirty[ix] = self.video.dirty[ix + 1]
             self.video.mapping_dirty[ix] = self.video.mapping_dirty[ix + 1]
-            self.video.red[ix] = self.video.red[ix + 1]
             self.video.poses[ix] = self.video.poses[ix + 1]
             self.video.poses_gt[ix] = self.video.poses_gt[ix + 1]
             self.video.disps[ix] = self.video.disps[ix + 1]
@@ -196,10 +195,11 @@ class FactorGraph:
             self.video.disps_up[ix] = self.video.disps_up[ix + 1]
             self.video.depths_gt[ix] = self.video.depths_gt[ix + 1]
             self.video.intrinsics[ix] = self.video.intrinsics[ix + 1]
-            self.video.poses_filtered[ix] = self.video.poses_filtered[ix + 1]
-            self.video.disps_filtered[ix] = self.video.disps_filtered[ix + 1]
-            self.video.mask_filtered[ix] = self.video.mask_filtered[ix + 1]
-            self.video.update_priority[ix] = self.video.update_priority[ix + 1]
+            self.video.poses_clean[ix] = self.video.poses_clean[ix + 1]
+            self.video.disps_clean[ix] = self.video.disps_clean[ix + 1]
+
+            # FIXME chen: remove if not needed
+            self.video.red[ix] = self.video.red[ix + 1]
 
             self.video.nets[ix] = self.video.nets[ix + 1]
             self.video.inps[ix] = self.video.inps[ix + 1]
