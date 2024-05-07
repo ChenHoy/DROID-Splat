@@ -1,0 +1,15 @@
+defaults:
+  - base
+
+buffer: 512
+warmup: 15
+
+frontend:
+  thresh: 20.0  # only consider edge with avg flow < 25.0 pixels
+  window: 40  # local ba window size
+  release_cache: True 
+
+backend:
+  thresh: 30.0  # only consider edge with avg flow < 25.0 pixels
+  radius: 1
+  nms: 5

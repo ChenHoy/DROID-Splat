@@ -1,15 +1,16 @@
 pretrained: ./pretrained/droid.pth
-
-buffer: 250
-beta: 0.75
-warmup: 12
+buffer: 256 
+beta: 0.7  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
+warmup: 8
 upsample: True
+
+
 motion_filter:
-  thresh: 4.0  # add as keyframe if avg flow >= 4.0 pixels
+  thresh: 4.0  # add as keyframe if avg flow >:  4.0 pixels
 
 
 multiview_filter:
-  thresh: 0.01  # dpeth error < 0.01m
+  thresh: 0.01  # depth error < 0.01m
   visible_num: 2  # points viewed by at least 2 cameras
   kernel_size: inf
   bound_enlarge_scale: 1.20
@@ -34,6 +35,7 @@ frontend:
 
   release_cache: False # Tradeoff: memory vs. speed, This can save up to ~5GB
 
+  
 backend:
   warmup: null
   window: 200 # Dont optimize more keyframes to avoid OOM
@@ -41,7 +43,7 @@ backend:
   radius: 1
   nms: 5
 
-  steps: 6
+  steps: 8
   iters: 2
 
   use_loop_closure: False
