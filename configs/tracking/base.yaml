@@ -9,13 +9,6 @@ motion_filter:
   thresh: 4.0  # add as keyframe if avg flow >:  4.0 pixels
 
 
-multiview_filter:
-  thresh: 0.01  # depth error < 0.01m
-  visible_num: 2  # points viewed by at least 2 cameras
-  kernel_size: inf
-  bound_enlarge_scale: 1.20
-
-
 frontend:
   steps1: 4 # 1st outer loop with feature correlation
   steps2: 2 # 2nd outer loop with feature correlation
