@@ -211,23 +211,29 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
         -> This makes more sense, as the frontend would suddenly grow without control and not optimize only locally
     - [x] Safeguard the Backend to avoid OOM in case the scene gets too big
     - [x] Make system more memory efficient -> Empty cache in frontend as speed/memory tradeoff
-- [ ] FIX bug in scale optimization / Python BA on outdoor scenes
-    - [ ] Optimization turns instable over longer windows and large scenes. What is the source?
-    - [ ] Fix scale parameters after optimizing them once?
-- [ ] Use both multi-view consistency and uncertainty to filter the map before sending to Renderer
+- [x] FIX bug in scale optimization / Python BA on outdoor scenes
+    - [x] Optimization turns instable over longer windows and large scenes. What is the source?
+    - [x] Fix scale parameters after optimizing them once?
+- [x] Use both multi-view consistency and uncertainty to filter the map before sending to Renderer
 - [ ] Backpropagate the pose loss from the Rendering objective into the SLAM tracking
     - [x] Optimize poses with additional optimizer
     - [ ] Evaluate optimized poses with new metrics
     - [ ] Setup synchronization between mapping and frontend/backend
-    - [ ] Test stability and hyperparameter, e.g. when and how often to sync
-- [ ] Improvements for mapping thread
+    - [x] Test stability and hyperparameter, e.g. when and how often to sync
+- [x] Improvements for mapping thread
     - [x] Add new views in batches
     - [x] New dirty index to filter in mapping
-    - [ ] Fix covisibility based prunning
-    - [ ] Deph rendering loss is wrong in outdoor -> New loss?
+    - [x] Fix covisibility based prunning
+    - [x] Deph rendering loss is wrong in outdoor -> New loss?
 - [ ] Properly evaluate our new code base for standard metrics
     - [ ] ATE error, how does this change when using the new Renderer for mapping?
     - [ ] Rendering loss, can we achieve similar results like the paper?
+- [ ] Evaluate baselines
+    - [ ] MonoGS itself (Only Rendering) 
+    - [ ] Only SLAM (frontend + backend)
+        + [ ] no loop closures      
+        + [ ] with loop closures in backend
+    - [ ] SLAM + Rendering
 - [ ] Test / Evaluate code on monocular scenes with GSplatting Mapping
 - [ ] How well does our new mapping work on unbounded / outdoor scenes?
   - [ ] Kitti for driving
