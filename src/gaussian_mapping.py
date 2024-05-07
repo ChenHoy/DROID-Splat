@@ -78,6 +78,8 @@ class GaussianMapper(object):
         else:
             self.use_gui = False
 
+        self.iteration_info = []
+
         self.cameras = []
         self.new_cameras = []
         self.loss_list = []
@@ -295,7 +297,6 @@ class GaussianMapper(object):
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
         loss += self.loss_params.beta * len(frames) * isotropic_loss.mean()
-
         loss.backward()
 
         with torch.no_grad():
@@ -356,7 +357,9 @@ class GaussianMapper(object):
 
         # Mask out pixels with little information and invalid depth pixels
         rgb_pixel_mask = (gt_image.sum(dim=0) > self.loss_params.rgb_boundary_threshold).view(*depth.shape)
-        depth_pixel_mask = (gt_depth > 0.01).view(*depth.shape)  # Only use valid depths for supervision
+        depth_pixel_mask = ((gt_depth > 0.01) * (gt_depth < 1e7)).view(
+            *depth.shape
+        )  # Only use valid depths for supervision
 
         image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
         l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
@@ -454,6 +457,7 @@ class GaussianMapper(object):
         self.plot_losses()
 
         self.info(f"Final mapping loss: {self.loss_list[-1]}")
+        self.info(f"{len(self.iteration_info)} iterations, {len(self.cameras)/len(self.iteration_info)} cams/it")
 
         ## export the cameras and gaussians to the terminate process
         if self.evaluate:
@@ -514,8 +518,10 @@ class GaussianMapper(object):
                 )
                 self.loss_list.append(loss / len(frames))
 
-            # TODO leon: is it necessary at every frame?
-            if self.last_idx % 1 == 0 and self.last_idx > self.n_last_frames:
+            print(loss / len(frames))  # TODO remove
+            if (
+                self.last_idx % 1 == 0 and self.last_idx > self.n_last_frames
+            ):  # TODO leon: is it necessary at every frame?
                 self.abs_visibility_prune()
 
             # Update visualization
@@ -538,6 +544,7 @@ class GaussianMapper(object):
 
             # Keep track of added cameras
             self.cameras += self.new_cameras
+            self.iteration_info.append(len(self.new_cameras))
             self.new_cameras = []
 
         elif the_end and self.last_idx + self.delay >= self.cur_idx:
