@@ -357,9 +357,8 @@ class GaussianMapper(object):
 
         # Mask out pixels with little information and invalid depth pixels
         rgb_pixel_mask = (gt_image.sum(dim=0) > self.loss_params.rgb_boundary_threshold).view(*depth.shape)
-        depth_pixel_mask = ((gt_depth > 0.01) * (gt_depth < 1e7)).view(
-            *depth.shape
-        )  # Only use valid depths for supervision
+        # Only use valid depths for supervision
+        depth_pixel_mask = ((gt_depth > 0.01) * (gt_depth < 1e7)).view(*depth.shape)
 
         image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
         l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
@@ -445,7 +444,8 @@ class GaussianMapper(object):
 
         self.info("\nMapping refinement starting")
         # NOTE MonoGS does 26k iterations for a single camera, while we do 100 for multiple cameras
-        self.map_refinement(num_iters=self.refinement_iters, color_only=True, optimize_poses=self.optimize_poses)
+        # NOTE chen: always optimize poses here to refine with more information
+        self.map_refinement(num_iters=self.refinement_iters, color_only=True, optimize_poses=True)
         self.info("Mapping refinement finished")
         self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
         self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
@@ -518,10 +518,11 @@ class GaussianMapper(object):
                 )
                 self.loss_list.append(loss / len(frames))
 
-            print(loss / len(frames))  # TODO remove
-            if (
-                self.last_idx % 1 == 0 and self.last_idx > self.n_last_frames
-            ):  # TODO leon: is it necessary at every frame?
+            print(
+                colored(f"[Gaussian mapping] Loss:  {loss / len(frames)}", "green")
+            )  # Keep track of how well the Rendering is doing
+            # TODO leon: is it necessary at every frame?
+            if self.last_idx % 1 == 0 and self.last_idx > self.n_last_frames:
                 self.abs_visibility_prune()
 
             # Update visualization
