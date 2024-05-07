@@ -1,0 +1,19 @@
+dataset: 'tumrgbd'
+input_folder: /media/data/tum_rgbd/rgbd_dataset_freiburg2_desk_with_person/
+png_depth_scale: 5000.0 #for depth image in png format
+
+### original camera parameters
+#NOTE: intrinsic is different per scene in TUM
+# refer to https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats#intrinsic_camera_calibration_of_the_kinect
+cam:  
+  H: 480
+  W: 640
+  fx: 525.0
+  fy: 525.0
+  cx: 319.5
+  cy: 239.5
+  H_edge: 8
+  W_edge: 8
+  H_out: 240
+  W_out: 320
+  camera_model: "pinhole"

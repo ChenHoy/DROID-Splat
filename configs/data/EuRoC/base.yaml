@@ -1,0 +1,16 @@
+dataset: 'euroc'
+input_folder: "/media/data/EuRoC/" # TODO this has not been setup yet
+png_depth_scale: 0.0 #for depth image in png format
+
+cam:  
+  # refer to https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats#intrinsic_camera_calibration_of_the_kinect
+  H: 480
+  W: 752
+  fx: 435.2046959714599
+  fy: 435.2046959714599
+  cx: 367.4517211914062
+  cy: 252.2008514404297
+  H_edge: 8
+  W_edge: 8
+  H_out: 384
+  W_out: 512

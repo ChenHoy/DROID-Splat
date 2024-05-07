@@ -1,8 +1,4 @@
-inherit_from: configs/EuRoC/euroc.yaml
-mode: stereo
-only_tracking: False
-mapping:
-  bound: [[-10, 10], [-10, 10], [-10, 10]]
-data:
-  input_folder: /media/data/EuRoC/V1_01_easy
-  output: ""
+defaults:
+  - base
+
+input_folder: /media/data/EuRoC/V1_01_easy

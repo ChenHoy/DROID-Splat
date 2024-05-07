@@ -1,0 +1,16 @@
+dataset: 'eth3d'
+input_folder: "/media/data/ETH3D/" # TODO this was not setup yet
+png_depth_scale: 5000.0 #for depth image in png format
+
+cam: 
+  # refer to https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats#intrinsic_camera_calibration_of_the_kinect
+  H: 458
+  W: 739
+  fx: 0.0
+  fy: 0.0
+  cx: 0.0
+  cy: 0.0
+  H_edge: 8
+  W_edge: 8
+  H_out: 384
+  W_out: 512

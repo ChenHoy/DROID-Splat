@@ -1,0 +1,16 @@
+dataset: 'scannet'
+input_folder: "/media/data/ScanNet/" # TODO this has not been setup yet
+png_depth_scale: 1000.0 #for depth image in png format
+
+### original camera parameters
+cam:
+  H: 480
+  W: 640
+  fx: 577.590698
+  fy: 578.729797
+  cx: 318.905426
+  cy: 242.683609
+  H_edge: 8
+  W_edge: 16
+  H_out: 240
+  W_out: 320
