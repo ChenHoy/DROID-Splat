@@ -1,6 +1,7 @@
 import glob
 import os
 import ipdb
+from omegaconf import DictConfig
 
 import cv2
 import numpy as np
@@ -77,20 +78,26 @@ def quaternion_to_matrix(quaternions: torch.Tensor) -> torch.Tensor:
     return o.reshape(quaternions.shape[:-1] + (3, 3))
 
 
-def get_dataset(cfg, device="cuda:0"):
+def get_dataset(cfg: DictConfig, device="cuda:0"):
     return dataset_dict[cfg.data.dataset](cfg, device=device)
 
 
 class BaseDataset(Dataset):
-    def __init__(self, cfg, device="cuda:0"):
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(BaseDataset, self).__init__()
         self.name = cfg.data.dataset
         self.stereo = cfg.mode == "stereo"
         self.device = device
-        self.png_depth_scale = cfg.data.cam.png_depth_scale
-        self.n_img = -1
+        self.png_depth_scale = cfg.data.get("png_depth_scale", None)
+        self.stride = cfg.get("stride", 1)
+
+        self.input_folder = cfg.data.input_folder
+        self.color_paths = sorted(glob.glob(self.input_folder))
+        self.color_paths = self.color_paths[:: self.stride]
+
+        self.n_img = len(self.color_paths)
+
         self.depth_paths = None
-        self.color_paths = None
         self.poses = None
         self.image_timestamps = None
 
@@ -107,13 +114,10 @@ class BaseDataset(Dataset):
 
         self.distortion = np.array(cfg.data.cam.distortion) if "distortion" in cfg.data.cam else None
 
-
-        self.input_folder = cfg.data.input_folder
-
-    def __len__(self):
+    def __len__(self) -> int:
         return self.n_img
 
-    def depthloader(self, index):
+    def depthloader(self, index: int) -> np.ndarray:
         if self.depth_paths is None:
             return None
         depth_path = self.depth_paths[index]
@@ -130,7 +134,7 @@ class BaseDataset(Dataset):
 
         return depth_data
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int):
         color_path = self.color_paths[index]
         color_data = cv2.imread(color_path)
         if self.distortion is not None:
@@ -186,9 +190,9 @@ class BaseDataset(Dataset):
 
 
 class ImageFolder(BaseDataset):
-    def __init__(self, cfg, args, device="cuda:0"):
-        super(ImageFolder, self).__init__(cfg, args, device)
-        stride = cfg["stride"]
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
+        super(ImageFolder, self).__init__(cfg, device)
+        self.stride = cfg.get("stride", 1)
         # Get either jpg or png files
         input_images = os.path.join(self.input_folder, "images", "*.jpg")
         self.color_paths = sorted(glob.glob(input_images))
@@ -196,12 +200,12 @@ class ImageFolder(BaseDataset):
         if len(self.color_paths) == 0:
             input_images = os.path.join(self.input_folder, "images", "*.png")
             self.color_paths = sorted(glob.glob(input_images))
-        self.color_paths = self.color_paths[::stride]
+        self.color_paths = self.color_paths[:: self.stride]
 
         depth_paths = os.path.join(self.input_folder, "zoed-nk", "*.npy")
         if len(depth_paths) != 0:
             self.depth_paths = sorted(glob.glob(depth_paths))
-            self.depth_paths = self.depth_paths[::stride]
+            self.depth_paths = self.depth_paths[:: self.stride]
             assert len(self.depth_paths) == len(
                 self.color_paths
             ), "Number of depth maps does not match number of images"
@@ -211,9 +215,9 @@ class ImageFolder(BaseDataset):
 
 
 class Replica(BaseDataset):
-    def __init__(self, cfg, device="cuda:0"):
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(Replica, self).__init__(cfg, device)
-        stride = cfg.stride
+        self.stride = cfg.get("stride", 1)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/frame*.jpg")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
@@ -229,10 +233,10 @@ class Replica(BaseDataset):
         else:
             self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/depth*.png")))
 
-        self.color_paths = self.color_paths[::stride]
-        self.depth_paths = self.depth_paths[::stride]
+        self.color_paths = self.color_paths[:: self.stride]
+        self.depth_paths = self.depth_paths[:: self.stride]
         self.load_poses(os.path.join(self.input_folder, "traj.txt"))
-        self.poses = self.poses[::stride]
+        self.poses = self.poses[:: self.stride]
 
         relative_poses = True  # True to test the gt stream mapping
         if relative_poses:
@@ -254,9 +258,9 @@ class Replica(BaseDataset):
 
 
 class TartanAir(BaseDataset):
-    def __init__(self, cfg, device="cuda:0"):
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(TartanAir, self).__init__(cfg, device)
-        stride = cfg.stride
+        self.stride = cfg.get("stride", 1)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_left/*.png")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
@@ -269,14 +273,14 @@ class TartanAir(BaseDataset):
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
-            self.depth_paths = self.depth_paths[::stride]
+            self.depth_paths = self.depth_paths[:: self.stride]
 
         else:
             self.depth_paths = None
 
-        self.color_paths = self.color_paths[::stride]
+        self.color_paths = self.color_paths[:: self.stride]
         self.load_poses(os.path.join(self.input_folder, "pose_left.txt"))
-        self.poses = self.poses[::stride]
+        self.poses = self.poses[:: self.stride]
 
         relative_poses = True  # True to test the gt stream mapping
         if relative_poses:
@@ -302,16 +306,16 @@ class TartanAir(BaseDataset):
 
 
 class KITTI(BaseDataset):
-    def __init__(self, cfg, device="cuda:0"):
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(KITTI, self).__init__(cfg, device)
-        stride = cfg.stride
+        self.stride = cfg.get("stride", 1)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_2/*.png")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
             self.depth_paths = sorted(
-                glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy")) # Use ZoeDepth predictions
+                glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy"))  # Use ZoeDepth predictions
                 # glob.glob(
                 #     os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy")
                 # )  # Use DepthAnything predictions
@@ -319,25 +323,24 @@ class KITTI(BaseDataset):
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
-            self.depth_paths = self.depth_paths[::stride]
+            self.depth_paths = self.depth_paths[:: self.stride]
 
         else:
             self.depth_paths = None
 
-        self.color_paths = self.color_paths[::stride]
+        self.color_paths = self.color_paths[:: self.stride]
 
-        self.poses = [np.eye(4) for _ in range(self.n_img)] # Fake gt poses
-
+        self.poses = [np.eye(4) for _ in range(self.n_img)]  # Fake gt poses
 
 
 class Azure(BaseDataset):
-    def __init__(self, cfg, args, device="cuda:0"):
-        super(Azure, self).__init__(cfg, args, device)
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
+        super(Azure, self).__init__(cfg, device)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "color", "*.jpg")))
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", "*.png")))
-        stride = cfg["stride"]
-        self.color_paths = self.color_paths[::stride]
-        self.depth_paths = self.depth_paths[::stride]
+        self.stride = cfg.get("stride", 1)
+        self.color_paths = self.color_paths[:: self.stride]
+        self.depth_paths = self.depth_paths[:: self.stride]
         self.load_poses(os.path.join(self.input_folder, "scene", "trajectory.log"))
         self.n_img = len(self.color_paths)
 
@@ -365,22 +368,22 @@ class Azure(BaseDataset):
 
 
 class ScanNet(BaseDataset):
-    def __init__(self, cfg, args, device="cuda:0"):
-        super(ScanNet, self).__init__(cfg, args, device)
-        stride = cfg["stride"]
-        max_frames = args.max_frames
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
+        super(ScanNet, self).__init__(cfg, device)
+        self.stride = cfg.get("stride", 1)
+        max_frames = cfg.get("max_frames", -1)
         if max_frames < 0:
             max_frames = int(1e5)
         self.color_paths = sorted(
             glob.glob(os.path.join(self.input_folder, "color", "*.jpg")),
             key=lambda x: int(os.path.basename(x)[:-4]),
-        )[:max_frames][::stride]
+        )[:max_frames][:: self.stride]
         self.depth_paths = sorted(
             glob.glob(os.path.join(self.input_folder, "depth", "*.png")),
             key=lambda x: int(os.path.basename(x)[:-4]),
-        )[:max_frames][::stride]
+        )[:max_frames][:: self.stride]
         self.load_poses(os.path.join(self.input_folder, "pose"))
-        self.poses = self.poses[:max_frames][::stride]
+        self.poses = self.poses[:max_frames][:: self.stride]
 
         self.n_img = len(self.color_paths)
         print("INFO: {} images got!".format(self.n_img))
@@ -403,14 +406,14 @@ class ScanNet(BaseDataset):
 
 
 class CoFusion(BaseDataset):
-    def __init__(self, cfg, args, device="cuda:0"):
-        super(CoFusion, self).__init__(cfg, args, device)
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
+        super(CoFusion, self).__init__(cfg, device)
         self.input_folder = os.path.join(self.input_folder)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "colour", "*.png")))
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth_noise", "*.exr")))
-        stride = cfg["stride"]
-        self.color_paths = self.color_paths[::stride]
-        self.depth_paths = self.depth_paths[::stride]
+        self.stride = cfg.get("stride", 1)
+        self.color_paths = self.color_paths[:: self.stride]
+        self.depth_paths = self.depth_paths[:: self.stride]
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         self.load_poses(os.path.join(self.input_folder, "trajectories"))
@@ -427,14 +430,14 @@ class CoFusion(BaseDataset):
 
 
 class TUM_RGBD(BaseDataset):
-    def __init__(self, cfg, device="cuda:0"):
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(TUM_RGBD, self).__init__(cfg, device)
         self.color_paths, self.depth_paths, self.poses = self.loadtum(self.input_folder, frame_rate=32)
-        stride = cfg.stride
-        end_frame = 1000 # Dynamic after 1000 frames
-        self.color_paths = self.color_paths[:end_frame:stride] 
-        self.depth_paths = self.depth_paths[:end_frame:stride]
-        self.poses = None if self.poses is None else self.poses[:end_frame:stride]
+        self.stride = cfg.get("stride", 1)
+        end_frame = 1000  # Dynamic after 1000 frames
+        self.color_paths = self.color_paths[: end_frame : self.stride]
+        self.depth_paths = self.depth_paths[: end_frame : self.stride]
+        self.poses = None if self.poses is None else self.poses[: end_frame : self.stride]
         self.n_img = len(self.color_paths)
 
     def parse_list(self, filepath, skiprows=0):
@@ -516,9 +519,9 @@ class TUM_RGBD(BaseDataset):
 
 
 class ETH3D(BaseDataset):
-    def __init__(self, cfg, args, device="cuda:0"):
-        super(ETH3D, self).__init__(cfg, args, device)
-        stride = cfg["stride"]
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
+        super(ETH3D, self).__init__(cfg, device)
+        self.stride = cfg.get("stride", 1)
         (
             self.color_paths,
             self.depth_paths,
@@ -526,10 +529,10 @@ class ETH3D(BaseDataset):
             self.image_timestamps,
         ) = self.loadtum(self.input_folder, frame_rate=-1)
 
-        self.color_paths = self.color_paths[::stride]
-        self.depth_paths = self.depth_paths[::stride]
-        self.poses = None if self.poses is None else self.poses[::stride]
-        self.image_timestamps = self.image_timestamps[::stride]
+        self.color_paths = self.color_paths[:: self.stride]
+        self.depth_paths = self.depth_paths[:: self.stride]
+        self.poses = None if self.poses is None else self.poses[:: self.stride]
+        self.image_timestamps = self.image_timestamps[:: self.stride]
 
         self.n_img = len(self.color_paths)
 
@@ -626,13 +629,13 @@ class ETH3D(BaseDataset):
 
 
 class EuRoC(BaseDataset):
-    def __init__(self, cfg, args, device="cuda:0"):
-        super(EuRoC, self).__init__(cfg, args, device)
-        stride = cfg["stride"]
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
+        super(EuRoC, self).__init__(cfg, device)
+        self.stride = cfg.get("stride", 1)
         self.color_paths, self.right_color_paths, self.poses = self.loadtum(self.input_folder, frame_rate=-1)
-        self.color_paths = self.color_paths[::stride]
-        self.right_color_paths = self.right_color_paths[::stride]
-        self.poses = None if self.poses is None else self.poses[::stride]
+        self.color_paths = self.color_paths[:: self.stride]
+        self.right_color_paths = self.right_color_paths[:: self.stride]
+        self.poses = None if self.poses is None else self.poses[:: self.stride]
 
         self.n_img = len(self.color_paths)
 
