@@ -1,6 +1,7 @@
 # @package _global_
 defaults:
   - override /data: TartanAir/base
+  - override /tracking: tartanair
 
 tracking:
   motion_filter:
@@ -11,14 +12,15 @@ tracking:
     radius: 1
     window: 20 
     nms: 0
-    release_cache: True
+    release_cache: False
+
   backend:
     thresh: 30.0  
     radius: 2
     nms: 2
     # used for loop detection
-    use_loop_closure: False # NOTE works well with True too
-    loop_window: 250
+    use_loop_closure: True # NOTE works well with True too
+    loop_window: 100
     loop_thresh: 30.0  
     loop_radius: 2
     loop_nms: 5

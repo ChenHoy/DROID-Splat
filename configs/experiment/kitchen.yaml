@@ -6,6 +6,8 @@ sleep_delay: 3.0
 
 tracking:
 
+  buffer_size: 512
+
   frontend:
     thresh: 10.0 
     radius: 4
