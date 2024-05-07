@@ -77,6 +77,7 @@ class GaussianMapper(object):
         else:
             self.use_gui = False
 
+        self.iteration_info = []
 
         self.cameras = []
         self.new_cameras = []
@@ -275,7 +276,6 @@ class GaussianMapper(object):
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
         loss += self.loss_params.beta * len(frames) * isotropic_loss.mean()
-
         loss.backward()
 
         with torch.no_grad():
@@ -323,7 +323,7 @@ class GaussianMapper(object):
         gt_image, gt_depth = cam.original_image, cam.depth
 
         rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
-        depth_pixel_mask = (gt_depth > 0.01).view(*depth.shape)  # Only use valid depths for supervision
+        depth_pixel_mask = ((gt_depth > 0.01) * (gt_depth < 1e7)).view(*depth.shape)  # Only use valid depths for supervision
 
         image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
         l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
@@ -414,16 +414,16 @@ class GaussianMapper(object):
                 self.save_render(cam, f"{self.output}/renders/final/{cam.uid}.png")
 
         fig, ax = plt.subplots(2,1)
-        ax[0].set_title("Loss per frame evolution")
+        ax[0].set_title(f"Loss evolution.{self.gaussians.get_xyz.shape[0]} gaussians")
         ax[0].set_yscale("log")
         ax[0].plot(self.loss_list)
 
         ax[1].set_yscale("log")
-        ax[1].set_title(f"Mode: {self.mode}. Gaussians: {self.gaussians.get_xyz.shape[0]}")
         ax[1].plot(self.loss_list[-self.refinement_iters:])
         plt.savefig(f"{self.output}/loss_{self.mode}.png")
 
         self.info(f"Final mapping loss: {self.loss_list[-1]}")
+        self.info(f"{len(self.iteration_info)} iterations, {len(self.cameras)/len(self.iteration_info)} cams/it")
 
         ## export the cameras and gaussians to the terminate process
         if self.evaluate:
@@ -436,6 +436,7 @@ class GaussianMapper(object):
                 )
             )
             received_item.wait()  # Wait until the Packet got delivered
+
 
     def __call__(self, mapping_queue: mp.Queue, received_item: mp.Event, the_end=False):
 
@@ -486,6 +487,7 @@ class GaussianMapper(object):
                 )
                 self.loss_list.append(loss / len(frames))
 
+            print(loss/len(frames))
 
             if self.last_idx % 1 == 0 and self.last_idx > self.n_last_frames: # TODO leon: is it necessary at every frame?
                 self.abs_visibility_prune()
@@ -512,6 +514,7 @@ class GaussianMapper(object):
 
             # Keep track of added cameras
             self.cameras += self.new_cameras
+            self.iteration_info.append(len(self.new_cameras))
             self.new_cameras = []
 
 
