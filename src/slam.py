@@ -58,13 +58,12 @@ class SLAM:
 
     def __init__(self, cfg, dataset=None):
         super(SLAM, self).__init__()
-    
+
         self.cfg = cfg
         self.device = cfg.get("device", torch.device("cuda:0"))
         self.mode = cfg.mode
         self.create_out_dirs()
         self.update_cam(cfg)
-        self.load_bound(cfg)
 
         self.net = DroidNet()
         self.load_pretrained(cfg.tracking.pretrained)
@@ -112,11 +111,10 @@ class SLAM:
         else:
             self.max_depth_visu = 5.0
 
-
         if cfg.run_mapping_gui and cfg.run_mapping and not cfg.evaluate:
             self.q_main2vis = mp.Queue()
             self.q_vis2main = mp.Queue()
-            self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs = (self.q_main2vis, self.q_vis2main))
+            self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs=(self.q_main2vis, self.q_vis2main))
             self.params_gui = gui_utils.ParamsGUI(
                 pipe=cfg.mapping.pipeline_params,
                 background=self.gaussian_mapper.background,
@@ -126,8 +124,6 @@ class SLAM:
             )
         else:
             self.gaussian_mapper = GaussianMapper(cfg, self)
-
-            
 
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
@@ -170,14 +166,8 @@ class SLAM:
         self.cx = self.cx - w_edge
         self.cy = self.cy - h_edge
 
+    # TODO chen: do we really still need this?
     def load_bound(self, cfg: DictConfig) -> None:
-        """
-        Pass the scene bound parameters to different decoders and self.
-
-        ---
-        Args:
-            cfg [dict], parsed config dict
-        """
         self.bound = torch.from_numpy(np.array(cfg.data.bound)).float()
 
     def load_pretrained(self, pretrained: str) -> None:
@@ -309,7 +299,6 @@ class SLAM:
 
         self.all_finished += 1
         self.info("Mapping GUI done!")
-
 
     def show_stream(self, rank, input_queue: mp.Queue, run=True) -> None:
         self.info("OpenCV Image stream thread started!")
@@ -486,10 +475,20 @@ class SLAM:
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Frontend Tracking"),
-            mp.Process(target=self.global_ba, args=(2, self.cfg.run_backend),name="Backend"),
-            mp.Process(target=self.visualizing, args=(4, self.cfg.run_visualization), name="Visualizing"), ## Andrei NOTE: always disable visualization when running evaluation
-            mp.Process(target=self.mapping_gui, args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate), name="Mapping GUI"),
-            mp.Process(target=self.gaussian_mapping, args=(6, self.cfg.run_mapping, self.mapping_queue, self.received_mapping), name="Gaussian Mapping"),
+            mp.Process(target=self.global_ba, args=(2, self.cfg.run_backend), name="Backend"),
+            mp.Process(
+                target=self.visualizing, args=(4, self.cfg.run_visualization), name="Visualizing"
+            ),  ## Andrei NOTE: always disable visualization when running evaluation
+            mp.Process(
+                target=self.mapping_gui,
+                args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
+                name="Mapping GUI",
+            ),
+            mp.Process(
+                target=self.gaussian_mapping,
+                args=(6, self.cfg.run_mapping, self.mapping_queue, self.received_mapping),
+                name="Gaussian Mapping",
+            ),
         ]
 
         self.num_running_thread[0] += len(processes)

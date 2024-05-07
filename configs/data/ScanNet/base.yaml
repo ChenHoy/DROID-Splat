@@ -14,3 +14,4 @@ cam:
   W_edge: 16
   H_out: 240
   W_out: 320
+  camera_model: "pinhole"
