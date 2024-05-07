@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - override /data: TartanAir/abandoned_factory
+
+sleep_delay: 3.0
+
+tracking:
+  motion_filter:
+    thresh: 5.0 
+
+  frontend:
+    thresh: 15.0 
+    window: 20 
+    radius: 1
+    nms: 0
+    release_cache: True
+  backend:
+    thresh: 30.0  
+    radius: 2
+    nms: 2
+    # used for loop detection
+    use_loop_closure: False # NOTE works well with True too
+    loop_window: 250
+    loop_thresh: 30.0  
+    loop_radius: 2
+    loop_nms: 5

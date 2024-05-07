@@ -1,0 +1,25 @@
+# @package _global_
+defaults:
+  - override /data: Custom/kitchen
+
+sleep_delay: 3.0
+
+tracking:
+
+  frontend:
+    thresh: 10.0 
+    radius: 4
+    window: 40
+    nms: 0
+
+  backend:
+    thresh: 25.0  
+    radius: 4
+    window: 200 # Limit backend in case we would run OOM
+    nms: 0
+    # used for loop detection
+    use_loop_closure: False # NOTE True also works well
+    loop_window: 200
+    loop_thresh: 20.0  
+    loop_radius: 4
+    loop_nms: 2
