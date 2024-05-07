@@ -16,20 +16,36 @@ multiview_filter:
 
 
 frontend:
-  radius: 1
-  nms: 0
-  thresh: 25.0  # only consider edge with avg flow < 25.0 pixels
-  enable_loop: True
-  keyframe_thresh: 6.0  # remove keyframe if avg flow < 4.0 pixels
+  steps1: 4 # 1st outer loop with feature correlation
+  steps2: 2 # 2nd outer loop with feature correlation
+  iters: 4 # Actual BA iterations
+  keyframe_thresh: 4.0  # remove keyframe if avg flow < 4.0 pixels
+  thresh: 16.0  
   window: 25  # local ba window size
   max_factors: 100  # num of edges within local ba
+  radius: 2
+  nms: 1
+
+  use_loop_closure: False
+  loop_window: 100
+  loop_thresh: 20.0  # only consider edge with avg flow < x pixels
+  loop_radius: 1
+  loop_nms: 12
+
+  release_cache: False # Tradeoff: memory vs. speed, This can save up to ~5GB
 
 backend:
-  thresh: 25.0  # only consider edge with avg flow < 25.0 pixels
+  warmup: null
+  window: 200 # Dont optimize more keyframes to avoid OOM
+  thresh: 25.0  # only consider edge with avg flow < x pixels
   radius: 1
   nms: 5
-  # used for loop detection
-  loop_window: 25
-  loop_thresh: 50.0  # only consider edge with avg flow < 50.0 pixels
+
+  steps: 6
+  iters: 2
+
+  use_loop_closure: False
+  loop_window: 100
+  loop_thresh: 20.0  # only consider edge with avg flow < x pixels
   loop_radius: 1
   loop_nms: 12
