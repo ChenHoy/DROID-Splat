@@ -36,7 +36,8 @@ class GaussianMapper(object):
     SLAM from Rendering with 3D Gaussian Splatting.
     """
 
-    def __init__(self, cfg, slam):
+    def __init__(self, cfg, slam, gui_qs=None):
+        self.cfg = cfg
         self.slam = slam
         self.video = slam.video
         self.device = cfg.device
@@ -46,7 +47,6 @@ class GaussianMapper(object):
         self.delay = cfg.mapping.delay  # Delay between tracking and mapping
         self.refinement_iters = cfg.mapping.refinement_iters
         self.mapping_iters = cfg.mapping.mapping_iters
-        self.use_gui = cfg.mapping.use_gui
         self.save_renders = cfg.mapping.save_renders
         self.warmup = max(cfg.mapping.warmup, cfg.tracking.warmup)
         self.batch_mode = cfg.mapping.batch_mode  # Take a batch of all unupdated frames at once
@@ -72,20 +72,11 @@ class GaussianMapper(object):
         bg_color = [1, 1, 1]  # White background
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        # Only use the GUI when running mapping and not evaluating
-        if cfg.run_mapping and self.use_gui and not self.evaluate:
-            self.q_main2vis = mp.Queue()
-            self.q_vis2main = mp.Queue()
-            self.params_gui = gui_utils.ParamsGUI(
-                pipe=self.pipeline_params,
-                background=self.background,
-                gaussians=self.gaussians,
-                q_main2vis=self.q_main2vis,
-                q_vis2main=self.q_vis2main,
-            )
-            gui_process = mp.Process(target=slam_gui.run, args=(self.params_gui,))
-            gui_process.start()
-            self.info("GUI process started!")
+        if gui_qs is not None:
+            self.q_main2vis, self.q_vis2main = gui_qs
+            self.use_gui = True
+        else:
+            self.use_gui = False
 
         self.cameras = []
         self.new_cameras = []
@@ -149,7 +140,7 @@ class GaussianMapper(object):
         height, width = image.shape[1:]
         gt_pose = torch.linalg.inv(gt_pose)  # They invert the poses in the dataloader
         znear = 0.01
-        zfar = 100.0
+        zfar = 1000.0  # TODO make this configurable?
         fovx = focal2fov(fx, width)
         fovy = focal2fov(fy, height)
 
@@ -222,7 +213,7 @@ class GaussianMapper(object):
         # Only update already inserted cameras
         to_update = dirty_index[torch.isin(dirty_index, all_idxs)]
 
-        self.info(f"Updating frames {to_update}")
+        # self.info(f"Updating frames {to_update}")
         for idx in to_update:
             _, depth, _, c2w, _ = self.video.get_mapping_item(idx, self.device)
             cam = all_cameras[idx]
@@ -254,10 +245,12 @@ class GaussianMapper(object):
     def map_refinement(self, num_iters: int = 100, color_only: bool = True, optimize_poses: bool = False) -> None:
         """Refine the map with color only optimization. Instead of going over last frames, we always select random frames from the whole map."""
 
+        self.abs_visibility_prune(threshold=3)  # TODO make configurable
         for iter in range(num_iters):
             loss = self.mapping_step(
                 iter, self.cameras, self.kf_mng_params.refinement, densify=False, optimize_poses=optimize_poses
             )
+
             self.loss_list.append(loss / len(self.cameras))
 
             if self.use_gui:
@@ -315,10 +308,12 @@ class GaussianMapper(object):
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
             if self.last_idx > self.n_last_frames and (iter + 1) % self.kf_mng_params.prune_every == 0:
-                self.prune_gaussians()  # Covisibility based pruning for recently added gaussians
+                # if self.mode != "rgbd":
+                #     self.covisibility_pruning() # Covisibility based pruning for recently added gaussians
+                # NOTE leon: monogs uses this covisibility pruning because they dont have such a good depth estimation
                 self.gaussians.densify_and_prune(  # General pruning based on opacity and size + densification
                     kf_mng_params.densify_grad_threshold,
-                    kf_mng_params.gaussian_th,
+                    kf_mng_params.opacity_th,
                     kf_mng_params.gaussian_extent,
                     kf_mng_params.size_threshold,
                 )
@@ -355,7 +350,7 @@ class GaussianMapper(object):
         """
 
         alpha = self.loss_params.alpha
-        lambda_dssim = self.loss_params.lambda_dssim
+        # lambda_dssim = self.loss_params.lambda_dssim
 
         gt_image, gt_depth = cam.original_image, cam.depth
 
@@ -382,7 +377,7 @@ class GaussianMapper(object):
     def prune_gaussians(self):
         """Covisibility based pruning"""
 
-        new_frames = self.cameras[-self.n_last_frames :]
+        new_frames = (self.cameras + self.new_cameras)[-self.n_last_frames :]
         new_idx = [view.uid for view in new_frames]
         sorted_frames = sorted(new_idx, reverse=True)
 
@@ -399,9 +394,32 @@ class GaussianMapper(object):
             self.occ_aware_visibility[idx] = self.occ_aware_visibility[idx][~to_prune]
         self.info(f"Covisibility based pruning removed {to_prune.sum()} gaussians")
 
+    def abs_visibility_prune(self, threshold: int = None):
+        """
+        Absolute covisibility based pruning. Removes all gaussians
+        that are not seen in at least abs_visibility_th views.
+        """
+
+        self.occ_aware_visibility = {}
+        for view in self.cameras + self.new_cameras:
+            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background)
+            self.occ_aware_visibility[view.uid] = (render_pkg["n_touched"] > 0).long()
+
+        # print(self.occ_aware_visibility[1])
+        self.gaussians.n_obs.fill_(0)
+        for _, visibility in self.occ_aware_visibility.items():
+            self.gaussians.n_obs += visibility.cpu()
+
+        if threshold is None:
+            threshold = self.kf_mng_params.abs_visibility_th
+
+        mask = self.gaussians.n_obs < threshold
+        self.gaussians.prune_points(mask.cuda())
+        self.info(f"Absolute visibility pruning removed {mask.sum()} gaussians")
+
     # TODO chen: is this implemented in a reference?
     # TODO does that really make sense? It might be optimal to describe a scene with the minimum number of Gaussians
-    def densitiy_pruning(self):
+    def density_pruning(self):
         """Prune Gaussians based on local density to avoid huge lone Gaussians, that explain multiple frames.
 
         Observation: We build up a huge number of Gaussians over time, which are not very descriptive and take up a lot of space.
@@ -435,6 +453,8 @@ class GaussianMapper(object):
 
         self.plot_losses()
 
+        self.info(f"Final mapping loss: {self.loss_list[-1]}")
+
         ## export the cameras and gaussians to the terminate process
         if self.evaluate:
             mapping_queue.put(
@@ -465,8 +485,10 @@ class GaussianMapper(object):
 
             # TODO chen: what happens if the map undergoes radical changes in the SLAM system?
             # e.g. a loop closure that rapidly changes the scale of the map
-            # would this destory the Gaussians as well?
+            # would this destroy the Gaussians as well?
             self.get_new_cameras()  # Add new cameras
+            self.last_idx = self.new_cameras[-1].uid + 1
+
             self.info(f"Added {len(self.new_cameras)} new cameras: {[cam.uid for cam in self.new_cameras]}")
             self.frame_updater()  # Update all changed cameras with new information from SLAM system
 
@@ -478,19 +500,23 @@ class GaussianMapper(object):
                 else:
                     n_g = self.gaussians.get_xyz.shape[0]
                     self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=False)
-                    self.info(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians based on view {cam.uid}")
+                    # self.info(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians based on view {cam.uid}")
 
             # We might have 0 Gaussians in some cases
             if self.gaussians.get_xyz.shape[0] == 0:
                 return
 
-            # Optimize gaussians
+            # Optimize  gaussians
             for iter in range(self.mapping_iters):
                 frames = self.select_keyframes()[0] + self.new_cameras
                 loss = self.mapping_step(
                     iter, frames, self.kf_mng_params.mapping, densify=True, optimize_poses=self.optimize_poses
                 )
                 self.loss_list.append(loss / len(frames))
+
+            # TODO leon: is it necessary at every frame?
+            if self.last_idx % 1 == 0 and self.last_idx > self.n_last_frames:
+                self.abs_visibility_prune()
 
             # Update visualization
             if self.use_gui:
@@ -499,16 +525,12 @@ class GaussianMapper(object):
                         gaussians=clone_obj(self.gaussians),
                         current_frame=cam,
                         keyframes=self.cameras,  # TODO: only pass cameras that got updated
+                        # keyframe=cam,
                         kf_window=None,
                         gtcolor=cam.original_image,
                         gtdepth=cam.depth.detach().cpu().numpy(),
                     )
                 )
-
-            msg = "Frame: {}. Gaussians: {}. Video at {}".format(
-                cam.uid, self.gaussians.get_xyz.shape[0], self.cur_idx
-            )
-            self.info(msg)
 
             # Save renders
             if self.save_renders and cam.uid % 5 == 0:
@@ -517,8 +539,7 @@ class GaussianMapper(object):
             # Keep track of added cameras
             self.cameras += self.new_cameras
             self.new_cameras = []
-            self.last_idx = self.cameras[-1].uid + 1
 
-        elif the_end and self.last_idx + self.delay == self.cur_idx:
+        elif the_end and self.last_idx + self.delay >= self.cur_idx:
             self._last_call(mapping_queue=mapping_queue, received_item=received_item)
             return True

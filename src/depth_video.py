@@ -311,7 +311,7 @@ class DepthVideo:
             if depths is not None:
                 assert len(index) == len(depths), "Number of depths must match the number of indices!"
 
-                depths.clamp_(min=0.001, max=1000.0) # Sanity
+                depths.clamp_(min=0.001, max=1000.0)  # Sanity
                 disps = 1.0 / (depths + 1e-7)
                 if self.upsampled:
                     self.disps_up[index] = disps.clone().to(self.device)
@@ -412,7 +412,7 @@ class DepthVideo:
         """
         # Rescale the external disparities
         self.disps_sens = self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
-        torch.clamp_(self.disps_sens, min=0.001)
+        self.disps_sens.clamp_(min=0.001)
         # Reset the scale and shift parameters to initial state
         self.scales = torch.ones_like(self.scales, device=self.device)
         self.shifts = torch.zeros_like(self.shifts, device=self.device)
@@ -457,6 +457,7 @@ class DepthVideo:
         """Wrapper for dense bundle adjustment. This is used both in Frontend and Backend."""
 
         intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same
+
         lock = self.get_lock() if ba_type is None else self.get_ba_lock(ba_type)
         with lock:
 
@@ -469,6 +470,8 @@ class DepthVideo:
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
+            # We only consider the disparity prior in the frontend
+            # NOTE somehow because frontend and backend run in parallel this would destory the map
             if self.optimize_scales:
                 disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
             else:
@@ -549,7 +552,7 @@ class DepthVideo:
                 self.disps_sens,
                 self.scales,
                 self.shifts,
-                iters=iters + 2,  # Use slightly more iterations here, so we get the scales right for sure!
+                iters=iters,  # Use slightly more iterations here, so we get the scales right for sure!
                 lm=lm,
                 ep=ep,
                 scale_prior=True,

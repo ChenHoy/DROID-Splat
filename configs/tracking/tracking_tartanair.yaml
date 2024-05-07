@@ -5,7 +5,7 @@ beta: 0.75
 warmup: 15
 upsample: True
 motion_filter:
-  thresh: 2.0  # add as keyframe if avg flow >= 4.0 pixels
+  thresh: 1.0  # add as keyframe if avg flow >= 4.0 pixels
 
 
 multiview_filter:
@@ -20,7 +20,7 @@ frontend:
   nms: 1
   thresh: 50.0  # only consider edge with avg flow < 25.0 pixels
   enable_loop: True
-  keyframe_thresh: 6.0  # remove keyframe if avg flow < 4.0 pixels
+  keyframe_thresh: 4.0  # remove keyframe if avg flow < 4.0 pixels
   window: 50  # local ba window size
   max_factors: 100  # num of edges within local ba
 

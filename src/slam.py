@@ -37,6 +37,8 @@ from .visualization import droid_visualization, depth2rgb, uncertainty2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .gaussian_mapping import GaussianMapper
 from .gaussian_splatting.eval_utils import eval_ate, eval_rendering, save_gaussians
+from .gaussian_splatting.gui import gui_utils, slam_gui
+
 from multiprocessing import Manager
 from .gaussian_splatting.multiprocessing_utils import clone_obj
 
@@ -54,14 +56,13 @@ class SLAM:
     We combine these building blocks in a multiprocessing environment.
     """
 
-    def __init__(self, cfg, dataset=None, output_folder=None):
+    def __init__(self, cfg, dataset=None):
         super(SLAM, self).__init__()
-
+    
         self.cfg = cfg
         self.device = cfg.get("device", torch.device("cuda:0"))
         self.mode = cfg.mode
-        self.create_out_dirs(output_folder)
-
+        self.create_out_dirs()
         self.update_cam(cfg)
         self.load_bound(cfg)
 
@@ -100,7 +101,6 @@ class SLAM:
         self.frontend = FrontendWrapper(cfg, self)
         self.backend = BackendWrapper(cfg, self)
         self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
-        self.gaussian_mapper = GaussianMapper(cfg, self)
 
         self.do_evaluate = cfg.evaluate
         self.dataset = dataset
@@ -112,9 +112,29 @@ class SLAM:
         else:
             self.max_depth_visu = 5.0
 
-    def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
-        if output_folder is not None:
-            self.output = output_folder
+
+        if cfg.run_mapping_gui and cfg.run_mapping and not cfg.evaluate:
+            self.q_main2vis = mp.Queue()
+            self.q_vis2main = mp.Queue()
+            self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs = (self.q_main2vis, self.q_vis2main))
+            self.params_gui = gui_utils.ParamsGUI(
+                pipe=cfg.mapping.pipeline_params,
+                background=self.gaussian_mapper.background,
+                gaussians=self.gaussian_mapper.gaussians,
+                q_main2vis=self.q_main2vis,
+                q_vis2main=self.q_vis2main,
+            )
+        else:
+            self.gaussian_mapper = GaussianMapper(cfg, self)
+
+            
+
+    def info(self, msg) -> None:
+        print(colored("[Main]: " + msg, "green"))
+
+    def create_out_dirs(self) -> None:
+        if self.cfg.output_folder is not None:
+            self.output = self.cfg.output_folder
         else:
             self.output = "./outputs/"
 
@@ -262,6 +282,7 @@ class SLAM:
 
         # Run for one last time after everything finished
         finished = False
+        print("Waiting for Gaussian Mapping to finish ...")
         while not finished and run:
             finished = self.gaussian_mapper(mapping_queue, received_mapping, True)
 
@@ -280,7 +301,17 @@ class SLAM:
         self.all_finished += 1
         self.info("Visualization done!")
 
-    def show_stream(self, rank, input_queue: mp.Queue, run: bool = False) -> None:
+    def mapping_gui(self, rank, run=True):
+        self.info("Mapping GUI thread started!")
+        self.all_trigered += 1
+        if run:
+            slam_gui.run(self.params_gui)
+
+        self.all_finished += 1
+        self.info("Mapping GUI done!")
+
+
+    def show_stream(self, rank, input_queue: mp.Queue, run=True) -> None:
         self.info("OpenCV Image stream thread started!")
         self.all_trigered += 1
 
@@ -358,7 +389,7 @@ class SLAM:
         ## Trajectory filler
         timestamps = [i for i in range(len(stream))]
         camera_trajectory = self.traj_filler(stream)  # w2cs
-        w2w = SE3(self.video.pose_compensate[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
+        w2w = SE3(self.video.poses_clean[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
         camera_trajectory = w2w * camera_trajectory.inv()
         traj_est = camera_trajectory.data.cpu().numpy()
         estimate_c2w_list = camera_trajectory.matrix().data.cpu()
@@ -381,7 +412,7 @@ class SLAM:
             stream=stream,
         )
 
-        self.info("ATE: {}".format(result_ate))
+        # self.info("ATE: {}".format(result_ate))
 
         trajectory_df = pd.DataFrame([result_ate])
         trajectory_df.to_csv(os.path.join(eval_path, "trajectory_results.csv"), index=False)
@@ -455,15 +486,10 @@ class SLAM:
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Frontend Tracking"),
-            mp.Process(target=self.global_ba, args=(2, self.cfg.run_backend), name="Backend"),
-            mp.Process(
-                target=self.visualizing, args=(3, self.cfg.run_visualization), name="Visualizing"
-            ),  ## Andrei NOTE: always disable visualization when running evaluation
-            mp.Process(
-                target=self.gaussian_mapping,
-                args=(4, self.cfg.run_mapping, self.mapping_queue, self.received_mapping),
-                name="Gaussian Mapping",
-            ),
+            mp.Process(target=self.global_ba, args=(2, self.cfg.run_backend),name="Backend"),
+            mp.Process(target=self.visualizing, args=(4, self.cfg.run_visualization), name="Visualizing"), ## Andrei NOTE: always disable visualization when running evaluation
+            mp.Process(target=self.mapping_gui, args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate), name="Mapping GUI"),
+            mp.Process(target=self.gaussian_mapping, args=(6, self.cfg.run_mapping, self.mapping_queue, self.received_mapping), name="Gaussian Mapping"),
         ]
 
         self.num_running_thread[0] += len(processes)

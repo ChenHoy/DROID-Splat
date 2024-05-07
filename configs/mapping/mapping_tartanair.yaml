@@ -1,0 +1,66 @@
+warmup: 0 # Wait until tracking gets to this frame
+mapping_iters: 100 # At each new frame, 10 views
+refinement_iters: 100 # Once at the end, all views
+optimize_last: 10
+optimize_rand: 10
+max_cameras: 5
+
+optimize_poses: False
+update_frames: True
+save_renders: True
+
+opt_params:
+  position_lr_init: 0.00016
+  position_lr_final: 0.0000016
+  position_lr_delay_mult: 0.01
+  position_lr_max_steps: 30000
+  feature_lr: 0.0025
+  opacity_lr: 0.05
+  scaling_lr: 0.001
+  rotation_lr: 0.001
+  percent_dense: 0.01
+
+  cam_rot_delta: 0.00003
+  cam_trans_delta: 0.00001
+
+  
+
+model_params:
+  sh_degree: 0
+
+
+pipeline_params:
+  convert_SHs_python: False
+  compute_cov3D_python: False
+
+loss:
+  alpha: 0.95 # Size of the mapping loss that the rgb takes up, the rest is depth
+  rgb_boundary_threshold: 0.01
+  isotropic: 5 # Weight on the isotropic loss term
+
+filter:
+  filter_depth: True
+  neighbor_th: 0.5
+  neighbor_count: 1
+  disp_th: 0.01
+
+pruning:
+  prune_every: 30
+  visibility_th: 5
+  prune_last: 5
+  final_visibility_th: 2
+
+  mapping:
+    densify_grad_threshold: 0.00005
+    size_threshold: 15
+    opacity_th: 0.05
+    gaussian_extent: 5
+
+  refinement:
+    densify_grad_threshold: 0.0002
+    size_threshold: 10
+    opacity_th: 0.05
+    gaussian_extent: 3
+
+
+
