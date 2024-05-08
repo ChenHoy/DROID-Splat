@@ -65,6 +65,11 @@ class GaussianMapper(object):
         self.loss_params = cfg.mapping.loss
 
         self.sh_degree = 3 if cfg.mapping.use_spherical_harmonics else 0
+
+        # Change the downsample factor for initialization depending on cfg.tracking.upsample, so we always have points
+        if not self.cfg.tracking.upsample:
+            cfg.mapping.input.pcd_downsample_init /= 8
+            cfg.mapping.input.pcd_downsample /= 8
         self.gaussians = GaussianModel(self.sh_degree, config=cfg.mapping.input)
         self.gaussians.init_lr(cfg.mapping.init_lr)
         self.gaussians.training_setup(self.opt_params)
