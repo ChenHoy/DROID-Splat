@@ -4,12 +4,16 @@ defaults:
 buffer: 512
 warmup: 15
 
+motion_filter:
+  thresh: 5.0  # add as keyframe if avg flow >
+
 frontend:
-  thresh: 20.0  # only consider edge with avg flow < 25.0 pixels
+  keyframe_thresh: 5.0  # remove keyframe if avg flow < 
+  thresh: 20.0  # only consider edge with avg flow < 
   window: 40  # local ba window size
-  release_cache: True 
+  release_cache: False 
 
 backend:
-  thresh: 30.0  # only consider edge with avg flow < 25.0 pixels
+  thresh: 30.0  # only consider edge with avg flow < 
   radius: 1
   nms: 5
