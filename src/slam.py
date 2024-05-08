@@ -285,6 +285,8 @@ class SLAM:
         self.info("Visualization thread started!")
         self.all_trigered += 1
 
+        is_done= False
+
         while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
             is_done = droid_visualization(self.video, device=self.device, save_root=self.output)
 
