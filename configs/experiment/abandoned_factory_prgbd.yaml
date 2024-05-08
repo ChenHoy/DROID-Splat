@@ -3,11 +3,11 @@ defaults:
   - override /data: TartanAir/abandonedfactory
   - override /tracking: tartanair
 
-sleep_delay: 3.0
+sleep_delay: 2.0
 
 tracking:
   motion_filter:
-    thresh: 5.0 
+    thresh: 6.0 
 
   frontend:
     thresh: 20.0 
@@ -20,8 +20,8 @@ tracking:
     radius: 2
     nms: 2
     # used for loop detection
-    use_loop_closure: False # NOTE works well with True too
-    loop_window: 100
-    loop_thresh: 30.0  
+    use_loop_closure: True # NOTE works well with True too
+    loop_window: 200
+    loop_thresh: 25.0  
     loop_radius: 2
     loop_nms: 5
