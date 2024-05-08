@@ -1,5 +1,5 @@
 defaults:
-  - base
+  - /tracking/base@_here_
 
 buffer: 512
 warmup: 15

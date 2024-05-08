@@ -1,4 +1,5 @@
 defaults:
-  - base
+  # NOTE we need to use an absolute path here, because otherwise it will not be cfg.data in the Dict
+  - /data/TartanAir/base@_here_
 
 input_folder: /media/data/TartanAir/westerndesert/Hard/P000/

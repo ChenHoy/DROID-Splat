@@ -1,5 +1,5 @@
 defaults:
-  - base
+  - /tracking/base@_here_
 
 warmup: 12
 

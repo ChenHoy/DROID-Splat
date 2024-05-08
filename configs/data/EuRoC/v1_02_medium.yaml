@@ -1,5 +1,6 @@
 defaults:
-  - base
+  # NOTE we need to use an absolute path here, because otherwise it will not be cfg.data in the Dict
+  - /data/EuRoC/base@_here_
 
 input_folder: /media/data/EuRoC/V1_02_medium
 cam:
