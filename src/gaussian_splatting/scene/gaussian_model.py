@@ -131,7 +131,7 @@ class GaussianModel:
             downsample_factor = self.cfg.pcd_downsample
 
         point_size = self.cfg.get("point_size", 0.05)
-        if self.cfg.get("adaptive_pointsize", False):
+        if self.cfg.get("adaptive_pointsize", True):
             point_size = min(0.05, point_size * np.median(depth))
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
             rgb,

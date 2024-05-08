@@ -37,6 +37,7 @@ class DepthVideo:
 
         # FIXME chen: do we really need multiple locks or can we simply use the same locking mechanism to assert thread safety?
         # NOTE we have multiple lock to avoid deadlocks between bundle adjustment and frontend loop closure
+        # TODO we can get rid of these
         self.mapping = Value("i", 0)
         self.ba_lock = {"local": Value("i", 0), "global": Value("i", 0)}
 

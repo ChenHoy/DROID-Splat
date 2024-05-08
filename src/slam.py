@@ -269,7 +269,7 @@ class SLAM:
 
         while self.tracking_finished < 1 and run:
             self.gaussian_mapper(mapping_queue, received_mapping)
-            sleep(self.sleep_time / 2)
+            sleep(self.sleep_time / 4)
 
         # Run for one last time after everything finished
         finished = False

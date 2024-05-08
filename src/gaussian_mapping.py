@@ -344,6 +344,8 @@ class GaussianMapper(object):
         """
         raise NotImplementedError()
 
+
+    # FIXME we get nan loss when finetuning the final map, WHY?!
     def mapping_rgbd_loss(
         self,
         image: torch.Tensor,
