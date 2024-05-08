@@ -421,14 +421,7 @@ class FactorGraph:
 
     @torch.cuda.amp.autocast(enabled=True)
     def update(
-        self,
-        t0=None,
-        t1=None,
-        iters=4,
-        use_inactive=False,
-        lm=1e-4,
-        ep=0.1,
-        motion_only=False,
+        self, t0=None, t1=None, iters=4, use_inactive=False, lm=1e-4, ep=0.1, motion_only=False, ba_type="local"
     ):
         """run update operator on factor graph"""
 
@@ -486,7 +479,7 @@ class FactorGraph:
                     # only then can we use global BA and intrinsics optimization with the CUDA kernel later
                     self.video.reset_prior()
                 else:
-                    self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False)
+                    self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False, ba_type)
 
             if self.upsample:
                 self.video.upsample(torch.unique(self.ii, sorted=True), upmask)
@@ -503,8 +496,8 @@ class FactorGraph:
         max_t=None,
         lm: float = 1e-5,
         ep: float = 1e-2,
-        ba_type="dense",
         motion_only=False,
+        ba_type="global",
     ):
         """run update operator on factor graph - reduced memory implementation"""
         cur_t = self.video.counter.value

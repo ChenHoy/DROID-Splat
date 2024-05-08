@@ -156,7 +156,7 @@ class Backend:
         steps=8,
         iters=2,
         motion_only=False,
-        lm=1e-4,
+        lm=1e-3,
         ep=1e-1,
         local_graph: Optional[FactorGraph] = None,
     ):

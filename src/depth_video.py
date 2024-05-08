@@ -10,7 +10,7 @@ import droid_backends
 
 from .droid_net import cvx_upsample
 from .geom import projective_ops as pops
-from .geom.ba import BA_prior, MoBA, BA, bundle_adjustment
+from .geom.ba import bundle_adjustment
 
 
 class DepthVideo:
@@ -36,7 +36,7 @@ class DepthVideo:
         self.ready = Value("i", 0)
         self.mapping = Value("i", 0)
         # NOTE we have multiple lock to avoid deadlocks between bundle adjustment and frontend loop closure
-        self.ba_lock = {"dense": Value("i", 0), "loop": Value("i", 0)}
+        self.ba_lock = {"local": Value("i", 0), "global": Value("i", 0)}
         self.global_ba_lock = Value("i", 0)
         ht = cfg.data.cam.H_out
         self.ht = ht
@@ -498,7 +498,7 @@ class DepthVideo:
             )
             self.disps.clamp_(min=0.001)  # Always make sure that Disparities are non-negative!!!
 
-    def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 0.01):
+    def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 0.05):
         """Bundle adjustment over structure with a scalable prior.
 
         We keep the poses fixed, since this would create an unnecessary ambiguity and can make the system unstable!
@@ -552,7 +552,7 @@ class DepthVideo:
                 self.disps_sens,
                 self.scales,
                 self.shifts,
-                iters=iters,  # Use slightly more iterations here, so we get the scales right for sure!
+                iters=iters + 2,  # Use slightly more iterations here, so we get the scales right for sure!
                 lm=lm,
                 ep=ep,
                 scale_prior=True,

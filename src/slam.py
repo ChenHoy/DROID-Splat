@@ -39,6 +39,7 @@ from .gaussian_mapping import GaussianMapper
 from .gaussian_splatting.eval_utils import eval_ate, eval_rendering, save_gaussians
 from .gaussian_splatting.gui import gui_utils, slam_gui
 
+
 from multiprocessing import Manager
 from .gaussian_splatting.multiprocessing_utils import clone_obj
 
@@ -56,13 +57,13 @@ class SLAM:
     We combine these building blocks in a multiprocessing environment.
     """
 
-    def __init__(self, cfg, dataset=None):
+    def __init__(self, cfg, dataset=None, output_folder: Optional[str] = None):
         super(SLAM, self).__init__()
 
         self.cfg = cfg
         self.device = cfg.get("device", torch.device("cuda:0"))
         self.mode = cfg.mode
-        self.create_out_dirs()
+        self.create_out_dirs(output_folder)
         self.update_cam(cfg)
 
         self.net = DroidNet()
@@ -128,9 +129,9 @@ class SLAM:
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
 
-    def create_out_dirs(self) -> None:
-        if self.cfg.output_folder is not None:
-            self.output = self.cfg.output_folder
+    def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
+        if output_folder is not None:
+            self.output = output_folder
         else:
             self.output = "./outputs/"
 
@@ -285,11 +286,12 @@ class SLAM:
         self.all_trigered += 1
 
         while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
-            droid_visualization(self.video, device=self.device, save_root=self.output)
+            is_done = droid_visualization(self.video, device=self.device, save_root=self.output)
 
-        self.visualizing_finished += 1
-        self.all_finished += 1
-        self.info("Visualization done!")
+        if is_done:
+            self.visualizing_finished += 1
+            self.all_finished += 1
+            self.info("Visualization done!")
 
     def mapping_gui(self, rank, run=True):
         self.info("Mapping GUI thread started!")
@@ -339,42 +341,25 @@ class SLAM:
         self.all_finished += 1
         self.info("Show stream Done!")
 
-    def evaluate(self, stream, gaussian_mapper_last_state):
-
-        eval_path = os.path.join(self.output, "evaluation")
+    def evaluate(self, stream, gaussian_mapper_last_state: Optional[gui_utils.EvaluatePacket] = None):
 
         def stringify_config():
             tbr = "Config: "
-
             if self.cfg.run_backend:
                 tbr += "Backend"
             if self.cfg.run_frontend:
                 tbr += " Frontend"
             if self.cfg.run_mapping:
                 tbr += " Mapping"
-
             tbr += " | Stride: " + str(self.cfg.stride)
-
             return tbr
 
-        self.info("Saving evaluation results in {}".format(self.output))
-
-        rendering_result = eval_rendering(
-            gaussian_mapper_last_state.cameras,
-            gaussian_mapper_last_state.gaussians,
-            stream,
-            eval_path,
-            gaussian_mapper_last_state.pipeline_params,
-            gaussian_mapper_last_state.background,
-            kf_indices=[],  ## NOTE: all frames are keyframes
-            iteration="final",
-        )  ## NOTE: only for printing additional messages
+        eval_path = os.path.join(self.output, "evaluation")
+        self.info("Saving evaluation results in {}".format(eval_path))
+        self.info("#" * 20 + f" Results for {stream.input_folder} ...")
 
         #### ------------------- ####
         ### Trajectory evaluation ###
-
-        self.info("#" * 20 + f" Results for {stream.input_folder} ...")
-
         ## Trajectory filler
         timestamps = [i for i in range(len(stream))]
         camera_trajectory = self.traj_filler(stream)  # w2cs
@@ -383,12 +368,8 @@ class SLAM:
         traj_est = camera_trajectory.data.cpu().numpy()
         estimate_c2w_list = camera_trajectory.matrix().data.cpu()
 
-        # out_path = os.path.join(self.output, "checkpoints/est_poses.npy")
-        # np.save(out_path, estimate_c2w_list.numpy())  # c2ws
-
         # Set keyframes_only to True to compute the APE and plots on keyframes only.
         monocular = self.cfg.mode == "mono"
-
         result_ate = eval_ate(
             self.video,
             kf_ids=list(range(len(self.video.images))),
@@ -400,27 +381,36 @@ class SLAM:
             camera_trajectory=camera_trajectory,
             stream=stream,
         )
-
-        # self.info("ATE: {}".format(result_ate))
-
+        self.info("ATE: {}".format(result_ate))
         trajectory_df = pd.DataFrame([result_ate])
         trajectory_df.to_csv(os.path.join(eval_path, "trajectory_results.csv"), index=False)
+        # out_path = os.path.join(self.output, "checkpoints/est_poses.npy")
+        # np.save(out_path, estimate_c2w_list.numpy())  # c2ws
 
-        #### ------------------- ####
         ## Joint metrics file ##
-        columns = ["config", "dataset", "mode", "psnr", "ssim", "lpips", "ape"]
-        data = [
-            [
-                stringify_config(),
-                self.cfg.data.dataset,
-                self.cfg.mode,
+        columns = ["config", "dataset", "mode", "ape"]
+        result_table = [stringify_config(), self.cfg.data.dataset, self.cfg.mode, result_ate["mean"]]
+
+        ### Rendering evaluation ###
+        if self.cfg.run_mapping:
+            rendering_result = eval_rendering(
+                gaussian_mapper_last_state.cameras,
+                gaussian_mapper_last_state.gaussians,
+                stream,
+                eval_path,
+                gaussian_mapper_last_state.pipeline_params,
+                gaussian_mapper_last_state.background,
+                kf_indices=[],  ## NOTE: all frames are keyframes
+                iteration="final",
+            )
+            columns += ["psnr", "ssim", "lpips"]
+            result_table += [
                 rendering_result["mean_psnr"],
                 rendering_result["mean_ssim"],
                 rendering_result["mean_lpips"],
-                result_ate["mean"],
             ]
-        ]
 
+        data = [result_table]
         df = pd.DataFrame(data, columns=columns)
         df.to_csv(os.path.join(eval_path, "evaluation_results.csv"), index=False)
 
@@ -444,7 +434,6 @@ class SLAM:
             self.info("Terminated process {}".format(p.name))
 
         # self.save_state()  ## this is not reached
-        print("Evaluation: {}".format(self.do_evaluate))
         if self.do_evaluate:
             self.info("Doing evaluation!")
             self.evaluate(stream, gaussian_mapper_last_state)
@@ -469,16 +458,12 @@ class SLAM:
             self.frontend(timestamp, image, depth, intrinsic, gt_pose)
 
     def run(self, stream):
-        # TODO visualizing and guassian mapping cannot be run at the same time, because they both access the dirty_index
-        # -> introduce multiple indices so we can keep track of what we already visualized and what we already put into the renderer
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Frontend Tracking"),
             mp.Process(target=self.global_ba, args=(2, self.cfg.run_backend), name="Backend"),
-            mp.Process(
-                target=self.visualizing, args=(4, self.cfg.run_visualization), name="Visualizing"
-            ),  ## Andrei NOTE: always disable visualization when running evaluation
+            mp.Process(target=self.visualizing, args=(4, self.cfg.run_visualization), name="Visualizing"),
             mp.Process(
                 target=self.mapping_gui,
                 args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
@@ -496,20 +481,26 @@ class SLAM:
             p.start()
 
         # Wait for all processes to have finished before terminating and for final mapping update to be transmitted
-        while self.mapping_queue.empty() and self.all_finished < self.num_running_thread:
-            pass
+        if self.cfg.run_mapping:
+            while self.mapping_queue.empty() and self.all_finished < self.num_running_thread:
+                pass
 
-        ###
-        # Perform intermediate computations you would want to do, e.g. return the last map for evaluation
-        # Since all processes run here until finished, this requires some add. multi-threading flags for synchronization
-        ###
+            ###
+            # Perform intermediate computations you would want to do, e.g. return the last map for evaluation
+            # Since all processes run here until finished, this requires some add. multi-threading flags for synchronization
+            ###
 
-        # Receive the final update, so we can do something with it ...
+            # Receive the final update, so we can do something with it ...
 
-        a = self.mapping_queue.get()
-        gaussian_mapper_last_state = clone_obj(a)
-        self.received_mapping.set()
-        del a  # NOTE Always delete receive object from a multiprocessing Queue!
+            a = self.mapping_queue.get()
+            gaussian_mapper_last_state = clone_obj(a)
+            self.received_mapping.set()
+            del a  # NOTE Always delete receive object from a multiprocessing Queue!
+
+        else:
+            gaussian_mapper_last_state = None
+            while self.all_finished < self.num_running_thread:
+                pass
 
         while self.backend_finished < 1 and self.gaussian_mapping_finished < 1:
             self.info("Waiting Backend and Gaussian Renderer to finish ...")

@@ -443,3 +443,4 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
         print(colored(e, "red"))
 
     vis.destroy_window()
+    return True
