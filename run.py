@@ -10,6 +10,7 @@ import hydra
 
 from src.slam import SLAM
 from src.datasets import get_dataset
+from hydra.core.hydra_config import HydraConfig
 
 """
 Run the SLAM system on a given dataset or on image folder.
