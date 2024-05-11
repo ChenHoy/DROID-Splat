@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - override /data: TartanAir/abandoned_factory
+  - override /data: TartanAir/abandonedfactory
   - override /tracking: tartanair
 
 sleep_delay: 3.0
