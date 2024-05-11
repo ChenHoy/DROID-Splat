@@ -1,15 +1,11 @@
 import os
 import ipdb
 from omegaconf import DictConfig
-from colorama import Fore, Style
+from copy import deepcopy
 from termcolor import colored
 from collections import OrderedDict
 from tqdm import tqdm
-from time import gmtime, strftime, time, sleep
-from evo.core.trajectory import PoseTrajectory3D
-import evo.main_ape as main_ape
-from evo.core.metrics import PoseRelation
-from evo.core.trajectory import PosePath3D
+from time import sleep
 import numpy as np
 import pandas as pd
 from typing import List, Optional
@@ -25,7 +21,6 @@ import ipdb
 import cv2
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.multiprocessing as mp
 from lietorch import SE3
 
@@ -205,6 +200,10 @@ class SLAM:
 
             self.frontend(timestamp, image, depth, intrinsic, gt_pose)
 
+        del self.frontend
+        torch.cuda.empty_cache()
+        gc.collect()
+
         self.tracking_finished += 1
         self.all_finished += 1
         self.info("Tracking done!")
@@ -259,6 +258,10 @@ class SLAM:
             _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
             _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
 
+        del self.backend
+        torch.cuda.empty_cache()
+        gc.collect()
+
         self.backend_finished += 1
         self.all_finished += 1
         self.info("Full Bundle Adjustment done!")
@@ -284,22 +287,26 @@ class SLAM:
     def visualizing(self, rank, run=True):
         self.info("Visualization thread started!")
         self.all_trigered += 1
+        finished = False
 
-        while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
-            is_done = droid_visualization(self.video, device=self.device, save_root=self.output)
+        while (self.tracking_finished < 1 or self.backend_finished < 1) and run and not finished:
+            finished = droid_visualization(self.video, device=self.device, save_root=self.output)
 
-        if is_done:
-            self.visualizing_finished += 1
-            self.all_finished += 1
-            self.info("Visualization done!")
+        self.visualizing_finished += 1
+        self.all_finished += 1
+        self.info("Visualization done!")
 
     def mapping_gui(self, rank, run=True):
         self.info("Mapping GUI thread started!")
         self.all_trigered += 1
-        if run:
-            slam_gui.run(self.params_gui)
+        is_done = False
+        while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
+            is_done = slam_gui.run(self.params_gui)
+            if is_done:
+                break
 
         self.all_finished += 1
+        self.info(f"Finished: {100*self.all_finished/self.num_running_thread}% of processes")
         self.info("Mapping GUI done!")
 
     def show_stream(self, rank, input_queue: mp.Queue, run=True) -> None:
@@ -429,16 +436,15 @@ class SLAM:
         """fill poses for non-keyframe images and evaluate"""
         self.info("Initiating termination ...")
 
-        for i, p in enumerate(processes):
-            p.join()
-            self.info("Terminated process {}".format(p.name))
-
         # self.save_state()  ## this is not reached
         if self.do_evaluate:
             self.info("Doing evaluation!")
             self.evaluate(stream, gaussian_mapper_last_state)
             self.info("Evaluation complete")
 
+        for i, p in enumerate(processes):
+            p.join()
+            self.info("Terminated process {}".format(p.name))
         self.info("Terminate: Done!")
 
     def test(self, stream):
@@ -463,15 +469,15 @@ class SLAM:
             mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Frontend Tracking"),
             mp.Process(target=self.global_ba, args=(2, self.cfg.run_backend), name="Backend"),
-            mp.Process(target=self.visualizing, args=(4, self.cfg.run_visualization), name="Visualizing"),
+            mp.Process(target=self.visualizing, args=(3, self.cfg.run_visualization), name="Visualizing"),
             mp.Process(
                 target=self.mapping_gui,
-                args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
+                args=(4, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
                 name="Mapping GUI",
             ),
             mp.Process(
                 target=self.gaussian_mapping,
-                args=(6, self.cfg.run_mapping, self.mapping_queue, self.received_mapping),
+                args=(5, self.cfg.run_mapping, self.mapping_queue, self.received_mapping),
                 name="Gaussian Mapping",
             ),
         ]
@@ -491,21 +497,20 @@ class SLAM:
             ###
 
             # Receive the final update, so we can do something with it ...
-
             a = self.mapping_queue.get()
-            gaussian_mapper_last_state = clone_obj(a)
+            self.info("Received final mapping update!")
+            if a == "None":
+                a = deepcopy(a)
+                gaussian_mapper_last_state = None
+            else:
+                gaussian_mapper_last_state = clone_obj(a)
             self.received_mapping.set()
             del a  # NOTE Always delete receive object from a multiprocessing Queue!
 
         else:
             gaussian_mapper_last_state = None
-            while self.all_finished < self.num_running_thread:
-                pass
 
-        while self.backend_finished < 1 and self.gaussian_mapping_finished < 1:
-            self.info("Waiting Backend and Gaussian Renderer to finish ...")
-            # Make exception for configuration where we only have frontend tracking
-            if self.num_running_thread == 1 and self.tracking_finished > 0:
-                break
+        while self.all_finished < self.num_running_thread:
+            pass
 
         self.terminate(processes, stream, gaussian_mapper_last_state)
