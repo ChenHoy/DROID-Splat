@@ -273,7 +273,6 @@ class SLAM:
 
         # Run for one last time after everything finished
         finished = False
-        print("Waiting for Gaussian Mapping to finish ...")
         while not finished and run:
             finished = self.gaussian_mapper(mapping_queue, received_mapping, True)
 
@@ -345,17 +344,6 @@ class SLAM:
 
     def evaluate(self, stream, gaussian_mapper_last_state: Optional[gui_utils.EvaluatePacket] = None):
 
-        def stringify_config():
-            tbr = "Config: "
-            if self.cfg.run_backend:
-                tbr += "Backend"
-            if self.cfg.run_frontend:
-                tbr += " Frontend"
-            if self.cfg.run_mapping:
-                tbr += " Mapping"
-            tbr += " | Stride: " + str(self.cfg.stride)
-            return tbr
-
         eval_path = os.path.join(self.output, "evaluation")
         self.info("Saving evaluation results in {}".format(eval_path))
         self.info("#" * 20 + f" Results for {stream.input_folder} ...")
@@ -390,8 +378,9 @@ class SLAM:
         # np.save(out_path, estimate_c2w_list.numpy())  # c2ws
 
         ## Joint metrics file ##
-        columns = ["config", "dataset", "mode", "ape"]
-        result_table = [stringify_config(), self.cfg.data.dataset, self.cfg.mode, result_ate["mean"]]
+        configuration_columns = ['run_backend','run_mapping','stride','loop_closure']
+        columns = configuration_columns + [ "dataset", "mode", "ape"]
+        result_table = [str(self.cfg.run_backend),str(self.cfg.run_mapping),str(self.cfg.stride),str(self.backend.enable_loop), self.dataset.input_folder, self.cfg.mode, result_ate["mean"]]
 
         ### Rendering evaluation ###
         if self.cfg.run_mapping:
