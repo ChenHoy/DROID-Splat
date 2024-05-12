@@ -1,6 +1,6 @@
 import os
 from copy import deepcopy
-from typing import List, Dict
+from typing import List, Dict, Optional
 from termcolor import colored
 
 import torch
@@ -15,6 +15,7 @@ from .gaussian_splatting.gaussian_renderer import render
 from .gaussian_splatting.scene.gaussian_model import GaussianModel
 from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2, focal2fov
 from .gaussian_splatting.utils.loss_utils import l1_loss, ssim
+from .gaussian_splatting.slam_utils import depth_reg, image_gradient_mask
 from .gaussian_splatting.multiprocessing_utils import clone_obj
 from .gaussian_splatting.camera_utils import Camera
 from .gaussian_splatting.pose_utils import update_pose
@@ -244,7 +245,7 @@ class GaussianMapper(object):
 
     def save_render(self, cam: Camera, render_path: str) -> None:
         """Save a rendered frame"""
-        render_pkg = render(cam, self.gaussians, self.pipeline_params, self.background)
+        render_pkg = render(cam, self.gaussians, self.pipeline_params, self.background, device=self.device)
         rgb = np.uint8(255 * render_pkg["render"].detach().cpu().numpy().transpose(1, 2, 0))
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         cv2.imwrite(render_path, bgr)
@@ -278,22 +279,31 @@ class GaussianMapper(object):
             pose_optimizer = self.pose_optimizer(self.cameras)
 
         # Sanity check when we dont have anything to optimize
-        if self.gaussians.get_xyz.shape[0] == 0:
+        if len(self.gaussians.get_xyz) == 0:
             return 0.0
 
         loss = 0.0
         self.occ_aware_visibility = {}
         for view in frames:
 
-            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background)
+            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
             # NOTE chen: this can be None when self.gaussians is 0. This could happen in some cases
             if render_pkg is None:
+                self.info(f"Skipping view {view.uid} as no gaussians are present ...")
                 continue
+
             visibility_filter, viewspace_point_tensor = render_pkg["visibility_filter"], render_pkg["viewspace_points"]
             image, radii, depth = render_pkg["render"], render_pkg["radii"], render_pkg["depth"]
             opacity, n_touched = render_pkg["opacity"], render_pkg["n_touched"]
 
-            loss += self.mapping_rgbd_loss(image, depth, view)
+            loss += self.mapping_rgbd_loss(
+                image,
+                depth,
+                view,
+                with_edge_weight=self.loss_params.with_edge_weight,
+                with_ssim=self.loss_params.use_ssim,
+                with_depth_smoothness=self.loss_params.use_depth_smoothness_reg,
+            )
             # Only take into account last frames and not random ones for occlusion checks
             if self.last_idx - view.uid < self.n_last_frames:
                 self.occ_aware_visibility[view.uid] = (n_touched > 0).long()
@@ -336,42 +346,84 @@ class GaussianMapper(object):
 
             return loss.item()
 
-    def color_loss(self, image, cam: Camera, with_ssim: bool = True, use_weighted: bool = True) -> float:
+    def color_loss(
+        self,
+        image,
+        cam: Camera,
+        with_ssim: bool = True,
+        alpha2: float = 0.85,
+        mask: Optional[torch.Tensor] = None,
+    ) -> float:
         """Compute the color loss between the rendered image and the ground truth image.
-
         This uses a weighted sum of l1 and ssim loss.
-        If use_weighted is True, we weight pixels in high gradient regions higher than less informative regions.
         """
-        raise NotImplementedError()
+        if mask is None:
+            mask = torch.ones_like(image, device=self.device)
 
+        image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
+        l1_rgb = l1_loss(image, cam.original_image, mask)
+        # NOTE this is configured like is done in most monocular depth estimation supervision pipelines
+        if with_ssim:
+            ssim_loss = ssim(image, cam.original_image)
+            rgb_loss = 0.5 * alpha2 * (1 - ssim_loss) + (1 - alpha2) * l1_rgb
+        else:
+            rgb_loss = l1_rgb
+        return rgb_loss
+
+    def depth_loss(
+        self,
+        depth: torch.Tensor,
+        cam: Camera,
+        with_smoothness: bool = False,
+        beta: float = 0.001,
+        mask: Optional[torch.Tensor] = None,
+    ) -> float:
+        if mask is None:
+            mask = torch.ones_like(depth, device=self.device)
+
+        l1_depth = l1_loss(cam.depth, depth, mask)
+        if with_smoothness:
+            # NOTE this regularizes depth to be smooth in regions with low image gradient but sharp in others
+            depth_reg_loss = depth_reg(depth, cam.original_image)
+            depth_loss = l1_depth + beta * depth_reg_loss
+        else:
+            depth_loss = l1_depth
+
+        return depth_loss
 
     # FIXME we get nan loss when finetuning the final map, WHY?!
+    # -> this could be because the map was unstable and rendering crashed
     def mapping_rgbd_loss(
         self,
         image: torch.Tensor,
         depth: torch.Tensor,
         cam: Camera,
+        with_edge_weight: bool = False,
+        with_ssim: bool = False,
+        with_depth_smoothness: bool = False,
     ):
-        """Compute a weighted l1 loss between i) the rendered image and the ground truth image and ii) the rendered depth and the ground truth depth.
 
-        NOTE: the groundtruth depth here is the depth from the VSLAM system, not the external sensor depth!
-        """
-
-        alpha = self.loss_params.alpha
-        # lambda_dssim = self.loss_params.lambda_dssim
-
-        gt_image, gt_depth = cam.original_image, cam.depth
+        alpha1, alpha2 = self.loss_params.alpha1, self.loss_params.alpha2
+        beta = self.loss_params.beta2
 
         # Mask out pixels with little information and invalid depth pixels
-        rgb_pixel_mask = (gt_image.sum(dim=0) > self.loss_params.rgb_boundary_threshold).view(*depth.shape)
+        rgb_pixel_mask = (cam.original_image.sum(dim=0) > self.loss_params.rgb_boundary_threshold).view(*depth.shape)
         # Only use valid depths for supervision
-        depth_pixel_mask = ((gt_depth > 0.01) * (gt_depth < 1e7)).view(*depth.shape)
+        depth_pixel_mask = ((cam.depth > 0.01) * (cam.depth < 1e7)).view(*depth.shape)
 
-        image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
-        l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
-        l1_depth = torch.abs(depth * depth_pixel_mask - gt_depth * depth_pixel_mask)
+        if with_edge_weight:
+            edge_mask_x, edge_mask_y = image_gradient_mask(cam.original_image)  # Use gt reference image for edge weight
+            edge_mask = edge_mask_x | edge_mask_y # Combine with logical OR
+            rgb_mask = rgb_pixel_mask.float() * edge_mask.float()
+        else:
+            rgb_mask = rgb_pixel_mask.float()
 
-        return alpha * l1_rgb.mean() + (1 - alpha) * l1_depth.mean()
+        rgb_loss = self.color_loss(image, cam, with_ssim, alpha2, rgb_mask)
+        depth_loss = self.depth_loss(depth, cam, with_depth_smoothness, beta, depth_pixel_mask)
+
+        # TODO chen: maybe tune the weights better by looking at common value ranges
+        # we want color to be a main driver since we already initialize with good depth estimates
+        return alpha1 * rgb_loss + (1 - alpha1) * depth_loss
 
     def plot_losses(self) -> None:
         fig, ax = plt.subplots()
@@ -411,7 +463,7 @@ class GaussianMapper(object):
 
         self.occ_aware_visibility = {}
         for view in self.cameras + self.new_cameras:
-            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background)
+            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
             self.occ_aware_visibility[view.uid] = (render_pkg["n_touched"] > 0).long()
 
         # print(self.occ_aware_visibility[1])
@@ -476,7 +528,9 @@ class GaussianMapper(object):
                     background=clone_obj(self.background),
                 )
             )
-            received_item.wait()  # Wait until the Packet got delivered
+        else:
+            mapping_queue.put("None")
+        received_item.wait()  # Wait until the Packet got delivered
 
     def __call__(self, mapping_queue: mp.Queue, received_item: mp.Event, the_end=False):
 
@@ -514,7 +568,8 @@ class GaussianMapper(object):
                     # self.info(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians based on view {cam.uid}")
 
             # We might have 0 Gaussians in some cases
-            if self.gaussians.get_xyz.shape[0] == 0:
+            if len(self.gaussians.get_xyz) == 0:
+                self.info("No Gaussians to optimize, skipping mapping step ...")
                 return
 
             # Optimize  gaussians
@@ -523,11 +578,18 @@ class GaussianMapper(object):
                 loss = self.mapping_step(
                     iter, frames, self.kf_mng_params.mapping, densify=True, optimize_poses=self.optimize_poses
                 )
+                if len(frames) == 0:
+                    print(colored("[Gaussian mapping] No frames to optimize", "red"))
+                    print(colored("[Gaussian mapping] Loss turns nan", "red"))
                 self.loss_list.append(loss / len(frames))
 
-            print(
-                colored(f"[Gaussian mapping] Loss:  {loss / len(frames)}", "green")
-            )  # Keep track of how well the Rendering is doing
+            if len(frames) == 0:
+                print(colored("[Gaussian mapping] No frames to optimize", "red"))
+                print(colored(f"[Gaussian mapping] Loss before normalizing {loss}", "red"))
+                print(colored("[Gaussian mapping] Loss will be nan", "red"))
+
+            # Keep track of how well the Rendering is doing
+            print(colored(f"[Gaussian mapping] Loss:  {loss / len(frames)}", "green"))
             # TODO leon: is it necessary at every frame?
             if self.last_idx % 1 == 0 and self.last_idx > self.n_last_frames:
                 self.abs_visibility_prune()
@@ -554,6 +616,7 @@ class GaussianMapper(object):
             self.cameras += self.new_cameras
             self.iteration_info.append(len(self.new_cameras))
             self.new_cameras = []
+            return False
 
         elif the_end and self.last_idx + self.delay >= self.cur_idx:
             self._last_call(mapping_queue=mapping_queue, received_item=received_item)

@@ -10,6 +10,7 @@
 #
 
 from math import exp
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -18,13 +19,17 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 
 
-def l1_loss(network_output: torch.Tensor, gt: torch.Tensor) -> float:
-    return torch.abs((network_output - gt)).mean()
+def l1_loss(network_output: torch.Tensor, gt: torch.Tensor, mask: Optional[torch.Tensor] = None) -> float:
+    if mask is not None:
+        return torch.abs((network_output - gt) * mask).mean()
+    else:
+        return torch.abs((network_output - gt)).mean()
 
 
 def l1_loss_weight(network_output: torch.Tensor, gt: torch.Tensor) -> float:
     image = gt.detach().cpu().numpy().transpose((1, 2, 0))
-    rgb_raw_gray = np.dot(image[..., :3], [0.2989, 0.5870, 0.1140])
+    rgb_raw_gray = np.dot(image[..., :3], [0.2989, 0.5870, 0.1140])  # Conversion to RGB -> Gray
+
     sobelx = cv2.Sobel(rgb_raw_gray, cv2.CV_64F, 1, 0, ksize=5)
     sobely = cv2.Sobel(rgb_raw_gray, cv2.CV_64F, 0, 1, ksize=5)
     sobel_merge = np.sqrt(sobelx * sobelx + sobely * sobely) + 1e-10
@@ -35,8 +40,11 @@ def l1_loss_weight(network_output: torch.Tensor, gt: torch.Tensor) -> float:
     return torch.abs((network_output - gt) * sobel_merge).mean()
 
 
-def l2_loss(network_output: torch.Tensor, gt: torch.Tensor) -> float:
-    return ((network_output - gt) ** 2).mean()
+def l2_loss(network_output, gt, mask: Optional[torch.Tensor] = None) -> float:
+    if mask is not None:
+        return ((network_output - gt) ** 2 * mask).mean()
+    else:
+        return ((network_output - gt) ** 2).mean()
 
 
 def gaussian(window_size: int, sigma: float) -> torch.Tensor:
