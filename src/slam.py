@@ -226,7 +226,7 @@ class SLAM:
             gc.collect()
             torch.cuda.empty_cache()
 
-        # NOTE chen: if we deleted the backend due to memory issues we likely have not a lot of capacity for left backend
+        # NOTE chen: if we deleted the backend due to memory issues we likely have not a lot of capacity left for backend
         # only use backend again once we have some slack -> 50% free RAM (12GB in use)
         if self.backend is None and used_mem <= min_ram:
             self.info("Reinstantiating Backend ...")
@@ -270,7 +270,7 @@ class SLAM:
         self.info("Gaussian Mapping Triggered!")
         self.all_trigered += 1
 
-        while self.tracking_finished < 1 and run:
+        while (self.tracking_finished + self.backend_finished) < 2 and run:
             self.gaussian_mapper(mapping_queue, received_mapping)
             sleep(self.sleep_time / 4)
 
@@ -288,7 +288,7 @@ class SLAM:
         self.all_trigered += 1
         finished = False
 
-        while (self.tracking_finished < 1 or self.backend_finished < 1) and run and not finished:
+        while (self.tracking_finished + self.backend_finished < 2) and run and not finished:
             finished = droid_visualization(self.video, device=self.device, save_root=self.output)
 
         self.visualizing_finished += 1
@@ -298,21 +298,18 @@ class SLAM:
     def mapping_gui(self, rank, run=True):
         self.info("Mapping GUI thread started!")
         self.all_trigered += 1
-        is_done = False
-        while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
-            is_done = slam_gui.run(self.params_gui)
-            if is_done:
-                break
+        finished = False
+        while (self.tracking_finished + self.backend_finished < 2) and run and not finished:
+            finished = slam_gui.run(self.params_gui)
 
         self.all_finished += 1
-        # self.info(f"Finished: {100*self.all_finished/self.num_running_thread}% of processes")
         self.info("Mapping GUI done!")
 
     def show_stream(self, rank, input_queue: mp.Queue, run=True) -> None:
         self.info("OpenCV Image stream thread started!")
         self.all_trigered += 1
 
-        while (self.tracking_finished < 1 or self.backend_finished < 1) and run:
+        while (self.tracking_finished + self.backend_finished < 2) and run:
             if not input_queue.empty():
                 try:
                     rgb = input_queue.get()
@@ -390,7 +387,7 @@ class SLAM:
             str(self.cfg.run_mapping),
             str(self.cfg.stride),
             str(self.backend.enable_loop),
-            self.dataset.input_folder,
+            stream.input_folder,
             self.cfg.mode,
             result_ate["mean"],
         ]
@@ -436,7 +433,7 @@ class SLAM:
         # self.save_state()  ## this is not reached
         if self.do_evaluate:
             self.info("Doing evaluation!")
-            self.evaluate(stream, gaussian_mapper_last_state)
+            self.evaluate(stream, gaussian_mapper_last_state=gaussian_mapper_last_state)
             self.info("Evaluation complete")
 
         for i, p in enumerate(processes):
@@ -485,14 +482,8 @@ class SLAM:
 
         # Wait for all processes to have finished before terminating and for final mapping update to be transmitted
         if self.cfg.run_mapping:
-            while self.mapping_queue.empty() and self.all_finished < self.num_running_thread:
+            while self.mapping_queue.empty():
                 pass
-
-            ###
-            # Perform intermediate computations you would want to do, e.g. return the last map for evaluation
-            # Since all processes run here until finished, this requires some add. multi-threading flags for synchronization
-            ###
-
             # Receive the final update, so we can do something with it ...
             a = self.mapping_queue.get()
             self.info("Received final mapping update!")
@@ -501,13 +492,13 @@ class SLAM:
                 gaussian_mapper_last_state = None
             else:
                 gaussian_mapper_last_state = clone_obj(a)
-            self.received_mapping.set()
             del a  # NOTE Always delete receive object from a multiprocessing Queue!
+            self.received_mapping.set()
 
+        # Let the processes run until they are finished (When using GUI's these need to be closed manually)
         else:
+            while self.all_finished < self.num_running_thread:
+                pass
             gaussian_mapper_last_state = None
-
-        while self.all_finished < self.num_running_thread:
-            pass
 
         self.terminate(processes, stream, gaussian_mapper_last_state)
