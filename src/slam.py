@@ -82,6 +82,9 @@ class SLAM:
         self.visualizing_finished = torch.zeros((1)).int()
         self.visualizing_finished.share_memory_()
 
+        self.mapping_visualizing_finished = torch.zeros((1)).int()
+        self.mapping_visualizing_finished.share_memory_()
+
         # Insert a dummy delay to snychronize frontend and backend as needed
         self.sleep_time = cfg.get("sleep_delay", 3)
         # Delete backend when hitting this threshold, so we can keep going with just frontend
@@ -109,14 +112,12 @@ class SLAM:
 
         if cfg.run_mapping_gui and cfg.run_mapping and not cfg.evaluate:
             self.q_main2vis = mp.Queue()
-            self.q_vis2main = mp.Queue()
-            self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs=(self.q_main2vis, self.q_vis2main))
+            self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs=(self.q_main2vis))
             self.params_gui = gui_utils.ParamsGUI(
                 pipe=cfg.mapping.pipeline_params,
                 background=self.gaussian_mapper.background,
                 gaussians=self.gaussian_mapper.gaussians,
                 q_main2vis=self.q_main2vis,
-                q_vis2main=self.q_vis2main,
             )
         else:
             self.gaussian_mapper = GaussianMapper(cfg, self)
@@ -206,7 +207,7 @@ class SLAM:
 
         self.tracking_finished += 1
         self.all_finished += 1
-        self.info("Tracking done!")
+        self.info("Frontend Tracking done!")
 
     def get_ram_usage(self):
         free_mem, total_mem = torch.cuda.mem_get_info(device=self.device)
@@ -234,7 +235,7 @@ class SLAM:
             self.backend.to(self.device)
 
     def global_ba(self, rank, run=False):
-        self.info("Full Bundle Adjustment thread started!")
+        self.info("Backend thread started!")
         self.all_trigered += 1
 
         while self.tracking_finished < 1 and run:
@@ -264,7 +265,7 @@ class SLAM:
 
         self.backend_finished += 1
         self.all_finished += 1
-        self.info("Full Bundle Adjustment done!")
+        self.info("Backend done!")
 
     def gaussian_mapping(self, rank, run, mapping_queue: mp.Queue, received_mapping: mp.Event):
         self.info("Gaussian Mapping Triggered!")
@@ -280,6 +281,9 @@ class SLAM:
             finished = self.gaussian_mapper(mapping_queue, received_mapping, True)
 
         self.gaussian_mapping_finished += 1
+        while self.mapping_visualizing_finished < 1:
+            pass
+
         self.all_finished += 1
         self.info("Gaussian Mapping Done!")
 
@@ -299,9 +303,21 @@ class SLAM:
         self.info("Mapping GUI thread started!")
         self.all_trigered += 1
         finished = False
+
         while (self.tracking_finished + self.backend_finished < 2) and run and not finished:
             finished = slam_gui.run(self.params_gui)
 
+        # Wait for Gaussian Mapper to be finished so nothing new is put into the queue anymore
+        while self.gaussian_mapping_finished < 1:
+            pass
+
+        # empty all the guis that are in params_gui so this will for sure get empty
+        while not self.params_gui.q_main2vis.empty():
+            obj = self.params_gui.q_main2vis.get()
+            a = clone_obj(obj)
+            del obj
+
+        self.mapping_visualizing_finished += 1
         self.all_finished += 1
         self.info("Mapping GUI done!")
 
@@ -437,6 +453,7 @@ class SLAM:
             self.info("Evaluation complete")
 
         for i, p in enumerate(processes):
+            p.terminate()
             p.join()
             self.info("Terminated process {}".format(p.name))
         self.info("Terminate: Done!")
@@ -465,14 +482,14 @@ class SLAM:
             mp.Process(target=self.global_ba, args=(2, self.cfg.run_backend), name="Backend"),
             mp.Process(target=self.visualizing, args=(3, self.cfg.run_visualization), name="Visualizing"),
             mp.Process(
-                target=self.mapping_gui,
-                args=(4, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
-                name="Mapping GUI",
+                target=self.gaussian_mapping,
+                args=(4, self.cfg.run_mapping, self.mapping_queue, self.received_mapping),
+                name="Gaussian Mapping",
             ),
             mp.Process(
-                target=self.gaussian_mapping,
-                args=(5, self.cfg.run_mapping, self.mapping_queue, self.received_mapping),
-                name="Gaussian Mapping",
+                target=self.mapping_gui,
+                args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
+                name="Mapping GUI",
             ),
         ]
 
@@ -497,8 +514,9 @@ class SLAM:
 
         # Let the processes run until they are finished (When using GUI's these need to be closed manually)
         else:
-            while self.all_finished < self.num_running_thread:
-                pass
             gaussian_mapper_last_state = None
+
+        while self.all_finished < self.num_running_thread:
+            pass
 
         self.terminate(processes, stream, gaussian_mapper_last_state)

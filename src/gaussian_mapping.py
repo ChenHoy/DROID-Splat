@@ -79,7 +79,7 @@ class GaussianMapper(object):
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if gui_qs is not None:
-            self.q_main2vis, self.q_vis2main = gui_qs
+            self.q_main2vis = gui_qs
             self.use_gui = True
         else:
             self.use_gui = False
@@ -412,8 +412,10 @@ class GaussianMapper(object):
         depth_pixel_mask = ((cam.depth > 0.01) * (cam.depth < 1e7)).view(*depth.shape)
 
         if with_edge_weight:
-            edge_mask_x, edge_mask_y = image_gradient_mask(cam.original_image)  # Use gt reference image for edge weight
-            edge_mask = edge_mask_x | edge_mask_y # Combine with logical OR
+            edge_mask_x, edge_mask_y = image_gradient_mask(
+                cam.original_image
+            )  # Use gt reference image for edge weight
+            edge_mask = edge_mask_x | edge_mask_y  # Combine with logical OR
             rgb_mask = rgb_pixel_mask.float() * edge_mask.float()
         else:
             rgb_mask = rgb_pixel_mask.float()
