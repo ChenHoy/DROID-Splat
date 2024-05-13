@@ -29,6 +29,7 @@ def render(
     scaling_modifier=1.0,
     override_color=None,
     mask=None,
+    device: str = "cuda",
 ):
     """
     Render the scene.
@@ -37,10 +38,10 @@ def render(
     """
 
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-    if pc.get_xyz.shape[0] == 0:
+    if len(pc.get_xyz) == 0:
         return None
 
-    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device=device) + 0
     try:
         screenspace_points.retain_grad()
     except Exception:
@@ -133,6 +134,9 @@ def render(
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
+    # FIXME chen: we sometimes get: "RuntimeError: CUDA error: an illegal memory access was encountered"
+    # when calling radii > 0
+    # This is likely when the map gets out of control and we crash
     return {
         "render": rendered_image,
         "viewspace_points": screenspace_points,
