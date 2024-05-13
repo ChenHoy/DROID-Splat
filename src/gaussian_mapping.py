@@ -50,7 +50,6 @@ class GaussianMapper(object):
         self.save_renders = cfg.mapping.save_renders
         self.warmup = max(cfg.mapping.warmup, cfg.tracking.warmup)
         self.batch_mode = cfg.mapping.batch_mode  # Take a batch of all unupdated frames at once
-
         self.optimize_poses = cfg.mapping.optimize_poses
         self.opt_params = cfg.mapping.opt_params
         self.pipeline_params = cfg.mapping.pipeline_params
@@ -66,7 +65,7 @@ class GaussianMapper(object):
 
         self.sh_degree = 3 if cfg.mapping.use_spherical_harmonics else 0
         self.gaussians = GaussianModel(self.sh_degree, config=cfg.mapping.input)
-        self.gaussians.init_lr(cfg.mapping.init_lr)
+        self.gaussians.init_lr(self.opt_params.init_lr)
         self.gaussians.training_setup(self.opt_params)
 
         bg_color = [1, 1, 1]  # White background
@@ -290,8 +289,8 @@ class GaussianMapper(object):
 
             loss += self.mapping_rgbd_loss(image, depth, view)
             # Only take into account last frames and not random ones for occlusion checks
-            if self.last_idx - view.uid < self.n_last_frames:
-                self.occ_aware_visibility[view.uid] = (n_touched > 0).long()
+            # if self.last_idx - view.uid < self.n_last_frames:
+            #     self.occ_aware_visibility[view.uid] = (n_touched > 0).long()
 
         # Regularize scale changes of the Gaussians
         scaling = self.gaussians.get_scaling
@@ -367,19 +366,26 @@ class GaussianMapper(object):
         return alpha * l1_rgb.mean() + (1 - alpha) * l1_depth.mean()
 
     def plot_losses(self) -> None:
-        fig, ax = plt.subplots()
-        ax.set_yscale("log")
-        ax.set_title(
-            f"Mode: {self.mode}. Optimize poses: {self.optimize_poses}. Gaussians: {self.gaussians.get_xyz.shape[0]}"
-        )
-        ax.plot(self.loss_list[-self.refinement_iters :])
+        fig, ax = plt.subplots(2,1)
+        ax[0].set_title(f"Loss evolution.{self.gaussians.get_xyz.shape[0]} gaussians")
+        ax[0].set_yscale("log")
+        ax[0].plot(self.loss_list)
+
+        ax[1].set_yscale("log")
+        ax[1].plot(self.loss_list[-self.refinement_iters:])
         plt.savefig(f"{self.output}/loss_{self.mode}.png")
 
     # TODO chen: is this really the same as MonoGS pruning strategy? They seem to have much more code?
-    def prune_gaussians(self):
+    def covisibility_pruning(self):
         """Covisibility based pruning"""
 
         new_frames = (self.cameras + self.new_cameras)[-self.n_last_frames :]
+
+        self.occ_aware_visibility = {}
+        for view in new_frames:
+            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background)
+            self.occ_aware_visibility[view.uid] = (render_pkg["n_touched"] > 0).long()
+
         new_idx = [view.uid for view in new_frames]
         sorted_frames = sorted(new_idx, reverse=True)
 
@@ -389,12 +395,12 @@ class GaussianMapper(object):
 
         # Gaussians added on the last prune_last frames
         mask = self.gaussians.unique_kfIDs >= sorted_frames[self.kf_mng_params.prune_last - 1]
-
         to_prune = torch.logical_and(self.gaussians.n_obs <= self.kf_mng_params.visibility_th, mask)
-        self.gaussians.prune_points(to_prune.cuda())
-        for idx in new_idx:
-            self.occ_aware_visibility[idx] = self.occ_aware_visibility[idx][~to_prune]
-        self.info(f"Covisibility based pruning removed {to_prune.sum()} gaussians")
+        if to_prune.sum() > 0:
+            self.gaussians.prune_points(to_prune.cuda())
+            # for idx in new_idx:
+            #     self.occ_aware_visibility[idx] = self.occ_aware_visibility[idx][~to_prune]
+        self.info(f"Covisibility pruning removed {to_prune.sum()} gaussians")
 
     def abs_visibility_prune(self, threshold: int = None):
         """
@@ -407,7 +413,6 @@ class GaussianMapper(object):
             render_pkg = render(view, self.gaussians, self.pipeline_params, self.background)
             self.occ_aware_visibility[view.uid] = (render_pkg["n_touched"] > 0).long()
 
-        # print(self.occ_aware_visibility[1])
         self.gaussians.n_obs.fill_(0)
         for _, visibility in self.occ_aware_visibility.items():
             self.gaussians.n_obs += visibility.cpu()
@@ -416,7 +421,8 @@ class GaussianMapper(object):
             threshold = self.kf_mng_params.abs_visibility_th
 
         mask = self.gaussians.n_obs < threshold
-        self.gaussians.prune_points(mask.cuda())
+        if mask.sum() > 0:
+            self.gaussians.prune_points(mask.cuda())
         self.info(f"Absolute visibility pruning removed {mask.sum()} gaussians")
 
     # TODO chen: is this implemented in a reference?
@@ -445,7 +451,7 @@ class GaussianMapper(object):
         self.info("\nMapping refinement starting")
         # NOTE MonoGS does 26k iterations for a single camera, while we do 100 for multiple cameras
         # NOTE chen: always optimize poses here to refine with more information
-        self.map_refinement(num_iters=self.refinement_iters, color_only=True, optimize_poses=True)
+        self.map_refinement(num_iters=self.refinement_iters, color_only=True, optimize_poses=self.optimize_poses)
         self.info("Mapping refinement finished")
         self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
         self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
@@ -514,16 +520,18 @@ class GaussianMapper(object):
             for iter in range(self.mapping_iters):
                 frames = self.select_keyframes()[0] + self.new_cameras
                 loss = self.mapping_step(
-                    iter, frames, self.kf_mng_params.mapping, densify=True, optimize_poses=self.optimize_poses
+                    iter, frames, self.kf_mng_params.mapping, densify=True, optimize_poses=False
                 )
                 self.loss_list.append(loss / len(frames))
 
-            print(
-                colored(f"[Gaussian mapping] Loss:  {loss / len(frames)}", "green")
-            )  # Keep track of how well the Rendering is doing
-            # TODO leon: is it necessary at every frame?
-            if self.last_idx % 1 == 0 and self.last_idx > self.n_last_frames:
-                self.abs_visibility_prune()
+            self.info(f"[Gaussian mapping] Loss:  {loss / len(frames)}") # Keep track of how well the Rendering is doing
+
+
+            if len(self.iteration_info) % 1 == 0:
+                if self.kf_mng_params.prune_mode == "abs":
+                    self.abs_visibility_prune() # Absolute visibility pruning for all gaussians
+                elif self.kf_mng_params.prune_mode == "new":
+                    self.covisibility_pruning() # Covisibility pruning for recently added gaussians
 
             # Update visualization
             if self.use_gui:

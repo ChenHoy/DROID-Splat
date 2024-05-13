@@ -1,7 +1,7 @@
 warmup: 10 # Wait until tracking gets to this frame
-delay: 2 # Delay between tracking and mapping
-mapping_iters: 20 # Optimization iterations for selected views
-refinement_iters: 50 # Final Optimization iterations for all views
+delay: 3 # Delay between tracking and mapping
+mapping_iters: 50 # Optimization iterations for selected views
+refinement_iters: 200 # Final Optimization iterations for all views
 
 batch_mode: False # Only update a constant sized batch of frames
 save_renders: False
@@ -13,16 +13,19 @@ filter_uncertainty: True
 optimize_poses: False
 feedback_mapping: False
 
-init_lr: 6.0
-
+ 
 # Strategy for adding / pruning Gaussians
 keyframes:
-  n_last_frames: 3 # Always optimize the last n frames
-  n_rand_frames: 15 # Optimize random global frames on top
+  n_last_frames: 10 # Always optimize the last n frames
+  n_rand_frames: 5 # Optimize random global frames on top
   default_batch_size: 3 # Only add 5 frames at once to increase latency when batch_mode is deactivated
-  prune_every: 15 # How often to prune gaussians
-  visibility_th: 3 # Gaussians should be pruned based on covisibility
-  prune_last: 5
+  prune_every: 15 # How often to prune gaussians during mapping refinement
+
+  prune_mode: "abs" # "abs" or "new" for absolute or recent pruning
+
+  visibility_th: 2 # Gaussians not visible by visibility_th other frames are pruned
+  prune_last: 5 # Gaussians added in the last prune_last are pruned
+
   abs_visibility_th: 2 # Remove gaussians that are not seen by at least this many other frames
 
   filter: # Parameter for filtering incoming points from the SLAM system
@@ -31,7 +34,7 @@ keyframes:
     confidence_thresh: 0.3 # Only take pixels above this confidence
 
   mapping:
-    densify_grad_threshold: 0.0001
+    densify_grad_threshold: 0.0002
     size_threshold: 20
     opacity_th: 0.01
     gaussian_extent: 5
@@ -43,6 +46,7 @@ keyframes:
     gaussian_extent: 2
 
 opt_params:
+  init_lr: 6.0
   position_lr_init: 0.00016
   position_lr_final: 0.0000016
   position_lr_delay_mult: 0.01
@@ -53,8 +57,8 @@ opt_params:
   rotation_lr: 0.001
   percent_dense: 0.01
 
-  cam_rot_delta: 0.0003
-  cam_trans_delta: 0.0001
+  cam_rot_delta: 0.000003
+  cam_trans_delta: 0.000001
 
 loss:
   alpha: 0.90 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
