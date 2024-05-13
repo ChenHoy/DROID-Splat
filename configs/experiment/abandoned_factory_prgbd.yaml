@@ -26,3 +26,10 @@ tracking:
     loop_thresh: 25.0  
     loop_radius: 2
     loop_nms: 5
+
+mapping:
+  batch_mode: True
+  keyframes:
+    abs_visibility_th: 0
+  loss:
+    beta: 2
