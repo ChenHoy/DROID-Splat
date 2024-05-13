@@ -215,6 +215,7 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
     - [x] Optimization turns instable over longer windows and large scenes. What is the source?
     - [x] Fix scale parameters after optimizing them once?
 - [x] Use both multi-view consistency and uncertainty to filter the map before sending to Renderer
+- [x] Use SSIM and depth regularization loss configurable in mapping loss
 - [ ] Backpropagate the pose loss from the Rendering objective into the SLAM tracking
     - [x] Optimize poses with additional optimizer
     - [ ] Evaluate optimized poses with new metrics
@@ -237,7 +238,7 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
 - [ ] Test / Evaluate code on monocular scenes with GSplatting Mapping
 - [ ] How well does our new mapping work on unbounded / outdoor scenes?
   - [ ] Kitti for driving
-  - [ ] TartanAir for drone like odometries
+  - [x] TartanAir for drone like odometries -> works well, but memory management needs to be taken care of
   
 # Potential Future Features
 - [ ] Change the Gaussian Splatting formulation to a variant like [Dynamic Gaussian Splatting](https://github.com/JonathonLuiten/Dynamic3DGaussians)
