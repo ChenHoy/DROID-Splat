@@ -31,7 +31,7 @@ keyframes:
   filter: # Parameter for filtering incoming points from the SLAM system
     mv_count_thresh: 2 # Pixels need to be consistent within bin_thresh distance across these k views
     bin_thresh: 0.1
-    confidence_thresh: 0.3 # Only take pixels above this confidence
+    confidence_thresh: 0.1 # Only take pixels above this confidence
 
   mapping:
     densify_grad_threshold: 0.0002
@@ -57,20 +57,52 @@ opt_params:
   rotation_lr: 0.001
   percent_dense: 0.01
 
-  cam_rot_delta: 0.000003
-  cam_trans_delta: 0.000001
+  cam_rot_delta: 0.0003
+  cam_trans_delta: 0.0001
+
+# What we want: 
+# alpha * Color_loss + (1 - alpha ) * Depth_loss + regularizors
+
+# We always have:
+# alpha * l1(img, gt) + (1 - alpha) * l1(depth, gt) + beta * regularize_scales(gaussians)
+# i) We might want to weight both l1 losses depending on the image gradient
+# -> mask = image_gradient_mask() # TODO does this work correctly?, we get img_grad_v, img_grad_h out of this, i.e. x,y masks
+# -> Reformulate all loss computations to accept an external mask which we can now apply
+# ii) use a more complex color_loss similar to what is done in monocular depth estimation 
+# -> color_loss = alpha2 * l1 + (1 - alpha2) * ssim
+
+
+# What we want: 
+# alpha * Color_loss + (1 - alpha ) * Depth_loss + regularizors
+
+# We always have:
+# alpha * l1(img, gt) + (1 - alpha) * l1(depth, gt) + beta * regularize_scales(gaussians)
+# i) We might want to weight both l1 losses depending on the image gradient
+# -> mask = image_gradient_mask() # TODO does this work correctly?, we get img_grad_v, img_grad_h out of this, i.e. x,y masks
+# -> Reformulate all loss computations to accept an external mask which we can now apply
+# ii) use a more complex color_loss similar to what is done in monocular depth estimation 
+# -> color_loss = alpha2 * l1 + (1 - alpha2) * ssim
+
 
 loss:
-  alpha: 0.90 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
-  beta: 5.0 # Regularizer on scale changes of the Gaussians
+  # Decide which loss terms to use
+  with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
+  use_ssim: True # Use SSIM on top of L1 loss
+  use_depth_smoothness_reg: True # Similarity loss between depth and image gradients
+
   rgb_boundary_threshold: 0.01 # Pixel information in an image needs to be at least higher than this 
+  ### Loss weights
+  alpha1: 0.90 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha2: 0.85 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
+  beta: 5.0 # Regularizer on scale changes of the Gaussians
+  beta2: 0.001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
 # Parameters for transfer SLAM -> Renderer
 input:
   sensor_type: 'depth'
-  pcd_downsample: 64
-  pcd_downsample_init: 32
-  adaptive_pointsize: True
+  pcd_downsample_init: 16
+  pcd_downsample: 32
+  adaptive_pointsize: False
   point_size: 0.05
   type: 'replica'
 

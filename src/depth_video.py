@@ -32,12 +32,15 @@ class DepthVideo:
             raise Exception("Camera model not implemented! Choose either pinhole or mei model.")
         self.opt_intr = cfg.opt_intr
 
-        self.counter = Value("i", 0)
         self.ready = Value("i", 0)
-        self.mapping = Value("i", 0)
+        self.counter = Value("i", 0)
+
+        # FIXME chen: do we really need multiple locks or can we simply use the same locking mechanism to assert thread safety?
         # NOTE we have multiple lock to avoid deadlocks between bundle adjustment and frontend loop closure
+        # TODO we can get rid of these
+        self.mapping = Value("i", 0)
         self.ba_lock = {"local": Value("i", 0), "global": Value("i", 0)}
-        self.global_ba_lock = Value("i", 0)
+
         ht = cfg.data.cam.H_out
         self.ht = ht
         wd = cfg.data.cam.W_out
@@ -258,7 +261,8 @@ class DepthVideo:
     def get_mapping_item(self, index, device="cuda:0"):
         """Get a part of the video to transfer to the Rendering module"""
 
-        with self.mapping.get_lock():
+        # with self.mapping.get_lock():
+        with self.get_lock():
             if self.upsampled:
                 image = self.images[index].clone().permute(1, 2, 0).contiguous().to(device)  # [h, w, 3]
                 intrinsics = self.intrinsics[0].clone().contiguous().to(device) * self.scale_factor  # [4]
@@ -271,13 +275,13 @@ class DepthVideo:
             est_disp = self.disps_clean[index].clone().to(device)  # [h, w]
             est_depth = 1.0 / (est_disp + 1e-7)
 
-        # origin alignment
-        w2c = lietorch.SE3(self.poses[index].clone()).to(device)  # Tw(droid)_to_c
-        c2w = w2c.inv().matrix()  # [4, 4]
+            # origin alignment
+            w2c = lietorch.SE3(self.poses[index].clone()).to(device)  # Tw(droid)_to_c
+            c2w = w2c.inv().matrix()  # [4, 4]
 
-        gt_c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
-        depth = est_depth
-        # depth = gt_depth
+            gt_c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
+            depth = est_depth
+            # depth = gt_depth
 
         return image, depth, intrinsics, c2w, gt_c2w
 
@@ -458,8 +462,9 @@ class DepthVideo:
 
         intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same
 
-        lock = self.get_lock() if ba_type is None else self.get_ba_lock(ba_type)
-        with lock:
+        # lock = self.get_lock() if ba_type is None else self.get_ba_lock(ba_type)
+        # with lock:
+        with self.get_lock():
 
             # Store the uncertainty maps for source frames, that will get updated
             uncertainty, idx = self.reduce_uncertainties(weight, ii)
@@ -504,8 +509,7 @@ class DepthVideo:
         We keep the poses fixed, since this would create an unnecessary ambiguity and can make the system unstable!
         We optimize scale and shift parameters on top of the scene disparity.
         """
-        lock = self.get_lock()
-        with lock:
+        with self.get_lock():
             # [t0, t1] window of bundle adjustment optimization
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1

@@ -10,6 +10,7 @@ import hydra
 
 from src.slam import SLAM
 from src.datasets import get_dataset
+from hydra.core.hydra_config import HydraConfig
 
 """
 Run the SLAM system on a given dataset or on image folder.
@@ -76,7 +77,7 @@ def run_slam(cfg):
 
     sys_print(f"\n\n** Running {cfg.data.input_folder} in {cfg.mode} mode!!! **\n\n")
     dataset = get_dataset(cfg, device=cfg.device)
-    slam = SLAM(cfg)
+    slam = SLAM(cfg, output_folder=output_folder)
 
     sys_print(f"Running on {len(dataset)} frames")
     slam.run(dataset)

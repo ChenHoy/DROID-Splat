@@ -623,6 +623,7 @@ def run(params_gui=None):
     app.initialize()
     win = SLAM_GUI(params_gui)
     app.run()
+    return True
 
 
 def main():

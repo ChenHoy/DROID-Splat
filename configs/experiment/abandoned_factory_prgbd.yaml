@@ -3,11 +3,12 @@ defaults:
   - override /data: TartanAir/abandonedfactory
   - override /tracking: tartanair
 
-sleep_delay: 2.0
+sleep_delay: 3.0
 
+# NOTE the parameters here also depend on the number of strides you choose!
 tracking:
   motion_filter:
-    thresh: 6.0 
+    thresh: 5.0 
 
   frontend:
     thresh: 20.0 
