@@ -60,30 +60,6 @@ opt_params:
   cam_rot_delta: 0.0003
   cam_trans_delta: 0.0001
 
-# What we want: 
-# alpha * Color_loss + (1 - alpha ) * Depth_loss + regularizors
-
-# We always have:
-# alpha * l1(img, gt) + (1 - alpha) * l1(depth, gt) + beta * regularize_scales(gaussians)
-# i) We might want to weight both l1 losses depending on the image gradient
-# -> mask = image_gradient_mask() # TODO does this work correctly?, we get img_grad_v, img_grad_h out of this, i.e. x,y masks
-# -> Reformulate all loss computations to accept an external mask which we can now apply
-# ii) use a more complex color_loss similar to what is done in monocular depth estimation 
-# -> color_loss = alpha2 * l1 + (1 - alpha2) * ssim
-
-
-# What we want: 
-# alpha * Color_loss + (1 - alpha ) * Depth_loss + regularizors
-
-# We always have:
-# alpha * l1(img, gt) + (1 - alpha) * l1(depth, gt) + beta * regularize_scales(gaussians)
-# i) We might want to weight both l1 losses depending on the image gradient
-# -> mask = image_gradient_mask() # TODO does this work correctly?, we get img_grad_v, img_grad_h out of this, i.e. x,y masks
-# -> Reformulate all loss computations to accept an external mask which we can now apply
-# ii) use a more complex color_loss similar to what is done in monocular depth estimation 
-# -> color_loss = alpha2 * l1 + (1 - alpha2) * ssim
-
-
 loss:
   # Decide which loss terms to use
   with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
