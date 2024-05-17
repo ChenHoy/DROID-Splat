@@ -59,12 +59,12 @@ def create_window(window_size: int, channel: int):
     return window
 
 
-def ssim(img1: torch.Tensor, img2: torch.Tensor, window_size: int = 11, size_average: bool = True) -> float:
+def ssim_torch(img1: torch.Tensor, img2: torch.Tensor, window_size: int = 11, size_average: bool = True) -> float:
     channel = img1.size(-3)
     window = create_window(window_size, channel)
 
     if img1.is_cuda:
-        window = window.cuda(img1.get_device())
+        window = window.to(img1.device)
     window = window.type_as(img1)
 
     return _ssim(img1, img2, window, window_size, channel, size_average)

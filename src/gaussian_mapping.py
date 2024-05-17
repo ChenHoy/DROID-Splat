@@ -1,10 +1,14 @@
 import os
+import ipdb
 from copy import deepcopy
 from typing import List, Dict, Optional
 from termcolor import colored
+from tqdm import tqdm
 
 import torch
 import torch.multiprocessing as mp
+import lietorch
+
 import open3d as o3d
 import numpy as np
 import cv2
@@ -13,8 +17,14 @@ import matplotlib.pyplot as plt
 from .gaussian_splatting.gui import gui_utils, slam_gui
 from .gaussian_splatting.gaussian_renderer import render
 from .gaussian_splatting.scene.gaussian_model import GaussianModel
-from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2, focal2fov
-from .gaussian_splatting.utils.loss_utils import l1_loss, ssim
+from .gaussian_splatting.utils.graphics_utils import (
+    getProjectionMatrix2,
+    getWorld2View2,
+    focal2fov,
+    getProjectionMatrix3,
+)
+from .gaussian_splatting.utils.loss_utils import l1_loss
+from pytorch_msssim import ssim, ms_ssim
 from .gaussian_splatting.slam_utils import depth_reg, image_gradient_mask
 from .gaussian_splatting.multiprocessing_utils import clone_obj
 from .gaussian_splatting.camera_utils import Camera
@@ -53,6 +63,7 @@ class GaussianMapper(object):
         self.batch_mode = cfg.mapping.batch_mode  # Take a batch of all unupdated frames at once
         self.optimize_poses = cfg.mapping.optimize_poses
         self.opt_params = cfg.mapping.opt_params
+        self.feedback_map = cfg.mapping.feedback_mapping
         self.pipeline_params = cfg.mapping.pipeline_params
         self.kf_mng_params = cfg.mapping.keyframes
         # Always take n last frames from current index and optimize additional random frames globally
@@ -76,6 +87,9 @@ class GaussianMapper(object):
 
         bg_color = [1, 1, 1]  # White background
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+        self.z_near = 0.001
+        self.z_far = 100000.0
 
         if gui_qs is not None:
             self.q_main2vis = gui_qs
@@ -135,25 +149,35 @@ class GaussianMapper(object):
             self.info(f"Warning. Trying to intialize from empty frame {idx}!")
             return None
 
-        color, depth, intrinsics, c2w, _ = self.video.get_mapping_item(idx, self.device)
+        scale_adjustment = 1.0
+        color, depth, intrinsics, c2w, _ = self.video.get_mapping_item(
+            idx, self.device, scale_adjustment=scale_adjustment
+        )
         return self.camera_from_frame(idx, color, depth, intrinsics, c2w)
 
+    # TODO this can be called with depth=None
+    # do this for when we interpolate the keyframe poses to include nonkeyframe ones
     def camera_from_frame(
-        self, idx: int, image: torch.Tensor, depth: torch.Tensor, intrinsic: torch.Tensor, gt_pose: torch.Tensor
+        self,
+        idx: int,
+        image: torch.Tensor,
+        depth: Optional[torch.Tensor],
+        intrinsic: torch.Tensor,
+        gt_pose: torch.Tensor,
     ):
         """Given the image, depth, intrinsic and pose, creates a Camera object."""
         fx, fy, cx, cy = intrinsic
 
         height, width = image.shape[1:]
-        gt_pose = torch.linalg.inv(gt_pose)  # They invert the poses in the dataloader
-        znear = 0.01
-        zfar = 1000.0  # TODO make this configurable?
+        gt_pose = torch.linalg.inv(gt_pose)
         fovx = focal2fov(fx, width)
         fovy = focal2fov(fy, height)
 
         if self.projection_matrix is None:
             self.projection_matrix = (
-                getProjectionMatrix2(znear, zfar, cx, cy, fx, fy, width, height).transpose(0, 1).to(self.device)
+                getProjectionMatrix2(self.z_near, self.z_far, cx, cy, fx, fy, width, height)
+                .transpose(0, 1)
+                .to(self.device)
             )
 
         return Camera(
@@ -175,6 +199,7 @@ class GaussianMapper(object):
 
     def get_new_cameras(self):
         """Get all new cameras from the video."""
+        # Only add a batch of cameras in batch_mode
         if self.batch_mode:
             to_add = range(self.last_idx, self.cur_idx - self.delay)
             to_add = to_add[: self.kf_mng_params.default_batch_size]
@@ -249,10 +274,38 @@ class GaussianMapper(object):
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         cv2.imwrite(render_path, bgr)
 
+    def get_nonkeyframe_cameras(self, stream, trajectory_filler, batch_size: int = 16):
+        """Our SLAM system operates mainly on keyframes.
+        This is good enough to build a very detailed map,
+        but we can get even finer details when including intermediate keyframes as well!
+        Since we dont store all frames when iterating over the datastream, this requires
+        reiterating over the stream again and interpolating between poses.
+
+        NOTE Use this only after tracking finished for refining!
+        """
+        all_poses, all_timestamps = trajectory_filler(stream, batch_size=batch_size, return_tstamps=True)
+        already_mapped = [self.video.timestamp[cam.uid] for cam in self.cameras]
+        intrinsic = self.video.intrinsics[0].to(self.device)  # We have the same global optimized intrinsics
+        new_cams = []
+
+        for w2c, timestamp in tqdm(zip(all_poses, all_timestamps)):
+            if timestamp in already_mapped:
+                continue
+
+            c2w = w2c.inv().matrix()  # [4, 4]
+            # color = stream._get_image(timestamp).squeeze(0).permute(1, 2, 0).contiguous().to(self.device)
+            color = stream._get_image(timestamp).squeeze(0).contiguous().to(self.device)
+            cam = self.camera_from_frame(timestamp, color, None, intrinsic, c2w)
+            cam.update_RT(cam.R_gt, cam.T_gt)  # Assuming we found the best pose in tracking
+            new_cams.append(cam)
+
+        return new_cams
+
     def map_refinement(self, num_iters: int = 100, optimize_poses: bool = False) -> None:
         """Refine the map with color only optimization. Instead of going over last frames, we always select random frames from the whole map."""
 
-        self.abs_visibility_prune(self.kf_mng_params.abs_visibility_th)  
+        self.abs_visibility_prune(self.kf_mng_params.abs_visibility_th)
+
         for iter in range(num_iters):
             loss = self.mapping_step(
                 iter, self.cameras, self.kf_mng_params.refinement, densify=True, optimize_poses=optimize_poses
@@ -267,18 +320,43 @@ class GaussianMapper(object):
                     )
                 )
 
+    def get_mapping_update(self, frames: List[Camera]) -> Dict:
+        """Get the index, poses and depths of the frames that were already optimized."""
+
+        # Render frames to extract depth
+        index, poses, depths = [], [], []
+        for view in frames:
+            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
+            # NOTE chen: this can be None when self.gaussians is 0. This could happen in some cases
+            if render_pkg is None:
+                self.info(f"Skipping view {view.uid} as no gaussians are present ...")
+                if self.optimize_poses:
+                    poses.append(None)
+                depths.append(None)
+                index.append(None)
+            else:
+                index.append(view.uid)
+                # if self.optimize_poses:
+                transform = torch.eye(4, device=self.device)
+                transform[:3, :3], transform[:3, 3] = view.R, view.T
+                poses.append(transform)
+                depths.append(render_pkg["depth"])
+
+        return {"index": index, "poses": poses, "depths": depths}
+
     def mapping_step(
         self, iter: int, frames: List[Camera], kf_mng_params: Dict, densify: bool = True, optimize_poses: bool = False
     ) -> float:
         """
         Takes the list of selected keyframes to optimize and performs one step of the mapping optimization.
         """
-        if optimize_poses:
-            pose_optimizer = self.pose_optimizer(self.cameras)
-
         # Sanity check when we dont have anything to optimize
         if len(self.gaussians.get_xyz) == 0:
             return 0.0
+
+        if optimize_poses:
+            pose_optimizer = self.pose_optimizer(frames)
+            # pose_optimizer = self.pose_optimizer(self.cameras + frames)
 
         loss = 0.0
         self.occ_aware_visibility = {}
@@ -303,8 +381,8 @@ class GaussianMapper(object):
                 with_depth_smoothness=self.loss_params.use_depth_smoothness_reg,
             )
             # Only take into account last frames and not random ones for occlusion checks
-            # if self.last_idx - view.uid < self.n_last_frames:
-            #     self.occ_aware_visibility[view.uid] = (n_touched > 0).long()
+            if self.last_idx - view.uid < self.n_last_frames:
+                self.occ_aware_visibility[view.uid] = (n_touched > 0).long()
 
         # Regularize scale changes of the Gaussians
         scaling = self.gaussians.get_scaling
@@ -313,6 +391,7 @@ class GaussianMapper(object):
         loss.backward()
 
         with torch.no_grad():
+            # Dont let Gaussians grow too much
             self.gaussians.max_radii2D[visibility_filter] = torch.max(
                 self.gaussians.max_radii2D[visibility_filter],
                 radii[visibility_filter],
@@ -322,9 +401,9 @@ class GaussianMapper(object):
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
             if self.last_idx > self.n_last_frames and (iter + 1) % self.kf_mng_params.prune_every == 0:
-                # if self.mode != "rgbd":
-                #     self.covisibility_pruning() # Covisibility based pruning for recently added gaussians
                 # NOTE leon: monogs uses this covisibility pruning because they dont have such a good depth estimation
+                # if self.mode != "rgbd":
+                #     self.covisibility_pruning()  # Covisibility based pruning for recently added gaussians
                 self.gaussians.densify_and_prune(  # General pruning based on opacity and size + densification
                     kf_mng_params.densify_grad_threshold,
                     kf_mng_params.opacity_th,
@@ -336,13 +415,15 @@ class GaussianMapper(object):
             self.gaussians.optimizer.zero_grad()
             self.gaussians.update_learning_rate(iter)
 
+            # TODO does this really change things?
             if optimize_poses:
                 pose_optimizer.step()
                 pose_optimizer.zero_grad()
+                # NOTE chen: we go over all poses that were affected by the pose optimization
                 for view in frames:
                     update_pose(view)
 
-            return loss.item()
+        return loss.item()
 
     def color_loss(
         self,
@@ -358,11 +439,17 @@ class GaussianMapper(object):
         if mask is None:
             mask = torch.ones_like(image, device=self.device)
 
+        # FIXME chen: this exposure trick changes the data range in a data driven way
+        # should we always read out the range afterwards?
         image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
         l1_rgb = l1_loss(image, cam.original_image, mask)
         # NOTE this is configured like is done in most monocular depth estimation supervision pipelines
+        # TODO we could also use the multi-scale ssim which is more robust
         if with_ssim:
-            ssim_loss = ssim(image, cam.original_image)
+            # FIXME chen: this sometimes triggers illegal memory access
+            # its hard to tell why, but it does not happen when the mapping gui is not used
+            # this is likely due to the sent packages, which are immediately accessed while we still optimize?
+            ssim_loss = ssim(image.unsqueeze(0), cam.original_image.unsqueeze(0), data_range=1.0, size_average=True)
             rgb_loss = 0.5 * alpha2 * (1 - ssim_loss) + (1 - alpha2) * l1_rgb
         else:
             rgb_loss = l1_rgb
@@ -389,8 +476,6 @@ class GaussianMapper(object):
 
         return depth_loss
 
-    # FIXME we get nan loss when finetuning the final map, WHY?!
-    # -> this could be because the map was unstable and rendering crashed
     def mapping_rgbd_loss(
         self,
         image: torch.Tensor,
@@ -400,14 +485,18 @@ class GaussianMapper(object):
         with_ssim: bool = False,
         with_depth_smoothness: bool = False,
     ):
+        has_depth = True
+        if cam.depth is None:
+            has_depth = False
 
         alpha1, alpha2 = self.loss_params.alpha1, self.loss_params.alpha2
         beta = self.loss_params.beta2
 
         # Mask out pixels with little information and invalid depth pixels
         rgb_pixel_mask = (cam.original_image.sum(dim=0) > self.loss_params.rgb_boundary_threshold).view(*depth.shape)
-        # Only use valid depths for supervision
-        depth_pixel_mask = ((cam.depth > 0.01) * (cam.depth < 1e7)).view(*depth.shape)
+        if has_depth:
+            # Only use valid depths for supervision
+            depth_pixel_mask = ((cam.depth > 0.01) * (cam.depth < 1e7)).view(*depth.shape)
 
         if with_edge_weight:
             edge_mask_x, edge_mask_y = image_gradient_mask(
@@ -419,11 +508,11 @@ class GaussianMapper(object):
             rgb_mask = rgb_pixel_mask.float()
 
         rgb_loss = self.color_loss(image, cam, with_ssim, alpha2, rgb_mask)
-        depth_loss = self.depth_loss(depth, cam, with_depth_smoothness, beta, depth_pixel_mask)
-
-        # TODO chen: maybe tune the weights better by looking at common value ranges
-        # we want color to be a main driver since we already initialize with good depth estimates
-        return alpha1 * rgb_loss + (1 - alpha1) * depth_loss
+        if has_depth:
+            depth_loss = self.depth_loss(depth, cam, with_depth_smoothness, beta, depth_pixel_mask)
+            return alpha1 * rgb_loss + (1 - alpha1) * depth_loss
+        else:
+            return rgb_loss
 
     def plot_losses(self) -> None:
         fig, ax = plt.subplots(2, 1)
@@ -435,7 +524,6 @@ class GaussianMapper(object):
         ax[1].plot(self.loss_list[-self.refinement_iters :])
         plt.savefig(f"{self.output}/loss_{self.mode}.png")
 
-    # TODO chen: is this really the same as MonoGS pruning strategy? They seem to have much more code?
     def covisibility_pruning(self):
         """Covisibility based pruning"""
 
@@ -484,6 +572,7 @@ class GaussianMapper(object):
 
     # TODO chen: is this implemented in a reference?
     # TODO does that really make sense? It might be optimal to describe a scene with the minimum number of Gaussians
+    # this is low priority
     def density_pruning(self):
         """Prune Gaussians based on local density to avoid huge lone Gaussians, that explain multiple frames.
 
@@ -505,10 +594,21 @@ class GaussianMapper(object):
     def _last_call(self, mapping_queue: mp.Queue, received_item: mp.Event):
         """Do one last refinement over the map"""
 
+        if self.slam.dataset is not None:
+            self.info("Interpolating trajectory to get non-keyframe Cameras for refinement ...")
+            non_kf_cams = self.get_nonkeyframe_cameras(self.slam.dataset, self.slam.traj_filler)
+            self.info(f"Added {len(non_kf_cams)} new cameras: {[cam.uid for cam in non_kf_cams]}")
+
+            # TODO maybe dont even initialize new gaussian but just use the extra supervision signal?
+            # FIXME does this work? -> we need to initialize the gaussians with some depth map, but we dont have any, either use nearest keyframe or random at position
+            for cam in non_kf_cams:
+                self.initialized = True
+                # self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=True)
+            self.cameras += non_kf_cams  # Add to set of cameras
+
         self.info("\nMapping refinement starting")
         # NOTE MonoGS does 26k iterations for a single camera, while we do 100 for multiple cameras
-        # NOTE chen: always optimize poses here to refine with more information
-        self.map_refinement(num_iters=self.refinement_iters, optimize_poses=self.optimize_poses)
+        self.map_refinement(num_iters=self.refinement_iters, optimize_poses=True)
         self.info("Mapping refinement finished")
         self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
         self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
@@ -542,6 +642,8 @@ class GaussianMapper(object):
         self.cur_idx = self.video.counter.value
         if self.last_idx + self.delay < self.cur_idx and self.cur_idx > self.warmup:
 
+            self.info("Currently has: {} gaussians".format(self.gaussians.get_xyz.shape[0]))
+
             # Filter map based on multiview_consistency and uncertainty
             # NOTE This could be improved by only filtering the new and existing cameras instead of video.mapping_dirty
             self.video.filter_map(
@@ -552,15 +654,15 @@ class GaussianMapper(object):
                 use_uncertainty=self.filter_uncertainty,
             )
 
-            # TODO chen: what happens if the map undergoes radical changes in the SLAM system?
-            # e.g. a loop closure that rapidly changes the scale of the map
-            # would this destroy the Gaussians as well?
             self.get_new_cameras()  # Add new cameras
             self.last_idx = self.new_cameras[-1].uid + 1
 
             self.info(f"Added {len(self.new_cameras)} new cameras: {[cam.uid for cam in self.new_cameras]}")
+            # TODO this updates the information, but we can not uncover very wrongly optimized frames
             self.frame_updater()  # Update all changed cameras with new information from SLAM system
 
+            # FIXME why do we not use depth_map = cam.depth here?
+            # Does this means we actually initialize with random gaussians right now?
             for cam in self.new_cameras:
                 if not self.initialized:
                     self.initialized = True
@@ -576,40 +678,48 @@ class GaussianMapper(object):
                 self.info("No Gaussians to optimize, skipping mapping step ...")
                 return
 
-            # Optimize  gaussians
+            # Optimize gaussians
             for iter in range(self.mapping_iters):
                 frames = self.select_keyframes()[0] + self.new_cameras
-                loss = self.mapping_step(iter, frames, self.kf_mng_params.mapping, densify=True, optimize_poses=False)
                 if len(frames) == 0:
-                    print(colored("[Gaussian mapping] No frames to optimize", "red"))
-                    print(colored("[Gaussian mapping] Loss turns nan", "red"))
+                    self.loss_list.append(0.0)
+                    continue
+                loss = self.mapping_step(
+                    iter, frames, self.kf_mng_params.mapping, densify=True, optimize_poses=self.optimize_poses
+                )
                 self.loss_list.append(loss / len(frames))
 
-            if len(frames) == 0:
-                print(colored("[Gaussian mapping] No frames to optimize", "red"))
-                print(colored(f"[Gaussian mapping] Loss before normalizing {loss}", "red"))
-                print(colored("[Gaussian mapping] Loss will be nan", "red"))
-
             # Keep track of how well the Rendering is doing
-            print(colored(f"[Gaussian mapping] Loss:  {loss / len(frames)}", "green"))
+            self.info(f"Loss:  {self.loss_list[-1]}")
 
             if len(self.iteration_info) % 1 == 0:
                 if self.kf_mng_params.prune_mode == "abs":
-                    self.abs_visibility_prune(self.kf_mng_params.abs_visibility_th)  # Absolute visibility pruning for all gaussians
+                    self.abs_visibility_prune(
+                        self.kf_mng_params.abs_visibility_th
+                    )  # Absolute visibility pruning for all gaussians
                 elif self.kf_mng_params.prune_mode == "new":
                     self.covisibility_pruning()  # Covisibility pruning for recently added gaussians
 
+            # TODO test this how this plays nicely with the rest of the system
+            if self.feedback_map:
+                to_set = self.get_mapping_update(frames)
+                self.info("Feeding back to Tracking ...")
+                self.video.set_mapping_item(**to_set)
+
             # Update visualization
             if self.use_gui:
+                if cam.depth is not None:
+                    gtdepth = cam.depth.detach().cpu().numpy()
+                else:
+                    gtdepth = None
                 self.q_main2vis.put_nowait(
                     gui_utils.GaussianPacket(
                         gaussians=clone_obj(self.gaussians),
                         current_frame=cam,
-                        keyframes=self.cameras,  # TODO: only pass cameras that got updated
-                        # keyframe=cam,
+                        keyframes=self.cameras,
                         kf_window=None,
                         gtcolor=cam.original_image,
-                        gtdepth=cam.depth.detach().cpu().numpy(),
+                        gtdepth=gtdepth,
                     )
                 )
 
