@@ -4,6 +4,8 @@ defaults:
   - override /tracking: tartanair
 
 tracking:
+  buffer_size: 512
+
   motion_filter:
     thresh: 5.0 
 
