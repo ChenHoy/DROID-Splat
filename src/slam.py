@@ -52,13 +52,13 @@ class SLAM:
     We combine these building blocks in a multiprocessing environment.
     """
 
-    def __init__(self, cfg, dataset=None):
+    def __init__(self, cfg, dataset=None, output_folder: Optional[str] = None):
         super(SLAM, self).__init__()
 
         self.cfg = cfg
         self.device = cfg.get("device", torch.device("cuda:0"))
         self.mode = cfg.mode
-        self.create_out_dirs()
+        self.create_out_dirs(output_folder)
         self.update_cam(cfg)
 
         self.net = DroidNet()
@@ -125,8 +125,11 @@ class SLAM:
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
 
-    def create_out_dirs(self) -> None:
-        self.output = self.cfg.output_folder
+    def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
+        if output_folder is not None:
+            self.output = output_folder
+        else:
+            self.output = "./outputs/"
 
         os.makedirs(self.output, exist_ok=True)
         os.makedirs(f"{self.output}/logs/", exist_ok=True)
@@ -309,10 +312,11 @@ class SLAM:
             pass
 
         # empty all the guis that are in params_gui so this will for sure get empty
-        while not self.params_gui.q_main2vis.empty():
-            obj = self.params_gui.q_main2vis.get()
-            a = clone_obj(obj)
-            del obj
+        if run: # NOTE Leon: It crashes if we dont check this
+            while not self.params_gui.q_main2vis.empty():
+                obj = self.params_gui.q_main2vis.get()
+                a = clone_obj(obj)
+                del obj
 
         self.mapping_visualizing_finished += 1
         self.all_finished += 1

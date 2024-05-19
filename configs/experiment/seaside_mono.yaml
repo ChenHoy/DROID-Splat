@@ -32,6 +32,6 @@ mapping:
   batch_mode: True
   keyframes:
     default_batch_size: 5
-    prune_mode: ""
+    prune_mode: "abs"
     mapping:
       densify_grad_threshold: 0.001

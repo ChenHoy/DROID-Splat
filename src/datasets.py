@@ -6,6 +6,7 @@ from omegaconf import DictConfig
 import cv2
 import numpy as np
 import torch
+import liblzfse
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from kornia.geometry.linalg import compose_transformations
@@ -95,6 +96,8 @@ class BaseDataset(Dataset):
         self.color_paths = sorted(glob.glob(self.input_folder))
         self.color_paths = self.color_paths[:: self.stride]
 
+        self.filter_dyn = cfg.filter_dyn if "filter_dyn" in cfg else False
+
         self.n_img = len(self.color_paths)
 
         self.depth_paths = None
@@ -129,8 +132,17 @@ class BaseDataset(Dataset):
             depth_data /= self.png_depth_scale
         elif ".npy" in depth_path:
             depth_data = np.load(depth_path).astype(np.float32)
+        
+        elif ".depth" in depth_path: # NOTE leon: totalrecon depth files
+            with open(depth_path, 'rb') as depth_fh:
+                raw_bytes = depth_fh.read()
+                decompressed_bytes = liblzfse.decompress(raw_bytes)
+                depth_data = np.frombuffer(decompressed_bytes, dtype=np.float32)
+                depth_data = np.copy(depth_data.reshape(256,192)) # NOTE leon: their depth shape
+                #print(depth_data.shape)
         else:
             raise TypeError(depth_path)
+        
 
         return depth_data
 
@@ -185,6 +197,14 @@ class BaseDataset(Dataset):
             pose = torch.from_numpy(self.poses[index]).float()
         else:
             pose = None
+
+        if self.filter_dyn:
+            mask = np.uint8(cv2.imread(self.mask_paths[index], cv2.IMREAD_GRAYSCALE) == 0)
+            mask = cv2.resize(mask, (W_out_with_edge, H_out_with_edge))
+            #color_data = color_data * mask[None, None, :, :,]
+            if depth_data is not None:
+                depth_data = depth_data * mask
+
 
         return index, color_data, depth_data, intrinsic, pose
 
@@ -304,6 +324,82 @@ class TartanAir(BaseDataset):
 
             self.poses.append(c2w)
 
+
+class DAVIS(BaseDataset):
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
+        super(DAVIS, self).__init__(cfg, device)
+        self.stride = cfg.get("stride", 1)
+        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "*.jpg")))
+        self.mask_path = self.input_folder.replace("JPEGImages", "Annotations")
+        self.mask_paths = sorted(glob.glob(os.path.join(self.mask_path, "*.png")))
+
+        # Set number of images for loading poses
+        self.n_img = len(self.color_paths)
+        # For Pseudo RGBD, we use monocular depth predictions in another folder
+        if cfg.mode == "prgbd":
+            self.depth_path = self.input_folder.replace("JPEGImages/Full-Resolution", "Depth/Full-Resolution/zoed_nk")
+            self.depth_paths = sorted(
+                glob.glob(os.path.join(self.depth_path, "*.npy"))
+                # glob.glob(os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy"))
+            )
+            assert (
+                len(self.depth_paths) == self.n_img
+            ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
+            self.depth_paths = self.depth_paths[:: self.stride]
+
+        else:
+            self.depth_paths = None
+
+        self.color_paths = self.color_paths[:: self.stride]
+        self.poses = None
+
+
+class TotalRecon(BaseDataset):
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
+        super(TotalRecon, self).__init__(cfg, device)
+        self.stride = cfg.get("stride", 1)
+
+        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "images/*.jpg")))
+        self.mask_paths = sorted(glob.glob(os.path.join(self.input_folder, "masks/*.png")))
+
+        # Set number of images for loading poses
+        self.n_img = len(self.color_paths)
+        # For Pseudo RGBD, we use monocular depth predictions in another folder
+        if cfg.mode == "rgbd":
+            self.depth_paths = sorted(
+                glob.glob(os.path.join(self.input_folder, "depths/*.depth"))
+            )
+            assert (
+                len(self.depth_paths) == self.n_img
+            ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
+            self.depth_paths = self.depth_paths[:: self.stride]
+
+        else:
+            self.depth_paths = None
+
+        self.color_paths = self.color_paths[:: self.stride]
+        self.pose_paths = sorted(glob.glob(os.path.join(self.input_folder, "camera_rtks/*.txt")))
+        self.pose_paths = self.pose_paths[:: self.stride]
+        self.load_poses(self.pose_paths)
+        #self.set_intrinsics()
+
+
+    def load_poses(self, paths):
+        self.poses = []
+        for path in paths:
+            RTK = np.loadtxt(path)
+                
+            c2w = np.eye(4)
+            c2w[:3, :3] = RTK[:3, :3]
+            c2w[:3, 3] = RTK[:3, 3]
+            self.poses.append(c2w)
+
+            
+    def set_intrinsics(self):
+        RTK = np.loadtxt(self.pose_paths[0])
+        self.fx, self.fy, self.cx, self.cy = RTK[-1]
+
+            
 
 class KITTI(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
@@ -867,4 +963,6 @@ dataset_dict = {
     "euroc": EuRoC,
     "tartanair": TartanAir,
     "kitti": KITTI,
+    "davis": DAVIS,
+    "totalrecon": TotalRecon,
 }
