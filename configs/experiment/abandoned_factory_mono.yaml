@@ -4,24 +4,32 @@ defaults:
   - override /tracking: tartanair
 
 sleep_delay: 3.0
+mode: mono
 
 tracking:
-  motion_filter:
-    thresh: 5.0 
-
   frontend:
     thresh: 15.0 
     window: 20 
     radius: 1
     nms: 0
-    release_cache: True
+    release_cache: False
   backend:
     thresh: 30.0  
     radius: 2
     nms: 2
     # used for loop detection
     use_loop_closure: False # NOTE works well with True too
-    loop_window: 250
+    loop_window: 150
     loop_thresh: 30.0  
-    loop_radius: 2
-    loop_nms: 5
+    loop_radius: 4
+    loop_nms: 2
+  
+mapping:
+  warmup: 20 # Wait until tracking gets to this frame
+  delay: 10 # Delay between tracking and mapping
+  feedback_mapping: True
+  optimize_poses: True
+  mapping_iters: 25 # Optimization iterations for selected views
+  keyframes:
+    n_last_frames: 15 # Always optimize the last n frames
+    n_rand_frames: 5 # Optimize random global frames on top

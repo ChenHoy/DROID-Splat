@@ -1,7 +1,7 @@
 import torch
 from lietorch import SE3, Sim3
 
-MIN_DEPTH = 0.2
+MIN_DEPTH = 0.001
 
 
 def extract_intrinsics(intrinsics):

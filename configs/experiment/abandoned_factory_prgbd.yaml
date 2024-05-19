@@ -3,7 +3,8 @@ defaults:
   - override /data: TartanAir/abandonedfactory
   - override /tracking: tartanair
 
-sleep_delay: 3.0
+sleep_delay: 2.0
+mode: prgbd
 
 # NOTE the parameters here also depend on the number of strides you choose!
 tracking:
@@ -11,18 +12,32 @@ tracking:
     thresh: 5.0 
 
   frontend:
-    thresh: 20.0 
-    window: 40 
+    thresh: 20.0
+    window: 30 
     radius: 1
     nms: 0
     release_cache: False
   backend:
-    thresh: 30.0  
+    window: 200
+    thresh: 30.0
     radius: 2
     nms: 2
     # used for loop detection
-    use_loop_closure: True # NOTE works well with True too
-    loop_window: 200
-    loop_thresh: 25.0  
-    loop_radius: 2
-    loop_nms: 5
+    use_loop_closure: False # NOTE works well with True too
+    loop_window: 150
+    loop_thresh: 30.0
+    loop_radius: 4
+    loop_nms: 2
+
+mapping:
+  warmup: 20 # Wait until tracking gets to this frame
+  delay: 40 # Delay between tracking and mapping
+  feedback_mapping: True
+  optimize_poses: True
+  mapping_iters: 25 # Optimization iterations for selected views
+
+  keyframes:
+    n_last_frames: 10 # Always optimize the last n frames
+    n_rand_frames: 0 # Optimize random global frames on top
+    filter: # Parameter for filtering incoming points from the SLAM system
+      confidence_thresh: 0.1 # Only take pixels above this confidence

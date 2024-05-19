@@ -111,8 +111,9 @@ class GaussianModel:
             rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
             depth = o3d.geometry.Image(depthmap.astype(np.float32))
         else:
-            depth_raw = cam.depth.contiguous().cpu().numpy()
-            if depth_raw is None:
+            if cam.depth is not None:
+                depth_raw = cam.depth.contiguous().cpu().numpy()
+            else:
                 depth_raw = np.empty((cam.image_height, cam.image_width))
 
             if self.cfg.sensor_type == "monocular":
@@ -620,4 +621,4 @@ class GaussianModel:
         self.denom[update_filter] += 1
 
     def info(self, msg: str) -> None:
-        print(colored(f"[Gaussian Model] {msg}", "magenta"))
+        print(colored(f"[Gaussian Mapping] {msg}", "magenta"))

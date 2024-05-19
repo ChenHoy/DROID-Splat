@@ -36,6 +36,7 @@ dependencies:
     - PyOpenGL-acclerate Installing this manually works, using conda does not
     - dask
     - gdown
+    - pytorch-msssim
     - imageio
     - networkx
     - pandas

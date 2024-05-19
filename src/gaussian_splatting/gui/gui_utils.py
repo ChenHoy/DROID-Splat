@@ -109,7 +109,6 @@ class GaussianPacket:
         self.finish = finish
         self.kf_window = kf_window
 
-
     def resize_img(self, img, width):
         if img is None:
             return None
@@ -161,13 +160,11 @@ class ParamsGUI:
         background=None,
         gaussians=None,
         q_main2vis=None,
-        q_vis2main=None,
     ):
         self.pipe = pipe
         self.background = background
         self.gaussians = gaussians
         self.q_main2vis = q_main2vis
-        self.q_vis2main = q_vis2main
 
 
 class EvaluatePacket:

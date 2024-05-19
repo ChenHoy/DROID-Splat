@@ -1,5 +1,6 @@
 import pathlib
 import threading
+import gc
 import time
 from datetime import datetime
 
@@ -20,7 +21,7 @@ from ..gaussian_renderer import render
 from ..utils.graphics_utils import fov2focal, getWorld2View2
 from .gl_render import util, util_gau
 from .gl_render.render_ogl import OpenGLRenderer
-from .gui_utils import GaussianPacket, Packet_vis2main, create_frustum, cv_gl, get_latest_queue
+from .gui_utils import GaussianPacket, create_frustum, cv_gl, get_latest_queue
 from ..camera_utils import Camera
 from ..logging_utils import Log
 
@@ -50,7 +51,6 @@ class SLAM_GUI:
             self.gaussian_cur = params_gui.gaussians
             self.init = True
             self.q_main2vis = params_gui.q_main2vis
-            self.q_vis2main = params_gui.q_vis2main
             self.pipe = params_gui.pipe
 
         self.gaussian_nums = []
@@ -103,11 +103,6 @@ class SLAM_GUI:
         em = self.window.theme.font_size
         margin = 0.5 * em
         self.panel = gui.Vert(0.5 * em, gui.Margins(margin))
-        self.button = gui.ToggleSwitch("Resume/Pause")
-        self.button.is_on = True
-        self.button.set_on_clicked(self._on_button)
-        self.panel.add_child(self.button)
-
         self.panel.add_child(gui.Label("Viewpoint Options"))
 
         viewpoint_tile = gui.Horiz(0.5 * em, gui.Margins(margin))
@@ -317,20 +312,6 @@ class SLAM_GUI:
                 else:
                     self.widget3d.scene.remove_geometry(name)
 
-    def _on_button(self, is_on):
-        packet = Packet_vis2main()
-        packet.flag_pause = not self.button.is_on
-        self.q_vis2main.put(packet)
-
-    def _on_slider(self, value):
-        packet = self.prepare_viz2main_packet()
-        self.q_vis2main.put(packet)
-
-    def _on_render_btn(self):
-        packet = Packet_vis2main()
-        packet.flag_nextbatch = True
-        self.q_vis2main.put(packet)
-
     def _on_screenshot_btn(self):
         if self.render_img is None:
             return
@@ -415,9 +396,6 @@ class SLAM_GUI:
             # clean up the pipe
             while not self.q_main2vis.empty():
                 self.q_main2vis.get()
-            while not self.q_vis2main.empty():
-                self.q_vis2main.get()
-            self.q_vis2main = None
             self.q_main2vis = None
             self.process_finished = True
 
@@ -623,6 +601,8 @@ def run(params_gui=None):
     app.initialize()
     win = SLAM_GUI(params_gui)
     app.run()
+    del win
+    gc.collect()
     return True
 
 

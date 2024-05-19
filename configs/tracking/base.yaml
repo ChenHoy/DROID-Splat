@@ -40,7 +40,7 @@ backend:
   iters: 2
 
   use_loop_closure: False
-  loop_window: 150
+  loop_window: 150 # NOTE make sure that loop window is not bigger than the general window of the backend
   loop_thresh: 20.0  # only consider edge with avg flow < 
   loop_radius: 2
   loop_nms: 5

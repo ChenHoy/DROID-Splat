@@ -2,26 +2,38 @@
 defaults:
   - override /data: Custom/kitchen
 
-sleep_delay: 3.0
+sleep_delay: 1.0
+stride: 1
+
+data:
+  cam:
+    H_out: 272
+    W_out: 480
 
 tracking:
-
   buffer_size: 512
+  motion_filter:
+    thresh: 6.0  # add as keyframe if avg flow >
 
   frontend:
-    thresh: 10.0 
-    radius: 4
+    thresh: 15.0 
+    radius: 2
     window: 40
     nms: 0
 
+    steps1: 4 # 1st outer loop with feature correlation
+    steps2: 2 # 2nd outer loop with feature correlation
+    iters: 6 # Actual BA iterations
+
   backend:
+    warmup: 10
     thresh: 25.0  
     radius: 4
     window: 200 # Limit backend in case we would run OOM
     nms: 0
     # used for loop detection
     use_loop_closure: False # NOTE True also works well
-    loop_window: 200
+    loop_window: 250
     loop_thresh: 20.0  
     loop_radius: 4
     loop_nms: 2

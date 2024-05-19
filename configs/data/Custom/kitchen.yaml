@@ -1,5 +1,5 @@
 dataset: "folder"
-input_folder: /media/data/ours/kitchen/raw
+input_folder: /media/data/nerf/ours/kitchen/raw
 
 ### original camera parameters
 cam:

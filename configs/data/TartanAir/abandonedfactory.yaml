@@ -3,3 +3,8 @@ defaults:
   - /data/TartanAir/base@_here_
 
 input_folder: /media/data/TartanAir/abandonedfactory/Easy/P000/
+
+# Because the sequence is so long, we should keep the resolution pretty low
+cam:
+  H_out: 240
+  W_out: 320

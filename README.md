@@ -215,16 +215,22 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
     - [x] Optimization turns instable over longer windows and large scenes. What is the source?
     - [x] Fix scale parameters after optimizing them once?
 - [x] Use both multi-view consistency and uncertainty to filter the map before sending to Renderer
-- [ ] Backpropagate the pose loss from the Rendering objective into the SLAM tracking
-    - [x] Optimize poses with additional optimizer
-    - [ ] Evaluate optimized poses with new metrics
-    - [ ] Setup synchronization between mapping and frontend/backend
-    - [x] Test stability and hyperparameter, e.g. when and how often to sync
+- [x] Use SSIM and depth regularization loss configurable in mapping loss
 - [x] Improvements for mapping thread
     - [x] Add new views in batches
     - [x] New dirty index to filter in mapping
     - [x] Fix covisibility based prunning
     - [x] Deph rendering loss is wrong in outdoor -> New loss?
+- [ ] Backpropagate the pose loss from the Rendering objective into the SLAM tracking
+    - [x] Optimize poses with additional optimizer
+    - [ ] Evaluate optimized poses with new metrics
+    - [ ] Setup synchronization between mapping and frontend/backend
+    - [x] Test stability and hyperparameter, e.g. when and how often to sync
+- [ ] Apply the Gaussian rendering only to non-keyframes! With this we exploit much more information and get better multi-view consistency
+    - [ ] Keep track of all poses instead of only key frame ones
+    - [ ] Use trajectory filler in windows before using Gaussian Mapping
+    - [ ] Initialize Gaussians based on keyframes, where we have depth based on the tracking
+    - [ ] Optimize Gaussians purely based on non-keyframe poses. Here we will only have images as supervision, as depth is not defined. Adjust the loss computation for this case
 - [ ] Properly evaluate our new code base for standard metrics
     - [ ] ATE error, how does this change when using the new Renderer for mapping?
     - [ ] Rendering loss, can we achieve similar results like the paper?
@@ -237,7 +243,7 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
 - [ ] Test / Evaluate code on monocular scenes with GSplatting Mapping
 - [ ] How well does our new mapping work on unbounded / outdoor scenes?
   - [ ] Kitti for driving
-  - [ ] TartanAir for drone like odometries
+  - [x] TartanAir for drone like odometries -> works well, but memory management needs to be taken care of
   
 # Potential Future Features
 - [ ] Change the Gaussian Splatting formulation to a variant like [Dynamic Gaussian Splatting](https://github.com/JonathonLuiten/Dynamic3DGaussians)

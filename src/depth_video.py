@@ -1,7 +1,7 @@
 import ipdb
 from termcolor import colored
 from copy import deepcopy
-from typing import Optional
+from typing import Optional, List
 
 import torch
 from torch.multiprocessing import Value
@@ -10,7 +10,11 @@ import droid_backends
 
 from .droid_net import cvx_upsample
 from .geom import projective_ops as pops
+from .geom import matrix_to_lie
 from .geom.ba import bundle_adjustment
+
+from .gaussian_splatting.camera_utils import Camera
+from .gaussian_splatting.gaussian_renderer import render
 
 
 class DepthVideo:
@@ -34,12 +38,6 @@ class DepthVideo:
 
         self.ready = Value("i", 0)
         self.counter = Value("i", 0)
-
-        # FIXME chen: do we really need multiple locks or can we simply use the same locking mechanism to assert thread safety?
-        # NOTE we have multiple lock to avoid deadlocks between bundle adjustment and frontend loop closure
-        # TODO we can get rid of these
-        self.mapping = Value("i", 0)
-        self.ba_lock = {"local": Value("i", 0), "global": Value("i", 0)}
 
         ht = cfg.data.cam.H_out
         self.ht = ht
@@ -109,12 +107,6 @@ class DepthVideo:
 
     def get_lock(self):
         return self.counter.get_lock()
-
-    def get_ba_lock(self, ba_type):
-        return self.ba_lock[ba_type].get_lock()
-
-    def get_mapping_lock(self):
-        return self.mapping.get_lock()
 
     def __item_setter(self, index, item):
         if isinstance(index, int) and index >= self.counter.value:
@@ -195,9 +187,6 @@ class DepthVideo:
         padded_indices = torch.cat(padded_indices)
         return torch.unique(padded_indices)
 
-    # TODO how to speed up the system here?
-    # this is called every time we use the renderer
-    # Should we maybe only use this scarcily?
     def filter_map(
         self,
         idx: Optional[torch.Tensor] = None,
@@ -258,10 +247,9 @@ class DepthVideo:
         self.disps_clean[dirty_index] = disps
         self.filtered_id = max(dirty_index.max().item(), self.filtered_id)
 
-    def get_mapping_item(self, index, device="cuda:0"):
+    def get_mapping_item(self, index, device="cuda:0", scale_adjustment: float = 1.0):
         """Get a part of the video to transfer to the Rendering module"""
 
-        # with self.mapping.get_lock():
         with self.get_lock():
             if self.upsampled:
                 image = self.images[index].clone().permute(1, 2, 0).contiguous().to(device)  # [h, w, 3]
@@ -273,62 +261,60 @@ class DepthVideo:
 
             # gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
             est_disp = self.disps_clean[index].clone().to(device)  # [h, w]
-            est_depth = 1.0 / (est_disp + 1e-7)
+            est_depth = torch.where(est_disp > 0, 1.0 / est_disp, est_disp)
 
             # origin alignment
             w2c = lietorch.SE3(self.poses[index].clone()).to(device)  # Tw(droid)_to_c
             c2w = w2c.inv().matrix()  # [4, 4]
 
             gt_c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
-            depth = est_depth
-            # depth = gt_depth
+            # NOTE chen: we adjust the depth scale here, because gaussian mapping defines a different projection
+            depth = est_depth * scale_adjustment  # gt_depth
 
         return image, depth, intrinsics, c2w, gt_c2w
 
-    # TODO how to trust which system more?
-    # i) Frontend + Backend should handle loop closures more gracefully and works based on Optical Flow
-    # ii) Rendering should be more accurate for finegrained structures and used more information for pose optimization
-    # -> How to make sure we dont get into a deadlock or diverge?
-    # TODO are poses now in the correct format?
-    def set_mapping_item(self, index, poses: Optional[torch.Tensor] = None, depths: Optional[torch.Tensor] = None):
+    # FIXME chen: there is some fuckery happening inside gaussian mapping, which attached the wrong scale to the gaussians!
+    # we somehow have a different pose scale after giving back the exact same ones without any optimization
+    def set_mapping_item(self, index: List[torch.Tensor], poses: List[torch.Tensor], depths: List[torch.Tensor]):
         """Set a part of the video from the Rendering module"""
+        # Filter out invalid views, where we could not render anything
+        index = [idx for idx in index if idx is not None]
+        depths = [depth for depth in depths if depth is not None]
+        # We have an option to not optimize the poses with the renderer, so it is an empty list
+        if len(poses) != 0:
+            poses = [pose for pose in poses if pose is not None]
 
-        # TODO test this
-        def matrix_to_lie(matrix: torch.Tensor) -> lietorch.SE3:
-            """Transforms a 4x4 homogenous matrix into a 7D lie vector, see https://github.com/princeton-vl/lietorch/issues/14"""
-            import pytorch3d
+        # Sanity check for when we did not render anything
+        if len(poses) == 0 and len(depths) == 0:
+            return
 
-            # Ensure we always have a batched tensor
-            if matrix.ndim == 2:
-                matrix = matrix.unsqueeze(0)
-
-            quat = pytorch3d.transforms.matrix_to_quaternion(matrix[:, :3, :3])
-            quat = torch.cat((quat[:, 1:], quat[:, 0][None]), 0)  # swap real first to real last
-            trans = matrix[:, :3, 3]
-            vec = torch.cat((trans, quat), 0)
-            return lietorch.SE3.InitFromVec(vec)
-
-        assert poses is not None or depths is not None, "Either poses or depths must be provided!"
+        # Convert to tensors
+        if len(poses) != 0:
+            poses = torch.stack(poses)
+        depths = torch.stack(depths)
+        valid = depths > 0
 
         with self.get_lock():
 
-            if depths is not None:
-                assert len(index) == len(depths), "Number of depths must match the number of indices!"
+            depths.clamp_(max=1000.0)  # Sanity
+            disps = torch.where(valid, 1.0 / depths, depths)
+            disps.clamp_(min=0.001)  # Sanity
+            # The Renderer always outputs in the original resolution
+            self.disps[index] = torch.where(
+                valid[:, 0, 3::8, 3::8], disps[:, 0, 3::8, 3::8].clone().detach().to(self.device), self.disps[index]
+            )
+            if self.upsampled:
+                self.disps_up[index] = torch.where(
+                    valid[:, 0], disps[:, 0].clone().detach().to(self.device), self.disps_up[index]
+                )
 
-                depths.clamp_(min=0.001, max=1000.0)  # Sanity
-                disps = 1.0 / (depths + 1e-7)
-                if self.upsampled:
-                    self.disps_up[index] = disps.clone().to(self.device)
-                else:
-                    self.disps[index] = disps.clone().to(self.device)
-
-            if poses is not None:
-                assert len(index) == len(poses), "Number of poses must match the number of indices!"
-
-                c2w = poses.clone().to(self.device)  # [4, 4] homogenous matrix
-                # FIXME: How to correctly initialize a 4x4 homogenous matrix for SE3 in lietorch?
+            if len(poses) != 0:
+                c2w = poses.clone().detach().to(self.device)  # [4, 4] homogenous matrix
                 c2w = matrix_to_lie(c2w)  # [7, 1] Lie element
-                self.poses[index] = c2w.inv()  # Our data structure stores in w2c convention
+                # NOTE chen: We normally would need to invert here, but we already do this in Gaussian Mapper
+                self.poses[index] = c2w.vec()
+
+        self.dirty[index] = True  # Mark frames for visualization
 
     @staticmethod
     def format_indices(ii, jj, device="cuda"):
@@ -462,8 +448,6 @@ class DepthVideo:
 
         intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same
 
-        # lock = self.get_lock() if ba_type is None else self.get_ba_lock(ba_type)
-        # with lock:
         with self.get_lock():
 
             # Store the uncertainty maps for source frames, that will get updated
