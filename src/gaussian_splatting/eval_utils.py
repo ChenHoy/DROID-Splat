@@ -16,7 +16,7 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from .gaussian_renderer import render
 from .utils.image_utils import psnr
-from .utils.loss_utils import ssim
+from .utils.loss_utils import ssim_torch as ssim
 from .utils.system_utils import mkdir_p
 from .logging_utils import Log
 from .multiprocessing_utils import clone_obj

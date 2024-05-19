@@ -21,7 +21,6 @@ from .gaussian_splatting.utils.graphics_utils import (
     getProjectionMatrix2,
     getWorld2View2,
     focal2fov,
-    getProjectionMatrix3,
 )
 from .gaussian_splatting.utils.loss_utils import l1_loss
 from pytorch_msssim import ssim, ms_ssim
