@@ -25,7 +25,3 @@ tracking:
     loop_thresh: 30.0  
     loop_radius: 2
     loop_nms: 5
-
-mapping:
-  keyframes:
-    abs_visibility_th: 0

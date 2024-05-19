@@ -189,6 +189,7 @@ class GaussianMapper(object):
             cam.update_RT(cam.R_gt, cam.T_gt)  # Assuming we found the best pose in tracking
             self.new_cameras.append(cam)
 
+
     def pose_optimizer(self, frames: List):
         """Creates an optimizer for the camera poses for all provided frames."""
         opt_params = []
@@ -208,6 +209,7 @@ class GaussianMapper(object):
 
         return torch.optim.Adam(opt_params)
 
+
     # NOTE chen: this assumes the video object to be a gt reference
     def frame_updater(self):
         """Gets the list of frames and updates the depth and pose based on the video."""
@@ -215,6 +217,7 @@ class GaussianMapper(object):
         all_idxs = torch.tensor([cam.uid for cam in all_cameras]).long().to(self.device)
 
         with self.video.get_lock():
+            #print(self.video.timestamp)
             (dirty_index,) = torch.where(self.video.mapping_dirty.clone())
             dirty_index = dirty_index[dirty_index < self.cur_idx - self.delay]
         # Only update already inserted cameras
@@ -282,7 +285,6 @@ class GaussianMapper(object):
             return 0.0
 
         loss = 0.0
-        self.occ_aware_visibility = {}
         for view in frames:
 
             render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
@@ -303,9 +305,6 @@ class GaussianMapper(object):
                 with_ssim=self.loss_params.use_ssim,
                 with_depth_smoothness=self.loss_params.use_depth_smoothness_reg,
             )
-            # Only take into account last frames and not random ones for occlusion checks
-            # if self.last_idx - view.uid < self.n_last_frames:
-            #     self.occ_aware_visibility[view.uid] = (n_touched > 0).long()
 
         # Regularize scale changes of the Gaussians
         scaling = self.gaussians.get_scaling
@@ -323,9 +322,7 @@ class GaussianMapper(object):
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
             if self.last_idx > self.n_last_frames and (iter + 1) % self.kf_mng_params.prune_every == 0:
-                # if self.mode != "rgbd":
-                #     self.covisibility_pruning() # Covisibility based pruning for recently added gaussians
-                # NOTE leon: monogs uses this covisibility pruning because they dont have such a good depth estimation
+
                 self.gaussians.densify_and_prune(  # General pruning based on opacity and size + densification
                     kf_mng_params.densify_grad_threshold,
                     kf_mng_params.opacity_th,
@@ -422,6 +419,7 @@ class GaussianMapper(object):
 
         # TODO chen: maybe tune the weights better by looking at common value ranges
         # we want color to be a main driver since we already initialize with good depth estimates
+        # NOTE leon: rgb is also the main loss because we have the gt
         return alpha1 * rgb_loss + (1 - alpha1) * depth_loss
 
     def plot_losses(self) -> None:
@@ -597,7 +595,7 @@ class GaussianMapper(object):
             # Keep track of how well the Rendering is doing
             print(colored(f"[Gaussian mapping] Loss:  {loss / len(frames)}", "green"))
             
-
+            self.abs_visibility_prune()
             if len(self.iteration_info) % 1 == 0:
                 if self.kf_mng_params.prune_mode == "abs":
                     self.abs_visibility_prune() # Absolute visibility pruning for all gaussians
