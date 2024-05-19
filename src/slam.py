@@ -52,13 +52,13 @@ class SLAM:
     We combine these building blocks in a multiprocessing environment.
     """
 
-    def __init__(self, cfg, dataset=None, output_folder: Optional[str] = None):
+    def __init__(self, cfg, dataset=None):
         super(SLAM, self).__init__()
 
         self.cfg = cfg
         self.device = cfg.get("device", torch.device("cuda:0"))
         self.mode = cfg.mode
-        self.create_out_dirs(output_folder)
+        self.create_out_dirs()
         self.update_cam(cfg)
 
         self.net = DroidNet()
@@ -125,11 +125,8 @@ class SLAM:
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
 
-    def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
-        if output_folder is not None:
-            self.output = output_folder
-        else:
-            self.output = "./outputs/"
+    def create_out_dirs(self) -> None:
+        self.output = self.cfg.output_folder
 
         os.makedirs(self.output, exist_ok=True)
         os.makedirs(f"{self.output}/logs/", exist_ok=True)
