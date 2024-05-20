@@ -1,0 +1,53 @@
+# @package _global_
+defaults:
+  - override /data: TotalRecon/base
+  - override /tracking: replica
+
+sleep_delay: 1.0
+stride: 2
+filter_dyn: True
+opt_intr: False
+mode: "mono"
+run_backend: True
+run_visualization: True
+run_mapping: True
+
+
+tracking:
+  buffer_size: 512
+  motion_filter:
+    thresh: 6.0  # add as keyframe if avg flow >
+
+  frontend:
+    thresh: 15.0 
+    radius: 2
+    window: 40
+    nms: 0
+
+    steps1: 4 # 1st outer loop with feature correlation
+    steps2: 2 # 2nd outer loop with feature correlation
+    iters: 6 # Actual BA iterations
+
+  backend:
+    warmup: 10
+    thresh: 25.0  
+    radius: 4
+    window: 200 # Limit backend in case we would run OOM
+    nms: 0
+    # used for loop detection
+    use_loop_closure: True # NOTE True also works well
+    loop_window: 250
+    loop_thresh: 20.0  
+    loop_radius: 4
+    loop_nms: 2
+
+mapping:
+  feedback_mapping: False
+  optimize_poses: False
+  mapping_iters: 50
+  batch_mode: True
+  keyframes:
+    prune_mode: "abs"
+    abs_visibility_th: 3
+    default_batch_size: 5
+

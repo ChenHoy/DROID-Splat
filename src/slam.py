@@ -190,7 +190,12 @@ class SLAM:
             pass
 
         for frame in tqdm(stream):
-            timestamp, image, depth, intrinsic, gt_pose = frame
+            if self.cfg.filter_dyn:
+                timestamp, image, depth, intrinsic, gt_pose, dyn_mask = frame
+            else:
+                timestamp, image, depth, intrinsic, gt_pose = frame
+                dyn_mask = None
+
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
 
@@ -199,7 +204,7 @@ class SLAM:
                 input_queue.put(image)
                 input_queue.put(depth)
 
-            self.frontend(timestamp, image, depth, intrinsic, gt_pose)
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose, dyn_mask=dyn_mask)
 
         del self.frontend
         torch.cuda.empty_cache()

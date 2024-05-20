@@ -1,13 +1,13 @@
 dataset: 'totalrecon'
-input_folder: "/media/data/totalrecon/cat1-stereo000-leftcam"
+input_folder: "/media/data/totalrecon/dog1-stereo000-leftcam/"
 #input_folder: "/media/data/totalrecon/dog1-stereo001-rightcam"
 png_depth_scale: 6553.5 #for depth image in png format
 
 cam:
-  H: 1920
-  W: 1080
-  H_out: 640
-  W_out: 360
+  H: 960
+  W: 720
+  H_out: 320
+  W_out: 240
   H_edge: 0
   W_edge: 0
   fx: 794.65

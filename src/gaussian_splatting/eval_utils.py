@@ -123,7 +123,7 @@ def eval_ate(
         for kf_id in kf_ids:
             kf = frames[kf_id]
 
-            _, _, c2w, _, _ = video.get_mapping_item(kf_id, video.device)
+            _, _, c2w, _, _, _ = video.get_mapping_item(kf_id, video.device)
             w2c = torch.inverse(c2w)
             R_est = w2c[:3, :3].unsqueeze(0).detach()
             T_est = w2c[:3, 3].detach()

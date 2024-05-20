@@ -201,9 +201,9 @@ class BaseDataset(Dataset):
         if self.filter_dyn:
             mask = np.uint8(cv2.imread(self.mask_paths[index], cv2.IMREAD_GRAYSCALE) == 0)
             mask = cv2.resize(mask, (W_out_with_edge, H_out_with_edge))
-            #color_data = color_data * mask[None, None, :, :,]
-            if depth_data is not None:
-                depth_data = depth_data * mask
+            mask = torch.from_numpy(mask).bool()
+
+            return index, color_data, depth_data, intrinsic, pose, mask
 
 
         return index, color_data, depth_data, intrinsic, pose
@@ -351,6 +351,7 @@ class DAVIS(BaseDataset):
             self.depth_paths = None
 
         self.color_paths = self.color_paths[:: self.stride]
+        self.mask_paths = self.mask_paths[:: self.stride]
         self.poses = None
 
 
@@ -378,8 +379,10 @@ class TotalRecon(BaseDataset):
             self.depth_paths = None
 
         self.color_paths = self.color_paths[:: self.stride]
+        self.mask_paths = self.mask_paths[:: self.stride]
         self.pose_paths = sorted(glob.glob(os.path.join(self.input_folder, "camera_rtks/*.txt")))
         self.pose_paths = self.pose_paths[:: self.stride]
+    
         self.load_poses(self.pose_paths)
         #self.set_intrinsics()
 

@@ -72,6 +72,8 @@ class GaussianMapper(object):
         self.filter_uncertainty = cfg.mapping.filter_uncertainty
         self.filter_multiview = cfg.mapping.filter_multiview
 
+        self.filter_dyn = cfg.filter_dyn
+
         self.loss_params = cfg.mapping.loss
 
         self.sh_degree = 3 if cfg.mapping.use_spherical_harmonics else 0
@@ -149,10 +151,17 @@ class GaussianMapper(object):
             return None
 
         scale_adjustment = 1.0
-        color, depth, intrinsics, c2w, _ = self.video.get_mapping_item(
-            idx, self.device, scale_adjustment=scale_adjustment
-        )
-        return self.camera_from_frame(idx, color, depth, intrinsics, c2w)
+
+        if self.filter_dyn:
+            color, depth, intrinsics, c2w, _, dyn_mask = self.video.get_mapping_item(
+            idx, self.device, scale_adjustment=scale_adjustment)
+
+        else:
+            color, depth, intrinsics, c2w, _, _ = self.video.get_mapping_item(
+                idx, self.device, scale_adjustment=scale_adjustment)
+            dyn_mask = None
+
+        return self.camera_from_frame(idx, color, depth, intrinsics, c2w, dynamic_mask=dyn_mask)
 
     # TODO this can be called with depth=None
     # do this for when we interpolate the keyframe poses to include nonkeyframe ones
@@ -163,6 +172,7 @@ class GaussianMapper(object):
         depth: Optional[torch.Tensor],
         intrinsic: torch.Tensor,
         gt_pose: torch.Tensor,
+        dynamic_mask: Optional[torch.Tensor] = None,
     ):
         """Given the image, depth, intrinsic and pose, creates a Camera object."""
         fx, fy, cx, cy = intrinsic
@@ -194,6 +204,7 @@ class GaussianMapper(object):
             height,
             width,
             device=self.device,
+            dyn_mask=dynamic_mask,
         )
 
     def get_new_cameras(self):
@@ -206,10 +217,15 @@ class GaussianMapper(object):
             to_add = range(self.last_idx, self.cur_idx - self.delay)
 
         for idx in to_add:
-            color, depth, intrinsics, c2w, _ = self.video.get_mapping_item(idx, self.device)
+            if self.filter_dyn:
+                color, depth, intrinsics, c2w, _, dyn_mask  = self.video.get_mapping_item(idx, self.device)
+            else:
+                color, depth, intrinsics, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
+                dyn_mask = None
+
             color = color.permute(2, 0, 1)
 
-            cam = self.camera_from_frame(idx, color, depth, intrinsics, c2w)
+            cam = self.camera_from_frame(idx, color, depth, intrinsics, c2w, dynamic_mask=dyn_mask)
             cam.update_RT(cam.R_gt, cam.T_gt)  # Assuming we found the best pose in tracking
             self.new_cameras.append(cam)
 
@@ -249,7 +265,7 @@ class GaussianMapper(object):
 
         # self.info(f"Updating frames {to_update}")
         for idx in to_update:
-            _, depth, _, c2w, _ = self.video.get_mapping_item(idx, self.device)
+            _, depth, _, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
             cam = all_cameras[idx]
             w2c = torch.inverse(c2w)
             R = w2c[:3, :3].unsqueeze(0).detach()
@@ -485,6 +501,10 @@ class GaussianMapper(object):
         if cam.depth is None:
             has_depth = False
 
+        if self.filter_dyn:
+            image = image * cam.dyn_mask
+            depth = depth * cam.dyn_mask
+
         alpha1, alpha2 = self.loss_params.alpha1, self.loss_params.alpha2
         beta = self.loss_params.beta2
 
@@ -590,17 +610,17 @@ class GaussianMapper(object):
     def _last_call(self, mapping_queue: mp.Queue, received_item: mp.Event):
         """Do one last refinement over the map"""
 
-        if self.slam.dataset is not None:
-            self.info("Interpolating trajectory to get non-keyframe Cameras for refinement ...")
-            non_kf_cams = self.get_nonkeyframe_cameras(self.slam.dataset, self.slam.traj_filler)
-            self.info(f"Added {len(non_kf_cams)} new cameras: {[cam.uid for cam in non_kf_cams]}")
+        # if self.slam.dataset is not None:
+        #     self.info("Interpolating trajectory to get non-keyframe Cameras for refinement ...")
+        #     non_kf_cams = self.get_nonkeyframe_cameras(self.slam.dataset, self.slam.traj_filler)
+        #     self.info(f"Added {len(non_kf_cams)} new cameras: {[cam.uid for cam in non_kf_cams]}")
 
-            # TODO maybe dont even initialize new gaussian but just use the extra supervision signal?
-            # FIXME does this work? -> we need to initialize the gaussians with some depth map, but we dont have any, either use nearest keyframe or random at position
-            for cam in non_kf_cams:
-                self.initialized = True
-                # self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=True)
-            self.cameras += non_kf_cams  # Add to set of cameras
+        #     # TODO maybe dont even initialize new gaussian but just use the extra supervision signal?
+        #     # FIXME does this work? -> we need to initialize the gaussians with some depth map, but we dont have any, either use nearest keyframe or random at position
+        #     for cam in non_kf_cams:
+        #         self.initialized = True
+        #         # self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=True)
+        #     self.cameras += non_kf_cams  # Add to set of cameras
 
         self.info("\nMapping refinement starting")
         # NOTE MonoGS does 26k iterations for a single camera, while we do 100 for multiple cameras
@@ -667,7 +687,7 @@ class GaussianMapper(object):
                 else:
                     n_g = self.gaussians.get_xyz.shape[0]
                     self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=False)
-                    # self.info(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians based on view {cam.uid}")
+                    #self.info(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians based on view {cam.uid}")
 
             # We might have 0 Gaussians in some cases
             if len(self.gaussians.get_xyz) == 0:
@@ -714,8 +734,8 @@ class GaussianMapper(object):
                         current_frame=cam,
                         keyframes=self.cameras,
                         kf_window=None,
-                        gtcolor=cam.original_image,
-                        gtdepth=gtdepth,
+                        gtcolor=(cam.original_image * cam.dyn_mask if self.filter_dyn else cam.original_image),
+                        gtdepth=gtdepth * cam.dyn_mask.detach().cpu().numpy() if self.filter_dyn else gtdepth,
                     )
                 )
 
