@@ -16,3 +16,4 @@ cam:
   cx: 540
   cy: 960
   calibration_txt: ''
+  camera_model: "pinhole"
