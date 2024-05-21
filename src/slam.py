@@ -388,10 +388,11 @@ class SLAM:
         ## Trajectory filler
         timestamps = [i for i in range(len(stream))]
         camera_trajectory = self.traj_filler(stream)  # w2cs
-        w2w = SE3(self.video.poses_clean[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
-        camera_trajectory = w2w * camera_trajectory.inv()
-        traj_est = camera_trajectory.data.cpu().numpy()
-        estimate_c2w_list = camera_trajectory.matrix().data.cpu()
+        # This does nothing: w2w is just unit pose
+        # w2w = SE3(self.video.poses_clean[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
+        camera_trajectory = camera_trajectory.inv() # c2ws
+        traj_est = camera_trajectory.data.cpu().numpy() # 7x1 Lie algebra
+        estimate_c2w_list = camera_trajectory.matrix().data.cpu()  # 4x4 homogenous matrix
 
         # Set keyframes_only to True to compute the APE and plots on keyframes only.
         monocular = self.cfg.mode == "mono"

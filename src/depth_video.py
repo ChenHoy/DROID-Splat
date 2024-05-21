@@ -278,10 +278,9 @@ class DepthVideo:
             # NOTE chen: we adjust the depth scale here, because gaussian mapping defines a different projection
             depth = est_depth * scale_adjustment  # gt_depth
 
-
             dynamic_mask = self.dynamic_mask[index].clone().to(device)
-            #image = image * (dynamic_mask.unsqueeze(-1).float())
-            #depth = depth * (dynamic_mask.float())
+            # image = image * (dynamic_mask.unsqueeze(-1).float())
+            # depth = depth * (dynamic_mask.float())
 
         return image, depth, intrinsics, c2w, gt_c2w, dynamic_mask
 
@@ -454,9 +453,7 @@ class DepthVideo:
 
         return d
 
-    def ba(
-        self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, motion_only=False, ba_type=None
-    ):
+    def ba(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, motion_only=False):
         """Wrapper for dense bundle adjustment. This is used both in Frontend and Backend."""
 
         intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same

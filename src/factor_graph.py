@@ -420,9 +420,7 @@ class FactorGraph:
         return edge_num
 
     @torch.cuda.amp.autocast(enabled=True)
-    def update(
-        self, t0=None, t1=None, iters=4, use_inactive=False, lm=1e-4, ep=0.1, motion_only=False, ba_type="local"
-    ):
+    def update(self, t0=None, t1=None, iters=4, use_inactive=False, lm=1e-4, ep=0.1, motion_only=False):
         """run update operator on factor graph"""
 
         # motion features
@@ -479,7 +477,7 @@ class FactorGraph:
                     # only then can we use global BA and intrinsics optimization with the CUDA kernel later
                     self.video.reset_prior()
                 else:
-                    self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False, ba_type)
+                    self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False)
 
             if self.upsample:
                 self.video.upsample(torch.unique(self.ii, sorted=True), upmask)
@@ -488,16 +486,7 @@ class FactorGraph:
 
     @torch.cuda.amp.autocast(enabled=False)
     def update_lowmem(
-        self,
-        t0=None,
-        t1=None,
-        iters=2,
-        steps=8,
-        max_t=None,
-        lm: float = 1e-5,
-        ep: float = 1e-2,
-        motion_only=False,
-        ba_type="global",
+        self, t0=None, t1=None, iters=8, steps=2, max_t=None, lm: float = 1e-4, ep: float = 1e-1, motion_only=False
     ):
         """run update operator on factor graph - reduced memory implementation"""
         cur_t = self.video.counter.value
@@ -566,13 +555,10 @@ class FactorGraph:
             weight = self.weight.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
 
             # dense bundle adjustment, fix the first keyframe, while optimize within [1, t]
-            # NOTE we need to pass the ba_type here to lock the threads correctly
-            self.video.ba(
-                target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep, motion_only, ba_type=ba_type
-            )
+            self.video.ba(target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep, motion_only)
 
     @torch.cuda.amp.autocast(enabled=False)
-    def prior_update_lowmem(self, t0=None, t1=None, iters=2, steps=8, max_t=None, lm: float = 1e-5, ep: float = 1e-2):
+    def prior_update_lowmem(self, t0=None, t1=None, iters=2, steps=8, max_t=None, lm: float = 1e-4, ep: float = 1e-1):
         """run update operator on factor graph - reduced memory implementation"""
         cur_t = self.video.counter.value
 
@@ -640,7 +626,6 @@ class FactorGraph:
             weight = self.weight.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
 
             # dense bundle adjustment, fix the first keyframe, while optimize within [1, t]
-            # NOTE we need to pass the ba_type here to lock the threads correctly
             self.video.ba_prior(target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep)
 
     @torch.cuda.amp.autocast(enabled=True)

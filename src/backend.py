@@ -156,8 +156,8 @@ class Backend:
         steps=8,
         iters=2,
         motion_only=False,
-        lm=1e-3,
-        ep=1e-1,
+        lm=1e-4,
+        ep=0.1,
         local_graph: Optional[FactorGraph] = None,
     ):
         """Perform an update on the graph with loop closure awareness. This uses a higher step size
