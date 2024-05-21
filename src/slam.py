@@ -87,6 +87,9 @@ class SLAM:
 
         # Insert a dummy delay to snychronize frontend and backend as needed
         self.sleep_time = cfg.get("sleep_delay", 3)
+        self.t_start = cfg.get("t_start", 0)
+        self.t_stop = cfg.get("t_stop", None)
+
         # Delete backend when hitting this threshold, so we can keep going with just frontend
         self.max_ram_usage = cfg.get("max_ram_usage", 0.9)
         self.plot_uncertainty = cfg.get("plot_uncertainty", False)  # Show the optimization uncertainty maps
@@ -191,6 +194,12 @@ class SLAM:
 
         for frame in tqdm(stream):
             timestamp, image, depth, intrinsic, gt_pose = frame
+            # Control when to start and when to stop the SLAM system from outside
+            if timestamp < self.t_start:
+                continue
+            if self.t_stop is not None and timestamp > self.t_stop:
+                break
+
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
 
@@ -273,7 +282,7 @@ class SLAM:
 
         while (self.tracking_finished + self.backend_finished) < 2 and run:
             self.gaussian_mapper(mapping_queue, received_mapping)
-            sleep(self.sleep_time / 4)
+            sleep(self.sleep_time / 2)
 
         # Run for one last time after everything finished
         finished = False
@@ -311,11 +320,12 @@ class SLAM:
         while self.gaussian_mapping_finished < 1:
             pass
 
-        # empty all the guis that are in params_gui so this will for sure get empty
-        while not self.params_gui.q_main2vis.empty():
-            obj = self.params_gui.q_main2vis.get()
-            a = clone_obj(obj)
-            del obj
+        if run:
+            # empty all the guis that are in params_gui so this will for sure get empty
+            while not self.params_gui.q_main2vis.empty():
+                obj = self.params_gui.q_main2vis.get()
+                a = clone_obj(obj)
+                del obj
 
         self.mapping_visualizing_finished += 1
         self.all_finished += 1
@@ -458,22 +468,6 @@ class SLAM:
             self.info("Terminated process {}".format(p.name))
         self.info("Terminate: Done!")
 
-    def test(self, stream):
-        """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
-
-        processes = [
-            # mp.Process(target=self.show_stream, args=(0, self.input_pipe)),
-            mp.Process(target=self.visualizing, args=(1, False))
-        ]
-
-        self.num_running_thread[0] += len(processes)
-        for p in processes:
-            p.start()
-
-        for frame in tqdm(stream):
-            timestamp, image, depth, intrinsic, gt_pose = frame
-            self.frontend(timestamp, image, depth, intrinsic, gt_pose)
-
     def run(self, stream):
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
@@ -520,3 +514,29 @@ class SLAM:
             pass
 
         self.terminate(processes, stream, gaussian_mapper_last_state)
+
+    def test(self, stream):
+        """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
+
+        # processes = [mp.Process(target=self.visualizing, args=(1, True))]
+        processes = [
+            mp.Process(
+                target=self.mapping_gui,
+                args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
+                name="Mapping GUI",
+            )
+        ]
+        self.num_running_thread[0] += len(processes)
+        for p in processes:
+            p.start()
+
+        for frame in tqdm(stream):
+            timestamp, image, depth, intrinsic, gt_pose = frame
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose)
+            if self.frontend.optimizer.is_initialized:
+                self.gaussian_mapper.test()
+
+        self.info("Interpolating trajectory to get more frames for Refinement ...")
+        new_cams = self.gaussian_mapper.get_nonkeyframe_cameras(stream, self.traj_filler)
+        self.info("Done!")
+        ipdb.set_trace()
