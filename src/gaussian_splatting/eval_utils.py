@@ -16,7 +16,7 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from .gaussian_renderer import render
 from .utils.image_utils import psnr
-from .utils.loss_utils import ssim
+from .utils.loss_utils import ssim_torch as ssim
 from .utils.system_utils import mkdir_p
 from .logging_utils import Log
 from .multiprocessing_utils import clone_obj
@@ -123,7 +123,7 @@ def eval_ate(
         for kf_id in kf_ids:
             kf = frames[kf_id]
 
-            _, _, c2w, _, _ = video.get_mapping_item(kf_id, video.device)
+            _, _, c2w, _, _, _ = video.get_mapping_item(kf_id, video.device)
             w2c = torch.inverse(c2w)
             R_est = w2c[:3, :3].unsqueeze(0).detach()
             T_est = w2c[:3, 3].detach()

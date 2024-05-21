@@ -193,22 +193,29 @@ class SLAM:
             pass
 
         for frame in tqdm(stream):
-            timestamp, image, depth, intrinsic, gt_pose = frame
+
+            # TODO chen: does this mean that the filter_dyn flag is passed to the dataloader?
+            # TODO chen: change this, so we automatically load this with dyn_mask in all dataloaders?
+            if self.cfg.filter_dyn:
+                timestamp, image, depth, intrinsic, gt_pose, dyn_mask = frame
+            else:
+                timestamp, image, depth, intrinsic, gt_pose = frame
+                dyn_mask = None
+            if self.mode not in ["rgbd", "prgbd"]:
+                depth = None
+
             # Control when to start and when to stop the SLAM system from outside
             if timestamp < self.t_start:
                 continue
             if timestamp > self.t_stop:
                 break
 
-            if self.mode not in ["rgbd", "prgbd"]:
-                depth = None
-
             if self.cfg.show_stream:
                 # Transmit the incoming stream to another visualization thread
                 input_queue.put(image)
                 input_queue.put(depth)
 
-            self.frontend(timestamp, image, depth, intrinsic, gt_pose)
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose, dyn_mask=dyn_mask)
 
         del self.frontend
         torch.cuda.empty_cache()
@@ -320,8 +327,8 @@ class SLAM:
         while self.gaussian_mapping_finished < 1:
             pass
 
-        if run:
-            # empty all the guis that are in params_gui so this will for sure get empty
+        # empty all the guis that are in params_gui so this will for sure get empty
+        if run:  # NOTE Leon: It crashes if we dont check this
             while not self.params_gui.q_main2vis.empty():
                 obj = self.params_gui.q_main2vis.get()
                 a = clone_obj(obj)

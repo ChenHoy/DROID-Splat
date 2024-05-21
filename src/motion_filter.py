@@ -49,6 +49,7 @@ class MotionFilter:
         depth: Optional[torch.Tensor] = None,
         intrinsic: Optional[torch.Tensor] = None,
         gt_pose=None,
+        dyn_mask=None,
     ):
         """main update operation - run on every frame in video"""
 
@@ -91,6 +92,7 @@ class MotionFilter:
                 net[left_idx],
                 inp[left_idx],
                 gt_pose,
+                dyn_mask,
             )
 
         ### only add new frame if there is enough motion ###
@@ -119,6 +121,7 @@ class MotionFilter:
                     net[left_idx],
                     inp[left_idx],
                     gt_pose,
+                    dyn_mask,
                 )
 
             else:

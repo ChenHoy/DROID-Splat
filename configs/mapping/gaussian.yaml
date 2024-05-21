@@ -33,7 +33,7 @@ keyframes:
     confidence_thresh: 0.2 # Only take pixels above this confidence
 
   mapping:
-    densify_grad_threshold: 0.0002
+    densify_grad_threshold: 0.00001
     size_threshold: 20
     opacity_th: 0.01
     gaussian_extent: 5

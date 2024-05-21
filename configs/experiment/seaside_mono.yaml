@@ -4,6 +4,7 @@ defaults:
   - override /tracking: tartanair
 
 sleep_delay: 3.0
+mode: "mono"
 
 tracking:
   motion_filter:
@@ -25,3 +26,12 @@ tracking:
     loop_thresh: 30.0  
     loop_radius: 2
     loop_nms: 5
+
+
+mapping:
+  batch_mode: True
+  keyframes:
+    default_batch_size: 5
+    prune_mode: "abs"
+    mapping:
+      densify_grad_threshold: 0.001

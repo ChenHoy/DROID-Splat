@@ -105,6 +105,8 @@ class DepthVideo:
         # FIXME chen: this used to be -1 to always get the latest, but now we go consistently forward
         # self.filtered_id = torch.tensor([-1], dtype=torch.int, device=device).share_memory_()
 
+        self.dynamic_mask = torch.zeros(buffer, ht, wd, device=device, dtype=torch.bool).share_memory_()
+
     def get_lock(self):
         return self.counter.get_lock()
 
@@ -144,6 +146,9 @@ class DepthVideo:
 
         if len(item) > 9 and item[9] is not None:
             self.poses_gt[index] = item[9].to(self.poses_gt.device)
+
+        if len(item) > 10 and item[10] is not None:
+            self.dynamic_mask[index] = item[10]
 
     def __setitem__(self, index, item):
         with self.get_lock():
@@ -273,7 +278,12 @@ class DepthVideo:
             # NOTE chen: we adjust the depth scale here, because gaussian mapping defines a different projection
             depth = est_depth * scale_adjustment  # gt_depth
 
-        return image, depth, intrinsics, c2w, gt_c2w
+
+            dynamic_mask = self.dynamic_mask[index].clone().to(device)
+            #image = image * (dynamic_mask.unsqueeze(-1).float())
+            #depth = depth * (dynamic_mask.float())
+
+        return image, depth, intrinsics, c2w, gt_c2w, dynamic_mask
 
     # FIXME chen: there is some fuckery happening inside gaussian mapping, which attaches the wrong scale to the gaussians!
     # we somehow have a different scale after giving back the exact same ones without any optimization
