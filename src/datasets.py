@@ -145,6 +145,32 @@ class BaseDataset(Dataset):
 
         return depth_data
 
+    def _get_image(self, index: int) -> torch.Tensor:
+        color_path = self.color_paths[index]
+        color_data = cv2.imread(color_path)
+
+        H_out_with_edge, W_out_with_edge = (
+            self.H_out + self.H_edge * 2,
+            self.W_out + self.W_edge * 2,
+        )
+        color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
+        color_data = (
+            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
+        )  # bgr -> rgb, [0, 1]
+        color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
+
+        # crop image edge, there are invalid value on the edge of the color image
+        if self.W_edge > 0:
+            edge = self.W_edge
+            color_data = color_data[:, :, :, edge:-edge]
+
+        if self.H_edge > 0:
+            edge = self.H_edge
+            color_data = color_data[:, :, edge:-edge, :]
+
+        return color_data
+
+
     def __getitem__(self, index: int):
         color_path = self.color_paths[index]
         color_data = cv2.imread(color_path)
@@ -330,6 +356,7 @@ class DAVIS(BaseDataset):
         self.stride = cfg.get("stride", 1)
         self.sequence = cfg.data.scene
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, self.sequence, "*.jpg")))
+        ipdb.set_trace()
         self.mask_path = self.input_folder.replace("JPEGImages", "Annotations")
         self.mask_paths = sorted(glob.glob(os.path.join(self.mask_path, "*.png")))
 
