@@ -247,6 +247,8 @@ class DepthVideo:
         self.disps_clean[dirty_index] = disps
         self.filtered_id = max(dirty_index.max().item(), self.filtered_id)
 
+    # TODO use est_depth from map to initialize the Gaussians
+    # use depth_sens to supervise the Gaussians in the loss term, but in scale-invariant way
     def get_mapping_item(self, index, device="cuda:0", scale_adjustment: float = 1.0):
         """Get a part of the video to transfer to the Rendering module"""
 
@@ -273,8 +275,9 @@ class DepthVideo:
 
         return image, depth, intrinsics, c2w, gt_c2w
 
-    # FIXME chen: there is some fuckery happening inside gaussian mapping, which attached the wrong scale to the gaussians!
-    # we somehow have a different pose scale after giving back the exact same ones without any optimization
+    # FIXME chen: there is some fuckery happening inside gaussian mapping, which attaches the wrong scale to the gaussians!
+    # we somehow have a different scale after giving back the exact same ones without any optimization
+    # NOTE: this could be due to different optimization objectives, the scale of both Tracking/Rendering stabilizes after some time
     def set_mapping_item(self, index: List[torch.Tensor], poses: List[torch.Tensor], depths: List[torch.Tensor]):
         """Set a part of the video from the Rendering module"""
         # Filter out invalid views, where we could not render anything
