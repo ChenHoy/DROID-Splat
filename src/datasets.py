@@ -328,7 +328,7 @@ class DAVIS(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(DAVIS, self).__init__(cfg, device)
         self.stride = cfg.get("stride", 1)
-        self.sequence = cfg.data.sequence
+        self.sequence = cfg.data.scene
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, self.sequence, "*.jpg")))
         self.mask_path = self.input_folder.replace("JPEGImages", "Annotations")
         self.mask_paths = sorted(glob.glob(os.path.join(self.mask_path, "*.png")))
