@@ -1,3 +1,6 @@
+from typing import Tuple, List
+from tqdm import tqdm
+
 import torch
 import lietorch
 from lietorch import SE3
@@ -5,8 +8,9 @@ from .factor_graph import FactorGraph
 
 
 class PoseTrajectoryFiller:
-    """ This class is used to fill in non-keyframe poses """
-    def __init__(self, net, video, device='cuda:0'):
+    """This class is used to fill in non-keyframe poses"""
+
+    def __init__(self, net, video, device="cuda:0"):
 
         # split net modules
         self.cnet = net.cnet
@@ -22,12 +26,18 @@ class PoseTrajectoryFiller:
         self.STDV = torch.tensor([0.229, 0.224, 0.225], device=device)[:, None, None]
 
     @torch.cuda.amp.autocast(enabled=True)
-    def __feature_encoder(self, image):
-        """ features for correlation volume """
+    def __feature_encoder(self, image: torch.Tensor) -> torch.Tensor:
+        """features for correlation volume"""
         return self.fnet(image)
 
-    def __fill(self, timestamps, images, depths, intrinsics):
-        """ fill operator """
+    def __fill(
+        self,
+        timestamps: List[int],
+        images: List[torch.Tensor],
+        depths: List[torch.Tensor],
+        intrinsics: List[torch.Tensor],
+    ) -> List[SE3]:
+        """fill operator"""
         tt = torch.tensor(timestamps, device=self.device)
         images = torch.stack(images, dim=0)
         if depths is not None:
@@ -42,8 +52,8 @@ class PoseTrajectoryFiller:
         Ps = SE3(self.video.poses[:N])
 
         # found the location of current timestamp in keyframe queue
-        t0 = torch.tensor([ts[ts<=t].shape[0] - 1 for t in timestamps])
-        t1 = torch.where(t0 < N-1, t0+1, t0)
+        t0 = torch.tensor([ts[ts <= t].shape[0] - 1 for t in timestamps])
+        t1 = torch.where(t0 < N - 1, t0 + 1, t0)
 
         # time interval between nearby keyframes
         dt = ts[t1] - ts[t0] + 1e-3
@@ -59,41 +69,41 @@ class PoseTrajectoryFiller:
 
         # temporally put the non-keyframe at the end of keyframe queue
         self.video.counter.value += M
-        self.video[N:N+M] = (tt, images[:, 0], Gs.data, 1, depths, intrinsics / 8.0, fmap)
+        self.video[N : N + M] = (tt, images[:, 0], Gs.data, 1, depths, intrinsics / 8.0, fmap)
 
         graph = FactorGraph(self.video, self.update)
         # build edge between current frame and nearby keyframes for optimization
-        graph.add_factors(t0.cuda(), torch.arange(N, N+M).cuda())
-        graph.add_factors(t1.cuda(), torch.arange(N, N+M).cuda())
+        graph.add_factors(t0.cuda(), torch.arange(N, N + M).cuda())
+        graph.add_factors(t1.cuda(), torch.arange(N, N + M).cuda())
 
         for itr in range(6):
-            graph.update(N, N+M, motion_only=True)
+            graph.update(N, N + M, motion_only=True)
 
-        Gs = SE3(self.video.poses[N:N+M].clone())
-        self.video.counter.value -= M
+        Gs = SE3(self.video.poses[N : N + M].clone())
+        self.video.counter.value -= M  # Reset counter back to where it previously was
 
         return [Gs]
 
     @torch.no_grad()
-    def __call__(self, image_stream):
-        """ fill in poses of non-keyframe images. """
+    def __call__(self, image_stream, batch_size: int = 32, return_tstamps: bool = False) -> torch.Tensor:
+        """fill in poses of non-keyframe images in batch mode. This works by first linear interpolating the
+        poses in between the keyframes, then computing the optical flow between these frames and doing a motion only BA
+        refinement"""
 
         # store all camera poses
         pose_list = []
+        timestamps, images, depths, intrinsics = [], [], [], []
+        all_timestamps = []
 
-        timestamps = []
-        images = []
-        depths = []
-        intrinsics = []
-
-        for (timestamp, image, depth, intrinsic, gt_pose) in image_stream:
+        for timestamp, image, depth, intrinsic, gt_pose in tqdm(image_stream):
+            all_timestamps.append(timestamp)
             timestamps.append(timestamp)
             images.append(image)
             if depth is not None:
                 depths.append(depth)
             intrinsics.append(intrinsic)
 
-            if len(timestamps) == 16:
+            if len(timestamps) == batch_size:
                 depths = depths if len(depths) > 0 else None
                 pose_list += self.__fill(timestamps, images, depths, intrinsics)
                 timestamps, images, depths, intrinsics = [], [], [], []
@@ -102,5 +112,8 @@ class PoseTrajectoryFiller:
             depths = depths if len(depths) > 0 else None
             pose_list += self.__fill(timestamps, images, depths, intrinsics)
 
-        # stitch pose segments together
-        return lietorch.cat(pose_list, dim=0)
+        if return_tstamps:
+            return lietorch.cat(pose_list, dim=0), all_timestamps
+        else:
+            # stitch pose segments together
+            return lietorch.cat(pose_list, dim=0)
