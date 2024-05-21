@@ -1,0 +1,18 @@
+dataset: "davis"
+input_folder: "media/data/DAVIS/JPEGImages/Full-Resolution/" # base path
+scene: "parkour" # Switch over scenes
+
+### original camera parameters
+cam:
+  H: 1920
+  W: 1080
+  H_out: 540
+  W_out: 960
+  H_edge: 0 
+  W_edge: 0
+  fx: 1296.0
+  fy: 1296.0
+  cx: 540
+  cy: 960
+  calibration_txt: ''
+  camera_model: "pinhole"
