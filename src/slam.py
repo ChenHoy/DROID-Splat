@@ -88,7 +88,7 @@ class SLAM:
         # Insert a dummy delay to snychronize frontend and backend as needed
         self.sleep_time = cfg.get("sleep_delay", 3)
         self.t_start = cfg.get("t_start", 0)
-        self.t_stop = cfg.get("t_stop", None)
+        self.t_stop = cfg.get("t_stop", -1)
 
         # Delete backend when hitting this threshold, so we can keep going with just frontend
         self.max_ram_usage = cfg.get("max_ram_usage", 0.9)
@@ -197,7 +197,7 @@ class SLAM:
             # Control when to start and when to stop the SLAM system from outside
             if timestamp < self.t_start:
                 continue
-            if self.t_stop is not None and timestamp > self.t_stop:
+            if timestamp > self.t_stop:
                 break
 
             if self.mode not in ["rgbd", "prgbd"]:
