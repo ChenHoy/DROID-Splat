@@ -4,17 +4,15 @@ beta: 0.7  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_ker
 warmup: 8
 upsample: True
 
-
 motion_filter:
   thresh: 4.0  # add as keyframe if avg flow >
-
 
 frontend:
   steps1: 4 # 1st outer loop with feature correlation
   steps2: 2 # 2nd outer loop with feature correlation
   iters: 4 # Actual BA iterations
-  keyframe_thresh: 4.0  # remove keyframe if avg flow < 
-  thresh: 16.0  
+  keyframe_thresh: 5.0  # remove keyframe if avg flow < 
+  thresh: 10.0  
   window: 25  # local ba window size
   max_factors: 100  # num of edges within local ba
   radius: 2
@@ -30,17 +28,17 @@ frontend:
 
   
 backend:
-  warmup: null
-  window: 200 # Dont optimize more keyframes to avoid OOM
-  thresh: 25.0  # only consider edge with avg flow < 
-  radius: 1
-  nms: 5
+  warmup: 12
+  window: 100 # Dont optimize more keyframes to avoid OOM
+  thresh: 15.0  # only consider edge with avg flow < 
+  radius: 2
+  nms: 2
 
   steps: 8
   iters: 2
 
-  use_loop_closure: False
+  use_loop_closure: True
   loop_window: 150 # NOTE make sure that loop window is not bigger than the general window of the backend
-  loop_thresh: 20.0  # only consider edge with avg flow < 
+  loop_thresh: 15.0  # only consider edge with avg flow < 
   loop_radius: 2
   loop_nms: 5
