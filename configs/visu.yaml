@@ -1,0 +1,23 @@
+defaults:
+  - _self_
+  # - data: TartanAir/base.yaml
+  # - data: DAVIS/base.yaml
+  - data: Replica/base.yaml
+
+hydra:
+  run:
+    dir: visu/${hydra.job.name}_${now:%Y-%m-%d_%H-%M-%S}
+  job:
+    chdir: False
+    name: tartanair
+
+mode: "rgbd"  # "prgbd"
+device: "cuda:0"
+
+# Control what portion of the video we use
+stride: 1
+t_start: 0
+t_stop: 500
+
+# Do we want to visualize the dynamic objects in the scene?
+filter_dyn: False
