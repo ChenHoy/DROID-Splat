@@ -1,18 +1,21 @@
 dataset: "davis"
-input_folder: "media/data/DAVIS/JPEGImages/Full-Resolution/" # base path
+input_folder: "/media/data/DAVIS/JPEGImages/Full-Resolution/" # base path
+mono_depth: "zoed-nk"
 scene: "parkour" # Switch over scenes
 png_depth_scale: 1.0
 
 ### original camera parameters
 cam:
-  H: 1920
-  W: 1080
-  H_out: 960 
-  W_out: 540 
+  H: 1080
+  W: 1920
+  H_out: 480
+  W_out: 840
   H_edge: 0 
   W_edge: 0
-  fx: 1296.0
-  fy: 1296.0
+  fx: 1500.0  # Annikas heuristic
+  fy: 1500.0 
+  # fx: 2304.0 # Teeds heuristic
+  # fy: 2304.0 
   cx: 540
   cy: 960
   calibration_txt: ''

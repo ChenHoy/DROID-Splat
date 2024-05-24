@@ -96,23 +96,19 @@ class BaseDataset(Dataset):
         self.color_paths = sorted(glob.glob(self.input_folder))
         self.color_paths = self.color_paths[:: self.stride]
 
-        self.filter_dyn = cfg.filter_dyn if "filter_dyn" in cfg else False
-
+        self.has_dyn_masks = False
+        self.return_dyn_masks = cfg.get("with_dyn", False)
         self.n_img = len(self.color_paths)
 
         self.depth_paths = None
+        self.mask_paths = None
         self.poses = None
         self.image_timestamps = None
 
-        self.H, self.W, self.fx, self.fy, self.cx, self.cy = (
-            int(cfg.data.cam.H),
-            int(cfg.data.cam.W),
-            float(cfg.data.cam.fx),
-            float(cfg.data.cam.fy),
-            float(cfg.data.cam.cx),
-            float(cfg.data.cam.cy),
-        )
+        self.H, self.W = int(cfg.data.cam.H), int(cfg.data.cam.W)
         self.H_out, self.W_out = int(cfg.data.cam.H_out), int(cfg.data.cam.W_out)
+        self.fx, self.fy = float(cfg.data.cam.fx), float(cfg.data.cam.fy)
+        self.cx, self.cy = float(cfg.data.cam.cx), float(cfg.data.cam.cy)
         self.H_edge, self.W_edge = int(cfg.data.cam.H_edge), int(cfg.data.cam.W_edge)
 
         self.distortion = np.array(cfg.data.cam.distortion) if "distortion" in cfg.data.cam else None
@@ -157,23 +153,23 @@ class BaseDataset(Dataset):
         color_data = (
             torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
         )  # bgr -> rgb, [0, 1]
-        color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
+        color_data = color_data.unsqueeze(dim=0)  # [1, C, H, W]
 
         # crop image edge, there are invalid value on the edge of the color image
-        if self.W_edge > 0:
-            edge = self.W_edge
-            color_data = color_data[:, :, :, edge:-edge]
-
         if self.H_edge > 0:
             edge = self.H_edge
             color_data = color_data[:, :, edge:-edge, :]
 
-        return color_data
+        if self.W_edge > 0:
+            edge = self.W_edge
+            color_data = color_data[:, :, :, edge:-edge]
 
+        return color_data
 
     def __getitem__(self, index: int):
         color_path = self.color_paths[index]
         color_data = cv2.imread(color_path)
+
         if self.distortion is not None:
             K = np.eye(3)
             K[0, 0], K[0, 2], K[1, 1], K[1, 2] = self.fx, self.cx, self.fy, self.cy
@@ -187,15 +183,22 @@ class BaseDataset(Dataset):
         outsize = (H_out_with_edge, W_out_with_edge)
 
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
-        color_data = (
-            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
-        )  # bgr -> rgb, [0, 1]
+        # bgr -> rgb, [0, 1]
+
+        color_data = torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
         color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
 
         depth_data = self.depthloader(index)
         if depth_data is not None:
             depth_data = torch.from_numpy(depth_data).float()
             depth_data = F.interpolate(depth_data[None, None], outsize, mode="nearest")[0, 0]
+            # Crop
+            if self.H_edge > 0:
+                edge = self.H_edge
+                depth_data = depth_data[edge:-edge, :]
+            if self.W_edge > 0:
+                edge = self.W_edge
+                depth_data = depth_data[:, edge:-edge]
 
         intrinsic = torch.as_tensor([self.fx, self.fy, self.cx, self.cy]).float()
         intrinsic[0] *= W_out_with_edge / self.W
@@ -204,36 +207,39 @@ class BaseDataset(Dataset):
         intrinsic[3] *= H_out_with_edge / self.H
 
         # crop image edge, there are invalid value on the edge of the color image
-        if self.W_edge > 0:
-            edge = self.W_edge
-            color_data = color_data[:, :, :, edge:-edge]
-            if depth_data is not None:
-                depth_data = depth_data[:, edge:-edge]
-            intrinsic[2] -= edge
-
         if self.H_edge > 0:
             edge = self.H_edge
             color_data = color_data[:, :, edge:-edge, :]
-            if depth_data is not None:
-                depth_data = depth_data[edge:-edge, :]
             intrinsic[3] -= edge
+
+        if self.W_edge > 0:
+            edge = self.W_edge
+            color_data = color_data[:, :, :, edge:-edge]
+            intrinsic[2] -= edge
 
         if self.poses is not None:
             pose = torch.from_numpy(self.poses[index]).float()
         else:
             pose = None
 
-        # TODO chen: should we just return mask always and it is None if not available?
-        if self.filter_dyn:
+        if self.has_dyn_masks and self.mask_paths is not None:
             mask = np.uint8(cv2.imread(self.mask_paths[index], cv2.IMREAD_GRAYSCALE) == 0)
             mask = cv2.resize(mask, (W_out_with_edge, H_out_with_edge))
             mask = torch.from_numpy(mask).bool()
+            if self.H_edge > 0:
+                mask = mask[edge:-edge, :]
+            if self.W_edge > 0:
+                mask = mask[:, edge:-edge]
 
+        if self.return_dyn_masks:
+            if not self.has_dyn_masks:
+                raise Warning("Warning. Dataset does not have any dynamic masks, please provide some if you want to return them!")
             return index, color_data, depth_data, intrinsic, pose, mask
+        else:
+            return index, color_data, depth_data, intrinsic, pose
 
-        return index, color_data, depth_data, intrinsic, pose
 
-
+# TODO chen: make depth_folder configurable and unify folder names across datasets so we can switch more easily
 class ImageFolder(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(ImageFolder, self).__init__(cfg, device)
@@ -270,7 +276,8 @@ class Replica(BaseDataset):
         if cfg.mode == "prgbd":
             self.depth_paths = sorted(
                 # glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
-                glob.glob(os.path.join(self.input_folder, "depthany-vitl-indoor/frame*.npy"))
+                # glob.glob(os.path.join(self.input_folder, "depthany-vitl-indoor/frame*.npy"))
+                glob.glob(os.path.join(self.input_folder, "metric3d-vit_giant2/frame*.npy"))
             )
             assert (
                 len(self.depth_paths) == self.n_img
@@ -283,6 +290,7 @@ class Replica(BaseDataset):
         self.load_poses(os.path.join(self.input_folder, "traj.txt"))
         self.poses = self.poses[:: self.stride]
 
+        # FIXME chen: what exactly is this part?
         relative_poses = True  # True to test the gt stream mapping
         if relative_poses:
             self.poses = torch.from_numpy(np.array(self.poses))
@@ -356,18 +364,20 @@ class DAVIS(BaseDataset):
         self.stride = cfg.get("stride", 1)
         self.sequence = cfg.data.scene
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, self.sequence, "*.jpg")))
-        ipdb.set_trace()
+
+        self.has_dyn_masks = True
         self.mask_path = self.input_folder.replace("JPEGImages", "Annotations")
-        self.mask_paths = sorted(glob.glob(os.path.join(self.mask_path, "*.png")))
+        self.mask_paths = sorted(glob.glob(os.path.join(self.mask_path, self.sequence, "*.png")))
 
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
-            self.depth_path = self.input_folder.replace("JPEGImages/Full-Resolution", "Depth/Full-Resolution/zoed_nk")
+            # self.depth_path = self.input_folder.replace("JPEGImages/Full-Resolution", "Depth/Full-Resolution/zoed_nk")
+            # self.depth_path = self.input_folder.replace("JPEGImages/Full-Resolution", "Depth/Full-Resolution/depthany-vitl-outdoor_left")
+            self.depth_path = self.input_folder.replace("JPEGImages/Full-Resolution", "Depth/Full-Resolution/metric3d-vit_giant2")
             self.depth_paths = sorted(
-                glob.glob(os.path.join(self.depth_path, "*.npy"))
-                # glob.glob(os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy"))
+                glob.glob(os.path.join(self.depth_path, self.sequence, "*.npy"))
             )
             assert (
                 len(self.depth_paths) == self.n_img
@@ -411,6 +421,9 @@ class TotalRecon(BaseDataset):
         self.load_poses(self.pose_paths)
         # self.set_intrinsics()
 
+        # Set number of images for loading poses
+        self.n_img = len(self.color_paths)
+
     def load_poses(self, paths):
         self.poses = []
         for path in paths:
@@ -437,9 +450,10 @@ class KITTI(BaseDataset):
         if cfg.mode == "prgbd":
             self.depth_paths = sorted(
                 glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy"))  # Use ZoeDepth predictions
+                # Use DepthAnything predictions
                 # glob.glob(
                 #     os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy")
-                # )  # Use DepthAnything predictions
+                # )  
             )
             assert (
                 len(self.depth_paths) == self.n_img
@@ -450,7 +464,10 @@ class KITTI(BaseDataset):
             self.depth_paths = None
 
         self.color_paths = self.color_paths[:: self.stride]
+        # Set number of images for loading poses
+        self.n_img = len(self.color_paths)
 
+        # FIXME chen: why fake poses if we can read them?!
         self.poses = [np.eye(4) for _ in range(self.n_img)]  # Fake gt poses
 
 
