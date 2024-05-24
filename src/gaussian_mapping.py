@@ -72,7 +72,7 @@ class GaussianMapper(object):
         self.filter_uncertainty = cfg.mapping.filter_uncertainty
         self.filter_multiview = cfg.mapping.filter_multiview
 
-        self.filter_dyn = cfg.filter_dyn
+        self.filter_dyn = cfg.with_dyn
 
         self.loss_params = cfg.mapping.loss
 
@@ -150,15 +150,11 @@ class GaussianMapper(object):
             self.info(f"Warning. Trying to intialize from empty frame {idx}!")
             return None
 
-        scale_adjustment = 1.0
-
         if self.filter_dyn:
-            color, depth, intrinsics, c2w, _, dyn_mask = self.video.get_mapping_item(
-            idx, self.device, scale_adjustment=scale_adjustment)
+            color, depth, intrinsics, c2w, _, dyn_mask = self.video.get_mapping_item(idx, self.device)
 
         else:
-            color, depth, intrinsics, c2w, _, _ = self.video.get_mapping_item(
-                idx, self.device, scale_adjustment=scale_adjustment)
+            color, depth, intrinsics, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
             dyn_mask = None
 
         return self.camera_from_frame(idx, color, depth, intrinsics, c2w, dynamic_mask=dyn_mask)
@@ -218,17 +214,14 @@ class GaussianMapper(object):
 
         for idx in to_add:
             if self.filter_dyn:
-                color, depth, intrinsics, c2w, _, dyn_mask  = self.video.get_mapping_item(idx, self.device)
+                color, depth, intrinsics, c2w, _, dyn_mask = self.video.get_mapping_item(idx, self.device)
             else:
                 color, depth, intrinsics, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
                 dyn_mask = None
 
-            color = color.permute(2, 0, 1)
-
             cam = self.camera_from_frame(idx, color, depth, intrinsics, c2w, dynamic_mask=dyn_mask)
             cam.update_RT(cam.R_gt, cam.T_gt)  # Assuming we found the best pose in tracking
             self.new_cameras.append(cam)
-
 
     def pose_optimizer(self, frames: List):
         """Creates an optimizer for the camera poses for all provided frames."""
@@ -249,7 +242,6 @@ class GaussianMapper(object):
 
         return torch.optim.Adam(opt_params)
 
-
     # NOTE chen: this assumes the video object to be a gt reference
     def frame_updater(self):
         """Gets the list of frames and updates the depth and pose based on the video."""
@@ -257,7 +249,7 @@ class GaussianMapper(object):
         all_idxs = torch.tensor([cam.uid for cam in all_cameras]).long().to(self.device)
 
         with self.video.get_lock():
-            #print(self.video.timestamp)
+            # print(self.video.timestamp)
             (dirty_index,) = torch.where(self.video.mapping_dirty.clone())
             dirty_index = dirty_index[dirty_index < self.cur_idx - self.delay]
         # Only update already inserted cameras
@@ -303,18 +295,25 @@ class GaussianMapper(object):
         """
         all_poses, all_timestamps = trajectory_filler(stream, batch_size=batch_size, return_tstamps=True)
         already_mapped = [self.video.timestamp[cam.uid] for cam in self.cameras]
-        intrinsic = self.video.intrinsics[0].to(self.device)  # We have the same global optimized intrinsics
-        new_cams = []
+        s = self.video.scale_factor
+        if self.video.upsampled:
+            intrinsic = self.video.intrinsics[0].to(self.device) * s
+        else:
+            intrinsic = self.video.intrinsics[0].to(self.device)
 
+        new_cams = []
         for w2c, timestamp in tqdm(zip(all_poses, all_timestamps)):
             if timestamp in already_mapped:
-                continue
+                new_cams.append(self.cameras)
 
             c2w = w2c.inv().matrix()  # [4, 4]
+
             # color = stream._get_image(timestamp).squeeze(0).permute(1, 2, 0).contiguous().to(self.device)
-            color = stream._get_image(timestamp).squeeze(0).contiguous().to(self.device)
+            color = stream._get_image(timestamp).clone().squeeze(0).contiguous().to(self.device)
+            if not self.video.upsampled:
+                color = color[..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
             cam = self.camera_from_frame(timestamp, color, None, intrinsic, c2w)
-            cam.update_RT(cam.R_gt, cam.T_gt)  # Assuming we found the best pose in tracking
+            cam.update_RT(cam.R_gt, cam.T_gt)
             new_cams.append(cam)
 
         return new_cams
@@ -488,6 +487,24 @@ class GaussianMapper(object):
 
         return depth_loss
 
+    # TODO implement this
+    # TODO use a separate list of gaussians for dyn. objects
+    # TODO chen: refactor this into a loss file
+    # i) static loss
+    # ii) dynamic loss in batch mode
+    # iii) dynamic regularizer loss for scale changes and trajectory changes
+    def dynamic_gaussian_loss(self, image: torch.Tensor, depth: torch.Tensor, cam: Camera):
+        raise NotImplementedError()
+
+    # TODO
+    def construct_dyn_gaussians(self, mask, depth, image, cam: Camera):
+        """Seed new Gaussians around an existing dyn. object mask and use the current scene depth and image as initialization
+
+        i) preoptimize Gaussians for first frame
+        ii) then adjust and finetune over whole list of frames
+        """
+        raise NotImplementedError()
+
     def mapping_rgbd_loss(
         self,
         image: torch.Tensor,
@@ -501,18 +518,22 @@ class GaussianMapper(object):
         if cam.depth is None:
             has_depth = False
 
-        if self.filter_dyn:
-            image = image * cam.dyn_mask
-            depth = depth * cam.dyn_mask
-
         alpha1, alpha2 = self.loss_params.alpha1, self.loss_params.alpha2
         beta = self.loss_params.beta2
 
         # Mask out pixels with little information and invalid depth pixels
         rgb_pixel_mask = (cam.original_image.sum(dim=0) > self.loss_params.rgb_boundary_threshold).view(*depth.shape)
+        # Only compute the loss in static regions
+        # TODO chen: is dyn_mask 1 in static regions but 1 elsewhere or is it defininte opposite?!
+        # TODO either change name or adjust here by inverting
+        if self.filter_dyn:
+            rgb_pixel_mask = rgb_pixel_mask | cam.dyn_mask
+
         if has_depth:
             # Only use valid depths for supervision
             depth_pixel_mask = ((cam.depth > 0.01) * (cam.depth < 1e7)).view(*depth.shape)
+            if self.filter_dyn:
+                depth_pixel_mask = depth_pixel_mask | cam.dyn_mask
 
         if with_edge_weight:
             edge_mask_x, edge_mask_y = image_gradient_mask(
@@ -610,17 +631,20 @@ class GaussianMapper(object):
     def _last_call(self, mapping_queue: mp.Queue, received_item: mp.Event):
         """Do one last refinement over the map"""
 
-        # if self.slam.dataset is not None:
-        #     self.info("Interpolating trajectory to get non-keyframe Cameras for refinement ...")
-        #     non_kf_cams = self.get_nonkeyframe_cameras(self.slam.dataset, self.slam.traj_filler)
-        #     self.info(f"Added {len(non_kf_cams)} new cameras: {[cam.uid for cam in non_kf_cams]}")
+        if self.slam.dataset is not None:
+            self.info("Interpolating trajectory to get non-keyframe Cameras for refinement ...")
+            non_kf_cams = self.get_nonkeyframe_cameras(self.slam.dataset, self.slam.traj_filler)
+            ipdb.set_trace()
+            self.info(f"Added {len(non_kf_cams)} new cameras: {[cam.uid for cam in non_kf_cams]}")
 
-        #     # TODO maybe dont even initialize new gaussian but just use the extra supervision signal?
-        #     # FIXME does this work? -> we need to initialize the gaussians with some depth map, but we dont have any, either use nearest keyframe or random at position
-        #     for cam in non_kf_cams:
-        #         self.initialized = True
-        #         # self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=True)
-        #     self.cameras += non_kf_cams  # Add to set of cameras
+            # TODO maybe dont even initialize new gaussian but just use the extra supervision signal?
+            # FIXME does this work? -> we need to initialize the gaussians with some depth map, but we dont have any, either use nearest keyframe or random at position
+            for cam in non_kf_cams:
+                self.initialized = True
+                # self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=True)
+
+            self.cameras += non_kf_cams  # Add to set of cameras
+            # TODO order self.cameras according to the uid
 
         self.info("\nMapping refinement starting")
         # NOTE MonoGS does 26k iterations for a single camera, while we do 100 for multiple cameras
@@ -687,7 +711,7 @@ class GaussianMapper(object):
                 else:
                     n_g = self.gaussians.get_xyz.shape[0]
                     self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=False)
-                    #self.info(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians based on view {cam.uid}")
+                    # self.info(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians based on view {cam.uid}")
 
             # We might have 0 Gaussians in some cases
             if len(self.gaussians.get_xyz) == 0:
@@ -734,8 +758,8 @@ class GaussianMapper(object):
                         current_frame=cam,
                         keyframes=self.cameras,
                         kf_window=None,
-                        gtcolor=(cam.original_image * cam.dyn_mask if self.filter_dyn else cam.original_image),
-                        gtdepth=gtdepth * cam.dyn_mask.detach().cpu().numpy() if self.filter_dyn else gtdepth,
+                        gtcolor=(cam.original_image),
+                        gtdepth=gtdepth,
                     )
                 )
 

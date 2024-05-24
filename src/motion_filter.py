@@ -53,7 +53,7 @@ class MotionFilter:
     ):
         """main update operation - run on every frame in video"""
 
-        scale_factor = 8.0
+        scale_factor = self.video.scale_factor
         IdentityMat = lietorch.SE3.Identity(
             1,
         ).data.squeeze()
@@ -72,6 +72,7 @@ class MotionFilter:
         ### always add frist frame to the depth video ###
         left_idx = 0  # i.e., left image, for stereo case, we only store the hidden or input of left image
         if self.video.counter.value == 0:
+            # [1, 128, imh//8, imw//8]
             net, inp = self.__context_encoder(
                 inputs[
                     :,
@@ -79,7 +80,7 @@ class MotionFilter:
                         left_idx,
                     ],
                 ]
-            )  # [1, 128, imh//8, imw//8]
+            )
             self.net, self.inp, self.fmap = net, inp, gmap
             self.video.append(
                 timestamp,
@@ -87,7 +88,7 @@ class MotionFilter:
                 IdentityMat,
                 1.0,
                 depth,
-                intrinsic / scale_factor,
+                intrinsic,  # NOTE chen: we now scale intrinsics inside the video set_item method!
                 gmap,
                 net[left_idx],
                 inp[left_idx],
@@ -98,9 +99,8 @@ class MotionFilter:
         ### only add new frame if there is enough motion ###
         else:
             coords0 = pops.coords_grid(ht, wd, device=self.device)[None, None]  # [1, 1, imh//8, imw//8, 2]
-            corr = CorrBlock(self.fmap[None, [left_idx]], gmap[None, [left_idx]])(
-                coords0
-            )  # [1, 1, 4*49, imh//8, imw//8]
+            # [1, 1, 4*49, imh//8, imw//8]
+            corr = CorrBlock(self.fmap[None, [left_idx]], gmap[None, [left_idx]])(coords0)
 
             # approximate flow magnitude using 1 update iteration
             _, delta, weight = self.update(self.net[None], self.inp[None], corr)  # [1, 1, imh//8, imw//8, 2]
@@ -116,7 +116,7 @@ class MotionFilter:
                     None,
                     None,
                     depth,
-                    intrinsic / scale_factor,
+                    intrinsic,  # NOTE chen: we now scale intrinsics inside the video set_item method!
                     gmap,
                     net[left_idx],
                     inp[left_idx],

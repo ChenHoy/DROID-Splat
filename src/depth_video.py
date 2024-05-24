@@ -67,7 +67,7 @@ class DepthVideo:
         self.disps = torch.ones(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         self.disps_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
         # Estimated Uncertainty weights for Optimization reduced for each node from factor graph
-        self.uncertainty = torch.zeros(buffer, ht // 8, wd // 8, device=device, dtype=torch.float)
+        self.uncertainty = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float)
         self.uncertainty_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
 
         self.disps_sens = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
@@ -116,6 +116,7 @@ class DepthVideo:
         elif isinstance(index, torch.Tensor) and index.max().item() > self.counter.value:
             self.counter.value = index.max().item() + 1
 
+        s = self.scale_factor
         self.timestamp[index] = item[0]
         self.images[index] = item[1]
 
@@ -127,13 +128,14 @@ class DepthVideo:
 
         if item[4] is not None and self.cfg.mode != "mono":
             self.depths_gt[index] = item[4]
-            depth = item[4][..., 3::8, 3::8]
+            depth = item[4][..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
             self.disps_sens[index] = torch.where(depth > 0, 1.0 / depth, depth)
-            # If we have a prior, we initialize disparity with the prior
+            # if self.cfg.mode != "prgbd":
             self.disps[index] = self.disps_sens[index].clone()
 
         if item[5] is not None:
-            self.intrinsics[index] = item[5]
+            # NOTE chen: we always work with the downscaled images/disps for optimization so store intrinsics at that scale
+            self.intrinsics[index] = item[5] / s
 
         if len(item) > 6:
             self.fmaps[index] = item[6]
@@ -254,16 +256,19 @@ class DepthVideo:
 
     # TODO use est_depth from map to initialize the Gaussians
     # use depth_sens to supervise the Gaussians in the loss term, but in scale-invariant way
-    def get_mapping_item(self, index, device="cuda:0", scale_adjustment: float = 1.0):
+    # FIXME do we use scale_factor consistently for intrinsics?
+    def get_mapping_item(self, index, device="cuda:0"):
         """Get a part of the video to transfer to the Rendering module"""
 
+        s = self.scale_factor
         with self.get_lock():
             if self.upsampled:
                 image = self.images[index].clone().permute(1, 2, 0).contiguous().to(device)  # [h, w, 3]
-                intrinsics = self.intrinsics[0].clone().contiguous().to(device) * self.scale_factor  # [4]
+                intrinsics = self.intrinsics[0].clone().contiguous().to(device) * s  # [4]
             else:
                 # Color is always stored in the original resolution, downsample here to match
-                image = self.images[index, ..., 3::8, 3::8].clone().permute(1, 2, 0).contiguous().to(device)
+                image = self.images[index, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].clone()
+                image = image.contiguous().to(device)  # [C, H, W]
                 intrinsics = self.intrinsics[0].clone().contiguous().to(device)  # [4]
 
             # gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
@@ -276,11 +281,9 @@ class DepthVideo:
 
             gt_c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
             # NOTE chen: we adjust the depth scale here, because gaussian mapping defines a different projection
-            depth = est_depth * scale_adjustment  # gt_depth
+            depth = est_depth  # gt_depth
 
             dynamic_mask = self.dynamic_mask[index].clone().to(device)
-            # image = image * (dynamic_mask.unsqueeze(-1).float())
-            # depth = depth * (dynamic_mask.float())
 
         return image, depth, intrinsics, c2w, gt_c2w, dynamic_mask
 
@@ -308,12 +311,14 @@ class DepthVideo:
 
         with self.get_lock():
 
-            depths.clamp_(max=1000.0)  # Sanity
             disps = torch.where(valid, 1.0 / depths, depths)
-            disps.clamp_(min=0.001)  # Sanity
+            disps.clamp_(min=0.001)  # Sanity for optimization
             # The Renderer always outputs in the original resolution
+            s = self.scale_factor
             self.disps[index] = torch.where(
-                valid[:, 0, 3::8, 3::8], disps[:, 0, 3::8, 3::8].clone().detach().to(self.device), self.disps[index]
+                valid[:, 0, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s],
+                disps[:, 0, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].clone().detach().to(self.device),
+                self.disps[index],
             )
             if self.upsampled:
                 self.disps_up[index] = torch.where(
