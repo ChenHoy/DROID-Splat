@@ -347,12 +347,13 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
 
         video.dirty[dirty_index] = False
 
+        s = video.scale_factor
         poses = torch.index_select(video.poses, 0, dirty_index)
         disps = torch.index_select(video.disps, 0, dirty_index)
         # convert poses to 4x4 matrix
         Ps = SE3(poses).inv().matrix().cpu().numpy()
         images = torch.index_select(video.images, 0, dirty_index)
-        images = images.cpu()[:, ..., 3::8, 3::8].permute(0, 2, 3, 1)
+        images = images.cpu()[:, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].permute(0, 2, 3, 1)
         points = droid_backends.iproj(SE3(poses).inv().data, disps, video.intrinsics[0]).cpu()
 
         thresh = droid_visualization.mv_filter_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
