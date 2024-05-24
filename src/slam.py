@@ -194,9 +194,7 @@ class SLAM:
 
         for frame in tqdm(stream):
 
-            # TODO chen: does this mean that the filter_dyn flag is passed to the dataloader?
-            # TODO chen: change this, so we automatically load this with dyn_mask in all dataloaders?
-            if self.cfg.filter_dyn:
+            if self.cfg.with_dyn and stream.has_dyn_masks:
                 timestamp, image, depth, intrinsic, gt_pose, dyn_mask = frame
             else:
                 timestamp, image, depth, intrinsic, gt_pose = frame
@@ -390,8 +388,8 @@ class SLAM:
         camera_trajectory = self.traj_filler(stream)  # w2cs
         # This does nothing: w2w is just unit pose
         # w2w = SE3(self.video.poses_clean[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
-        camera_trajectory = camera_trajectory.inv() # c2ws
-        traj_est = camera_trajectory.data.cpu().numpy() # 7x1 Lie algebra
+        camera_trajectory = camera_trajectory.inv()  # c2ws
+        traj_est = camera_trajectory.data.cpu().numpy()  # 7x1 Lie algebra
         estimate_c2w_list = camera_trajectory.matrix().data.cpu()  # 4x4 homogenous matrix
 
         # Set keyframes_only to True to compute the APE and plots on keyframes only.
@@ -527,24 +525,20 @@ class SLAM:
         """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
 
         # processes = [mp.Process(target=self.visualizing, args=(1, True))]
-        processes = [
-            mp.Process(
-                target=self.mapping_gui,
-                args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
-                name="Mapping GUI",
-            )
-        ]
-        self.num_running_thread[0] += len(processes)
-        for p in processes:
-            p.start()
+        # processes = [
+        #     mp.Process(
+        #         target=self.mapping_gui,
+        #         args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
+        #         name="Mapping GUI",
+        #     )
+        # ]
+        # self.num_running_thread[0] += len(processes)
+        # for p in processes:
+        #     p.start()
 
         for frame in tqdm(stream):
             timestamp, image, depth, intrinsic, gt_pose = frame
             self.frontend(timestamp, image, depth, intrinsic, gt_pose)
-            if self.frontend.optimizer.is_initialized:
-                self.gaussian_mapper.test()
 
-        self.info("Interpolating trajectory to get more frames for Refinement ...")
-        new_cams = self.gaussian_mapper.get_nonkeyframe_cameras(stream, self.traj_filler)
-        self.info("Done!")
-        ipdb.set_trace()
+            # if self.frontend.optimizer.is_initialized:
+            #     self.gaussian_mapper.test()
