@@ -66,10 +66,24 @@ def backup_source_code(backup_directory):
     os.system("chmod -R g+w {}".format(backup_directory))
 
 
+def get_in_the_wild_heuristics(ht: int, wd: int, strategy: str = "generic") -> torch.Tensor:
+    """We do not have camera intrinsics on in-the-wild data. In order for this to converge, we
+    need a good initialize guess. There are two strategies to do this: i) generc ii) teeds from DeepV2D
+    """
+    if strategy == "generic":
+        fx = fy = (wd + ht) / 2
+        cx, cy = wd / 2, ht / 2
+    else:
+        fx = fy = wd * 1.2
+        cx, cy = wd / 2, ht / 2
+    return torch.Tensor([fx, fy, cx, cy], dtype=torch.float32)
+
+
 @hydra.main(version_base=None, config_path="./configs/", config_name="slam")
 def run_slam(cfg):
 
     output_folder = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+
     setup_seed(43)
     torch.multiprocessing.set_start_method("spawn")
     # Save state for reproducibility
