@@ -256,14 +256,13 @@ class DepthVideo:
 
     # TODO use est_depth from map to initialize the Gaussians
     # use depth_sens to supervise the Gaussians in the loss term, but in scale-invariant way
-    # FIXME do we use scale_factor consistently for intrinsics?
     def get_mapping_item(self, index, device="cuda:0"):
         """Get a part of the video to transfer to the Rendering module"""
 
         s = self.scale_factor
         with self.get_lock():
             if self.upsampled:
-                image = self.images[index].clone().permute(1, 2, 0).contiguous().to(device)  # [h, w, 3]
+                image = self.images[index].clone().contiguous().to(device)  # [h, w, 3]
                 intrinsics = self.intrinsics[0].clone().contiguous().to(device) * s  # [4]
             else:
                 # Color is always stored in the original resolution, downsample here to match
