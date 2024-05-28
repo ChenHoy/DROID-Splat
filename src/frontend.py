@@ -28,11 +28,11 @@ class FrontendWrapper(torch.nn.Module):
         self.optimizer = Frontend(self.net, self.video, self.cfg)
 
     @torch.no_grad()
-    def forward(self, timestamp, image, depth, intrinsic, gt_pose=None, dyn_mask=None):
+    def forward(self, timestamp, image, depth, intrinsic, gt_pose=None, static_mask=None):
         """Add new keyframes according to apparent motion and run a local bundle adjustment optimization"""
 
         ### check there is enough motion
-        self.motion_filter.track(timestamp, image, depth, intrinsic, gt_pose=gt_pose, dyn_mask=dyn_mask)
+        self.motion_filter.track(timestamp, image, depth, intrinsic, gt_pose=gt_pose, static_mask=static_mask)
         # local bundle adjustment
         self.optimizer()
 

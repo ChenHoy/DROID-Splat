@@ -111,7 +111,7 @@ class SLAM:
         if cfg.data.dataset in ["kitti", "tartanair", "euroc"]:
             self.max_depth_visu = 50.0  # Cut of value to show a consistent depth stream
         else:
-            self.max_depth_visu = 5.0
+            self.max_depth_visu = 10.0
 
         if cfg.run_mapping_gui and cfg.run_mapping and not cfg.evaluate:
             self.q_main2vis = mp.Queue()
@@ -195,10 +195,10 @@ class SLAM:
         for frame in tqdm(stream):
 
             if self.cfg.with_dyn and stream.has_dyn_masks:
-                timestamp, image, depth, intrinsic, gt_pose, dyn_mask = frame
+                timestamp, image, depth, intrinsic, gt_pose, static_mask = frame
             else:
                 timestamp, image, depth, intrinsic, gt_pose = frame
-                dyn_mask = None
+                static_mask = None
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
 
@@ -213,7 +213,7 @@ class SLAM:
                 input_queue.put(image)
                 input_queue.put(depth)
 
-            self.frontend(timestamp, image, depth, intrinsic, gt_pose, dyn_mask=dyn_mask)
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
 
         del self.frontend
         torch.cuda.empty_cache()
@@ -540,5 +540,5 @@ class SLAM:
             timestamp, image, depth, intrinsic, gt_pose = frame
             self.frontend(timestamp, image, depth, intrinsic, gt_pose)
 
-            # if self.frontend.optimizer.is_initialized:
-            #     self.gaussian_mapper.test()
+            if self.frontend.optimizer.is_initialized:
+                self.gaussian_mapper(None, None)

@@ -40,6 +40,7 @@ class MotionFilter:
         # image: [1, b, 3, h, w], return: [1, b, 128, h//8, w//8]
         return self.fnet(image).squeeze(dim=0)
 
+    # TODO chen: static_mask might be a dynamic mask, this needs to resolved on dataloader level!
     @torch.cuda.amp.autocast(enabled=True)
     @torch.no_grad()
     def track(
@@ -49,7 +50,7 @@ class MotionFilter:
         depth: Optional[torch.Tensor] = None,
         intrinsic: Optional[torch.Tensor] = None,
         gt_pose=None,
-        dyn_mask=None,
+        static_mask=None,
     ):
         """main update operation - run on every frame in video"""
 
@@ -93,7 +94,7 @@ class MotionFilter:
                 net[left_idx],
                 inp[left_idx],
                 gt_pose,
-                dyn_mask,
+                static_mask,
             )
 
         ### only add new frame if there is enough motion ###
@@ -105,8 +106,15 @@ class MotionFilter:
             # approximate flow magnitude using 1 update iteration
             _, delta, weight = self.update(self.net[None], self.inp[None], corr)  # [1, 1, imh//8, imw//8, 2]
 
+            if static_mask is not None:
+                valid = static_mask[
+                    None, None, int(scale_factor // 2 - 1) :: scale_factor, int(scale_factor // 2 - 1) :: scale_factor
+                ]
+            else:
+                valid = torch.ones_like(delta[..., 0])
+
             # check motion magnitude / add new frame to video
-            if delta.norm(dim=-1).mean().item() > self.thresh:
+            if delta.norm(dim=-1)[valid.bool()].mean().item() > self.thresh:
                 self.count = 0
                 net, inp = self.__context_encoder(inputs[:, [left_idx]])  # [1, 128, imh//8, imw//8]
                 self.net, self.inp, self.fmap = net, inp, gmap
@@ -121,7 +129,7 @@ class MotionFilter:
                     net[left_idx],
                     inp[left_idx],
                     gt_pose,
-                    dyn_mask,
+                    static_mask,
                 )
 
             else:
