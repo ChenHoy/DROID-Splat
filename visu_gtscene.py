@@ -178,6 +178,13 @@ def droid_visualization(video, device="cuda:0", q_vis2main: Optional[Queue] = No
     droid_visualization.video = video
     droid_visualization.cameras = {}
     droid_visualization.points = {}
+    # NOTE chen: normally we might have multiple moving objects in the scene
+    # however we currently just store the whole foreground as one object and refresh this over time
+    # NOTE chen: if you want to do this correctly you also need an additional state attribute for each object,
+    # this would work best when keeping a buffer over time for each object and perform tracking
+    # the reason for this is that we dont want to delete/refresh objects that stop moving, i.e. we would need to
+    # detect these state-changes in the visualization as well
+    droid_visualization.moving = {}
 
     droid_visualization.scale = 10.0  # 1.0
     droid_visualization.camera_scale = 0.025
@@ -260,7 +267,7 @@ def droid_visualization(video, device="cuda:0", q_vis2main: Optional[Queue] = No
         Ps = SE3(poses).inv().matrix().cpu().numpy()
         images = torch.index_select(video.images, 0, dirty_index)
         assert disps.shape[-2:] == images.shape[-2:], "Disps and images need to have the same shape"
-        images = images.permute(0, 2, 3, 1)
+        images = images.permute(0, 2, 3, 1).cpu()
 
         intrinsics = video.intrinsics[0]
         points = droid_backends.iproj(SE3(poses).inv().data, disps, intrinsics).cpu()
@@ -274,14 +281,18 @@ def droid_visualization(video, device="cuda:0", q_vis2main: Optional[Queue] = No
         if droid_visualization.with_dynamic:
             stat_masks = torch.index_select(video.static_masks, 0, dirty_index)
             masks = masks & stat_masks.cpu()
-            # TODO negate stat_masks and get the actual dynamic_masks
-            # TODO use the dynamic masks to create a new moving object actor
-            # TODO every frame we should delete the old moving object, since its not part of the scene
 
         # Go over dirty frames
         for i in range(len(dirty_index)):
             pose = Ps[i]
             ix = dirty_index[i].item()
+
+            if droid_visualization.with_dynamic and len(droid_visualization.moving) > 0:
+                # NOTE chen: right now we just keep one foreground object and refresh every time
+                # Go over all past objects and refresh
+                # TODO normally we would have to check for the state of frame-1 here
+                for k, v in droid_visualization.moving.items():
+                    vis.remove_geometry(v, reset_bounding_box=droid_visualization.do_reset)
 
             if ix in droid_visualization.cameras:
                 vis.remove_geometry(
@@ -303,11 +314,22 @@ def droid_visualization(video, device="cuda:0", q_vis2main: Optional[Queue] = No
             vis.add_geometry(cam_actor, reset_bounding_box=droid_visualization.do_reset)
             droid_visualization.cameras[ix] = cam_actor
 
-            mask = masks[i].reshape(-1)
-            pts = points[i].reshape(-1, 3)[mask].cpu().numpy()
-            clr = images[i].reshape(-1, 3)[mask].cpu().numpy()
+            if droid_visualization.with_dynamic:
+                dyn_masks = ~stat_masks[i].cpu()
+                dyn_mask = dyn_masks.reshape(-1)
+                dyn_pts = points[i].reshape(-1, 3)[dyn_mask].numpy()
+                dyn_clr = images[i].reshape(-1, 3)[dyn_mask].numpy()
 
-            ## add point actor ###
+                ## Add point actor ##
+                dyn_point_actor = create_point_actor(dyn_pts, dyn_clr)
+                vis.add_geometry(dyn_point_actor, reset_bounding_box=droid_visualization.do_reset)
+                droid_visualization.moving[ix] = dyn_point_actor
+
+            mask = masks[i].reshape(-1)
+            pts = points[i].reshape(-1, 3)[mask].numpy()
+            clr = images[i].reshape(-1, 3)[mask].numpy()
+
+            ## Add point actor ###
             point_actor = create_point_actor(pts, clr)
             vis.add_geometry(point_actor, reset_bounding_box=droid_visualization.do_reset)
             droid_visualization.points[ix] = point_actor
@@ -448,6 +470,7 @@ def main(cfg):
 
     show_dynamics = dataset.has_dyn_masks and cfg.with_dyn
     # show_dynamics = False
+    sys_print(f"Visualizing with dynamics: {show_dynamics}")
     visualization = Process(
         target=droid_visualization,
         args=(datastructure, cfg.device, q_vis2main, show_dynamics),
