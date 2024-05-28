@@ -51,7 +51,7 @@ def readEXR_onlydepth(filename: str):
 
 def read_sintel_depth(filename: str) -> np.ndarray:
     """Read depth data from file, return as numpy array."""
-    
+
     tag_float = 202021.25
     tag_char = "PIEH"
 
@@ -120,7 +120,7 @@ class BaseDataset(Dataset):
         self.color_paths = self.color_paths[:: self.stride]
 
         self.has_dyn_masks = False
-        self.return_dyn_masks = cfg.get("with_dyn", False)
+        self.return_stat_masks = cfg.get("with_dyn", False)
         self.n_img = len(self.color_paths)
 
         self.depth_paths = None
@@ -258,7 +258,7 @@ class BaseDataset(Dataset):
             if self.W_edge > 0:
                 mask = mask[:, edge:-edge]
 
-        if self.return_dyn_masks:
+        if self.return_stat_masks:
             if not self.has_dyn_masks:
                 raise Warning(
                     "Warning. Dataset does not have any dynamic masks, please provide some if you want to return them!"
@@ -1019,13 +1019,17 @@ class Sintel(BaseDataset):
 
         # NOTE chen: moving object masks are defined from frame pairs [t0, t1], we therefore only have n-1 in total
         # we therefore need to remove the last frame
-        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "final_left", cfg.data.scene, "*.png")))[:-1]
+        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "final_left", cfg.data.scene, "*.png")))[
+            :-1
+        ]
         self.n_img = len(self.color_paths)
         self.mask_paths = sorted(glob.glob(os.path.join(self.input_folder, "rigidity", cfg.data.scene, "*.png")))
 
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "rgbd":
-            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", cfg.data.scene, "*.dpt")))[:-1]
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", cfg.data.scene, "*.dpt")))[
+                :-1
+            ]
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
@@ -1044,7 +1048,9 @@ class Sintel(BaseDataset):
         self.color_paths = self.color_paths[:: self.stride]
         self.mask_paths = self.mask_paths[:: self.stride]
 
-        self.pose_paths = sorted(glob.glob(os.path.join(self.input_folder, "camdata_left", cfg.data.scene, "*.cam")))[:-1]
+        self.pose_paths = sorted(glob.glob(os.path.join(self.input_folder, "camdata_left", cfg.data.scene, "*.cam")))[
+            :-1
+        ]
         self.pose_paths = self.pose_paths[:: self.stride]
 
         self.load_poses(self.pose_paths)
@@ -1061,7 +1067,6 @@ class Sintel(BaseDataset):
             w2c[:3, 3] = T[:, 3]
             c2w = np.linalg.inv(w2c)
             self.poses.append(c2w)
-
 
     def set_intrinsics(self):
         K, _ = self.cam_read(self.pose_paths[0])
@@ -1131,7 +1136,6 @@ class Sintel(BaseDataset):
 
         segmentation = (seg_r * 256 + seg_g) * 256 + seg_b
         return segmentation
-
 
 
 dataset_dict = {
