@@ -109,7 +109,7 @@ class Backend:
 
     @torch.no_grad()
     def dense_ba(
-        self, t_start: int = 0, t_end: Optional[int] = None, steps: int = 8, iters: int = 2, motion_only: bool = False
+        self, t_start: int = 0, t_end: Optional[int] = None, steps: int = 4, iters: int = 4, motion_only: bool = False
     ):
         """Dense Bundle Adjustment over the whole map. Used for global optimization in the Backend."""
 
@@ -153,8 +153,8 @@ class Backend:
         self,
         t_start,
         t_end,
-        steps=8,
-        iters=2,
+        steps=2,
+        iters=8,
         motion_only=False,
         lm=1e-4,
         ep=0.1,
