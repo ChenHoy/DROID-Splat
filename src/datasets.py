@@ -120,6 +120,8 @@ class BaseDataset(Dataset):
         self.color_paths = self.color_paths[:: self.stride]
 
         self.has_dyn_masks = False
+        # TODO make configurable?
+        self.dilate_masks = True # NOTE chen: some datasets (e.g. Sintel) have masks too small
         self.return_stat_masks = cfg.get("with_dyn", False)
         self.n_img = len(self.color_paths)
 
@@ -250,7 +252,17 @@ class BaseDataset(Dataset):
             pose = None
 
         if self.has_dyn_masks and self.mask_paths is not None:
-            mask = np.uint8(cv2.imread(self.mask_paths[index], cv2.IMREAD_GRAYSCALE) == 0)
+            # NOTE chen: in case we have multiple objects this mask could have range [0, 255]
+            # -> TODO: in this case create array of masks with index 0 static scene, and others individual dyn. masks?
+            # NOTE right now we only store a single static scene mask
+            mask = cv2.imread(self.mask_paths[index], cv2.IMREAD_GRAYSCALE)
+            mask = mask == 255 # static mask
+            if self.dilate_masks:
+                mask = np.uint8(~mask) # Invert to dynamic mask
+                kernel = np.ones((3, 3), np.uint8) 
+                mask = cv2.dilate(mask, kernel, iterations=1) 
+                mask = ~mask.astype(bool) # Return back to static mask
+            mask = np.uint8(mask)
             mask = cv2.resize(mask, (W_out_with_edge, H_out_with_edge))
             mask = torch.from_numpy(mask).bool()
             if self.H_edge > 0:

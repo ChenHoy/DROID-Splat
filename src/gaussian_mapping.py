@@ -524,8 +524,6 @@ class GaussianMapper(object):
         # Mask out pixels with little information and invalid depth pixels
         rgb_pixel_mask = (cam.original_image.sum(dim=0) > self.loss_params.rgb_boundary_threshold).view(*depth.shape)
         # Only compute the loss in static regions
-        # TODO chen: is stat_mask 1 in static regions but 1 elsewhere or is it defininte opposite?!
-        # TODO either change name or adjust here by inverting
         if self.filter_dyn:
             rgb_pixel_mask = rgb_pixel_mask | cam.stat_mask
 

@@ -46,7 +46,7 @@ class SimpleVideo:
         wd: int,
         device: str = "cuda:0",
         buffer: int = 512,
-        has_dynmic_mask: bool = False,
+        has_static_mask: bool = False,
         downscale: Optional[int] = 4,
     ):
 
@@ -70,25 +70,19 @@ class SimpleVideo:
         self.timestamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
         self.dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
 
-        self.has_dynmic_mask = has_dynmic_mask
+        self.has_static_mask = has_static_mask
         if self.s is not None:
             self.images = torch.zeros(buffer, 3, ht // self.s, wd // self.s, device=device, dtype=torch.float)
             self.disps = torch.zeros(
                 buffer, ht // self.s, wd // self.s, device=device, dtype=torch.float
             ).share_memory_()
-            if has_dynmic_mask:
-                self.dynamic_mask = torch.zeros(
-                    buffer, ht // self.s, wd // self.s, device=device, dtype=torch.bool
-                ).share_memory_()
-            else:
-                self.dynamic_mask = None
+            self.static_masks = torch.ones(
+                buffer, ht // self.s, wd // self.s, device=device, dtype=torch.bool
+            ).share_memory_()
         else:
             self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float)
             self.disps = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
-            if has_dynmic_mask:
-                self.dynamic_mask = torch.zeros(buffer, ht, wd, device=device, dtype=torch.bool).share_memory_()
-            else:
-                self.dynamic_mask = None
+            self.static_masks = torch.ones(buffer, ht, wd, device=device, dtype=torch.bool).share_memory_()
 
         self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
 
@@ -138,7 +132,7 @@ class SimpleVideo:
             mask = item[5]
             if self.s is not None:
                 mask = mask[..., int(self.s // 2 - 1) :: self.s, int(self.s // 2 - 1) :: self.s]
-            self.dynamic_mask[index] = mask
+            self.static_masks[index] = mask
 
     def __setitem__(self, index, item):
         with self.get_lock():
@@ -157,8 +151,8 @@ class SimpleVideo:
                 self.disps[index],
                 self.intrinsics[index],
             )
-            if self.has_dynmic_mask:
-                item += (self.dynamic_mask[index],)
+            if self.has_static_mask:
+                item += (self.static_masks[index],)
 
         return item
 
@@ -167,13 +161,18 @@ class SimpleVideo:
             self.__item_setter(self.counter.value, item)
 
 
-def droid_visualization(video, device="cuda:0", q_vis2main: Optional[Queue] = None):
+def droid_visualization(video, device="cuda:0", q_vis2main: Optional[Queue] = None, with_dynamic: bool = False):
     """DROID visualization frontend"""
 
     droid_visualization.sleep_delay = 0.1
     droid_visualization.wait = False
     # Use the Queue to feedback signals from GUI to main logic
     droid_visualization.queue = q_vis2main
+
+    droid_visualization.with_dynamic = with_dynamic
+    if with_dynamic:
+        video_has_dyn = video.static_masks.sum() != video.static_masks.numel()
+        assert video_has_dyn, "Dataset does not contain dynamic masks, no dynamics to visualize!"
 
     torch.cuda.set_device(device)
     droid_visualization.video = video
@@ -271,6 +270,13 @@ def droid_visualization(video, device="cuda:0", q_vis2main: Optional[Queue] = No
         count, disps = count.cpu(), disps.cpu()
         # Only keep points that are consistent across multiple views and not too close by
         masks = (count >= droid_visualization.mv_filter_count) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
+
+        if droid_visualization.with_dynamic:
+            stat_masks = torch.index_select(video.static_masks, 0, dirty_index)
+            masks = masks & stat_masks.cpu()
+            # TODO negate stat_masks and get the actual dynamic_masks
+            # TODO use the dynamic masks to create a new moving object actor
+            # TODO every frame we should delete the old moving object, since its not part of the scene
 
         # Go over dirty frames
         for i in range(len(dirty_index)):
@@ -379,8 +385,6 @@ def test_scene(video: SimpleVideo, index: Union[int, torch.Tensor]) -> None:
     Ps = SE3(poses).inv().matrix().cpu().numpy()  # Convert to lietorch SE3
     points = droid_backends.iproj(SE3(poses).inv().data, disps, intrinsics)
 
-    ipdb.set_trace()
-
     geometries = []
     for i in range(len(index)):
         pts = points[i].reshape(-1, 3).cpu().numpy()
@@ -415,8 +419,8 @@ def main(cfg):
         wd=sample_image.shape[-1],
         device=cfg.device,
         buffer=min(len_data_snippet, len(dataset)),
-        downscale=None,
-        has_dynmic_mask=(cfg.with_dyn and dataset.has_dyn_masks),
+        downscale=2,
+        has_static_mask=(cfg.with_dyn and dataset.has_dyn_masks),
     )
 
     i = 0
@@ -429,8 +433,8 @@ def main(cfg):
             break
 
         if dataset.has_dyn_masks and cfg.with_dyn:
-            timestamp, image, depth, intrinsic, gt_pose, dyn_mask = frame
-            datastructure[i] = (timestamp, image, gt_pose, depth, intrinsic, dyn_mask)
+            timestamp, image, depth, intrinsic, gt_pose, stat_mask = frame
+            datastructure[i] = (timestamp, image, gt_pose, depth, intrinsic, stat_mask)
         else:
             timestamp, image, depth, intrinsic, gt_pose = frame
             datastructure[i] = (timestamp, image, gt_pose, depth, intrinsic)
@@ -441,7 +445,13 @@ def main(cfg):
 
     # Initialize the visualization process
     q_vis2main = Queue()  # Use a Queue to stop iterating over dataset if wanted triggered from GUI
-    visualization = Process(target=droid_visualization, args=(datastructure, cfg.device, q_vis2main))
+
+    show_dynamics = dataset.has_dyn_masks and cfg.with_dyn
+    # show_dynamics = False
+    visualization = Process(
+        target=droid_visualization,
+        args=(datastructure, cfg.device, q_vis2main, show_dynamics),
+    )
     visualization.start()
 
     sleep(3.0)  # Let window pop up first
