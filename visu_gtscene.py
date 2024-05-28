@@ -12,7 +12,7 @@ For dyn. objects, the mask is used to remove/add the object from the scene for e
 import ipdb
 from copy import deepcopy
 from tqdm import tqdm
-from typing import Optional
+from typing import Optional, Union
 from termcolor import colored
 from time import sleep
 import ipdb
@@ -61,7 +61,7 @@ class SimpleVideo:
         self.wd = wd
         self.device = device
 
-        self.s = downscale  
+        self.s = downscale
 
         self.buffer = buffer
         self.upsampled = True
@@ -70,14 +70,25 @@ class SimpleVideo:
         self.timestamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
         self.dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
 
+        self.has_dynmic_mask = has_dynmic_mask
         if self.s is not None:
             self.images = torch.zeros(buffer, 3, ht // self.s, wd // self.s, device=device, dtype=torch.float)
             self.disps = torch.zeros(
                 buffer, ht // self.s, wd // self.s, device=device, dtype=torch.float
             ).share_memory_()
+            if has_dynmic_mask:
+                self.dynamic_mask = torch.zeros(
+                    buffer, ht // self.s, wd // self.s, device=device, dtype=torch.bool
+                ).share_memory_()
+            else:
+                self.dynamic_mask = None
         else:
             self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float)
             self.disps = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
+            if has_dynmic_mask:
+                self.dynamic_mask = torch.zeros(buffer, ht, wd, device=device, dtype=torch.bool).share_memory_()
+            else:
+                self.dynamic_mask = None
 
         self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
 
@@ -87,11 +98,11 @@ class SimpleVideo:
         self.poses[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
         self.poses_gt[:] = torch.eye(4, dtype=torch.float, device=device)
 
-        self.has_dynmic_mask = has_dynmic_mask
-        self.dynamic_mask = torch.zeros(buffer, ht, wd, device=device, dtype=torch.bool).share_memory_()
-
     def get_lock(self):
         return self.counter.get_lock()
+
+    def __len__(self):
+        return self.buffer
 
     def __item_setter(self, index, item):
         if isinstance(index, int) and index >= self.counter.value:
@@ -353,12 +364,43 @@ def get_latest_element_of_queue(queue: Queue):
     return dummy
 
 
+def test_scene(video: SimpleVideo, index: Union[int, torch.Tensor]) -> None:
+    """Make a simple visualization of the scene at a given index. We simply backproject the scene
+    into 3D given the disparity, camera poses and intrinsics and overlay with the image color.
+
+    We can use this to debug the scene and see if the scene is correctly loaded before animating the whole video.
+    """
+    poses = torch.index_select(video.poses, 0, index)
+    disps = torch.index_select(video.disps, 0, index)
+    images = torch.index_select(video.images, 0, index)
+    images = images.permute(0, 2, 3, 1)  # Put into numpy/o3d convention
+    intrinsics = video.intrinsics[0]  # We have constant global intrinsics over video
+
+    Ps = SE3(poses).inv().matrix().cpu().numpy()  # Convert to lietorch SE3
+    points = droid_backends.iproj(SE3(poses).inv().data, disps, intrinsics)
+
+    ipdb.set_trace()
+
+    geometries = []
+    for i in range(len(index)):
+        pts = points[i].reshape(-1, 3).cpu().numpy()
+        clr = images[i].reshape(-1, 3).cpu().numpy()
+        point_actor = create_point_actor(pts, clr)
+
+        cam_actor = create_camera_actor(True)
+        cam_actor.transform(Ps[i])
+
+        geometries.append(point_actor)
+        geometries.append(cam_actor)
+
+    # Plot the point cloud
+    o3d.visualization.draw_geometries(geometries)
+
+
 @hydra.main(version_base=None, config_path="./configs/", config_name="visu")
 def main(cfg):
 
     output_folder = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
-    # TODO use this to pass to dataset?
-    filter_dyn = cfg.filter_dyn
     torch.multiprocessing.set_start_method("spawn")
 
     dataset = get_dataset(cfg, device=cfg.device)
@@ -367,25 +409,32 @@ def main(cfg):
     # NOTE here we store the whole scene in memory, which is excessive
     # watch out that this does not OOM (we are fine on a 4090 and ~2000 frames, which is a lot already)
     sample_image = dataset[0][1]
+    len_data_snippet = cfg.t_stop - cfg.t_start
     datastructure = SimpleVideo(
-        ht=sample_image.shape[-2], wd=sample_image.shape[-1], device=cfg.device, buffer=len(dataset), downscale=4
+        ht=sample_image.shape[-2],
+        wd=sample_image.shape[-1],
+        device=cfg.device,
+        buffer=min(len_data_snippet, len(dataset)),
+        downscale=4,
+        has_dynmic_mask=(cfg.with_dyn and dataset.has_dyn_masks),
     )
 
-    for i, frame in tqdm(enumerate(dataset)):
-        if i <= cfg.t_start:
+    i = 0
+    for frame in tqdm(dataset):
+        if i < cfg.t_start:
+            i += 1
             continue
+
         if i >= cfg.t_stop:
             break
 
-        # ipdb.set_trace()
-        # TODO check if other dataloaders work correctly
-
-        if dataset.has_dyn_masks:
+        if dataset.has_dyn_masks and cfg.with_dyn:
             timestamp, image, depth, intrinsic, gt_pose, dyn_mask = frame
-            datastructure[timestamp - 1] = (timestamp, image, gt_pose, depth, intrinsic, dyn_mask)
+            datastructure[i] = (timestamp, image, gt_pose, depth, intrinsic, dyn_mask)
         else:
             timestamp, image, depth, intrinsic, gt_pose = frame
-            datastructure[timestamp - 1] = (timestamp, image, gt_pose, depth, intrinsic)
+            datastructure[i] = (timestamp, image, gt_pose, depth, intrinsic)
+        i += 1
 
     # Reset the counter, as if we never touched the video
     datastructure.counter.value = 0
@@ -414,7 +463,7 @@ def main(cfg):
         with datastructure.get_lock():
             datastructure.dirty[i - 1] = True
 
-        sleep(0.1)
+        sleep(0.5)
 
     visualization.join()
     sys_print("Done!")
