@@ -415,7 +415,7 @@ def main(cfg):
         wd=sample_image.shape[-1],
         device=cfg.device,
         buffer=min(len_data_snippet, len(dataset)),
-        downscale=4,
+        downscale=None,
         has_dynmic_mask=(cfg.with_dyn and dataset.has_dyn_masks),
     )
 

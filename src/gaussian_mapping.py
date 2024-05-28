@@ -151,13 +151,13 @@ class GaussianMapper(object):
             return None
 
         if self.filter_dyn:
-            color, depth, intrinsics, c2w, _, dyn_mask = self.video.get_mapping_item(idx, self.device)
+            color, depth, intrinsics, c2w, _, stat_mask = self.video.get_mapping_item(idx, self.device)
 
         else:
             color, depth, intrinsics, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
-            dyn_mask = None
+            stat_mask = None
 
-        return self.camera_from_frame(idx, color, depth, intrinsics, c2w, dynamic_mask=dyn_mask)
+        return self.camera_from_frame(idx, color, depth, intrinsics, c2w, static_mask=stat_mask)
 
     # TODO this can be called with depth=None
     # do this for when we interpolate the keyframe poses to include nonkeyframe ones
@@ -168,7 +168,7 @@ class GaussianMapper(object):
         depth: Optional[torch.Tensor],
         intrinsic: torch.Tensor,
         gt_pose: torch.Tensor,
-        dynamic_mask: Optional[torch.Tensor] = None,
+        static_mask: Optional[torch.Tensor] = None,
     ):
         """Given the image, depth, intrinsic and pose, creates a Camera object."""
         fx, fy, cx, cy = intrinsic
@@ -200,7 +200,7 @@ class GaussianMapper(object):
             height,
             width,
             device=self.device,
-            dyn_mask=dynamic_mask,
+            stat_mask=static_mask,
         )
 
     def get_new_cameras(self):
@@ -214,12 +214,12 @@ class GaussianMapper(object):
 
         for idx in to_add:
             if self.filter_dyn:
-                color, depth, intrinsics, c2w, _, dyn_mask = self.video.get_mapping_item(idx, self.device)
+                color, depth, intrinsics, c2w, _, stat_mask = self.video.get_mapping_item(idx, self.device)
             else:
                 color, depth, intrinsics, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
-                dyn_mask = None
+                stat_mask = None
 
-            cam = self.camera_from_frame(idx, color, depth, intrinsics, c2w, dynamic_mask=dyn_mask)
+            cam = self.camera_from_frame(idx, color, depth, intrinsics, c2w, static_mask=stat_mask)
             cam.update_RT(cam.R_gt, cam.T_gt)  # Assuming we found the best pose in tracking
             self.new_cameras.append(cam)
 
@@ -524,16 +524,16 @@ class GaussianMapper(object):
         # Mask out pixels with little information and invalid depth pixels
         rgb_pixel_mask = (cam.original_image.sum(dim=0) > self.loss_params.rgb_boundary_threshold).view(*depth.shape)
         # Only compute the loss in static regions
-        # TODO chen: is dyn_mask 1 in static regions but 1 elsewhere or is it defininte opposite?!
+        # TODO chen: is stat_mask 1 in static regions but 1 elsewhere or is it defininte opposite?!
         # TODO either change name or adjust here by inverting
         if self.filter_dyn:
-            rgb_pixel_mask = rgb_pixel_mask | cam.dyn_mask
+            rgb_pixel_mask = rgb_pixel_mask | cam.stat_mask
 
         if has_depth:
             # Only use valid depths for supervision
             depth_pixel_mask = ((cam.depth > 0.01) * (cam.depth < 1e7)).view(*depth.shape)
             if self.filter_dyn:
-                depth_pixel_mask = depth_pixel_mask | cam.dyn_mask
+                depth_pixel_mask = depth_pixel_mask | cam.stat_mask
 
         if with_edge_weight:
             edge_mask_x, edge_mask_y = image_gradient_mask(
@@ -698,7 +698,6 @@ class GaussianMapper(object):
             self.last_idx = self.new_cameras[-1].uid + 1
 
             self.info(f"Added {len(self.new_cameras)} new cameras: {[cam.uid for cam in self.new_cameras]}")
-            # TODO this updates the information, but we can not uncover very wrongly optimized frames
             self.frame_updater()  # Update all changed cameras with new information from SLAM system
 
             # FIXME why do we not use depth_map = cam.depth here?
@@ -740,7 +739,6 @@ class GaussianMapper(object):
                 elif self.kf_mng_params.prune_mode == "new":
                     self.covisibility_pruning()  # Covisibility pruning for recently added gaussians
 
-            # TODO test this how this plays nicely with the rest of the system
             if self.feedback_map:
                 to_set = self.get_mapping_update(frames)
                 self.info("Feeding back to Tracking ...")

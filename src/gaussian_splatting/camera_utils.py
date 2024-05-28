@@ -22,7 +22,7 @@ class Camera(nn.Module):
         image_height,
         image_width,
         device="cuda:0",
-        dyn_mask=None,
+        stat_mask=None,
     ):
         super(Camera, self).__init__()
         self.uid = uid
@@ -46,7 +46,7 @@ class Camera(nn.Module):
         self.FoVy = fovy
         self.image_height = image_height
         self.image_width = image_width
-        self.dyn_mask = dyn_mask
+        self.stat_mask = stat_mask
 
         self.cam_rot_delta = nn.Parameter(torch.zeros(3, requires_grad=True, device=device))
         self.cam_trans_delta = nn.Parameter(torch.zeros(3, requires_grad=True, device=device))
