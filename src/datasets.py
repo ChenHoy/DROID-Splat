@@ -228,10 +228,11 @@ class BaseDataset(Dataset):
             mask = np.uint8(cv2.imread(self.mask_paths[index], cv2.IMREAD_GRAYSCALE) == 0)
             mask = cv2.resize(mask, (W_out_with_edge, H_out_with_edge))
             mask = torch.from_numpy(mask).bool()
+        else:
+            mask = None
 
-            return index, color_data, depth_data, intrinsic, pose, mask
 
-        return index, color_data, depth_data, intrinsic, pose
+        return index, color_data, depth_data, intrinsic, pose, mask
 
 
 class ImageFolder(BaseDataset):
@@ -360,8 +361,6 @@ class DAVIS(BaseDataset):
         self.mask_path = self.input_folder.replace("JPEGImages", "Annotations")
         self.mask_paths = sorted(glob.glob(os.path.join(self.mask_path, "*.png")))
 
-        # Set number of images for loading poses
-        self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
             self.depth_path = self.input_folder.replace("JPEGImages/Full-Resolution", "Depth/Full-Resolution/zoed_nk")
@@ -379,22 +378,31 @@ class DAVIS(BaseDataset):
 
         self.color_paths = self.color_paths[:: self.stride]
         self.mask_paths = self.mask_paths[:: self.stride]
+        self.n_img = len(self.color_paths)
+
         self.poses = None
 
 
 class TotalRecon(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(TotalRecon, self).__init__(cfg, device)
-        self.stride = cfg.get("stride", 1)
 
+        self.input_folder = os.path.join(cfg.data.input_folder, cfg.data.scene + "-stereo000-leftcam")
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "images/*.jpg")))
         self.mask_paths = sorted(glob.glob(os.path.join(self.input_folder, "masks/*.png")))
+        self.background_value = 0
 
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "rgbd":
-            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depths/*.depth")))
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depths", "*.depth")))
+            assert (
+                len(self.depth_paths) == self.n_img
+            ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
+            self.depth_paths = self.depth_paths[:: self.stride]
+        elif cfg.mode == "prgbd":
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, cfg.mono_depth, "*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
@@ -408,8 +416,14 @@ class TotalRecon(BaseDataset):
         self.pose_paths = sorted(glob.glob(os.path.join(self.input_folder, "camera_rtks/*.txt")))
         self.pose_paths = self.pose_paths[:: self.stride]
 
+        self.has_dyn_masks = True
+
         self.load_poses(self.pose_paths)
         # self.set_intrinsics()
+
+        # Set number of images for loading poses
+        self.n_img = len(self.color_paths)
+
 
     def load_poses(self, paths):
         self.poses = []

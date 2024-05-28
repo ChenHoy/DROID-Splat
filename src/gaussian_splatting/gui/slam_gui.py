@@ -17,13 +17,16 @@ import torch
 import torch.nn.functional as F
 from OpenGL import GL as gl
 
-from ..gaussian_renderer import render
+from ..gaussian_renderer import render, render_dynamic
 from ..utils.graphics_utils import fov2focal, getWorld2View2
 from .gl_render import util, util_gau
 from .gl_render.render_ogl import OpenGLRenderer
 from .gui_utils import GaussianPacket, create_frustum, cv_gl, get_latest_queue
 from ..camera_utils import Camera
 from ..logging_utils import Log
+
+from ..scene.gaussian_model import GaussianModel
+from ..scene.dynamic_gaussian_model import DynamicGaussianModel
 
 
 class SLAM_GUI:
@@ -354,7 +357,7 @@ class SLAM_GUI:
 
         if gaussian_packet.has_gaussians:
             self.gaussian_cur = gaussian_packet
-            self.output_info.text = "Number of Gaussians: {}".format(self.gaussian_cur.get_xyz.shape[0])
+            self.output_info.text = "Number of Gaussians: {}".format(self.gaussian_cur.get_xyz.shape[-2])
             self.init = True
 
         if gaussian_packet.current_frame is not None:
@@ -466,6 +469,11 @@ class SLAM_GUI:
         return current_cam
 
     def rasterise(self, current_cam):
+        if self.gaussian_cur.type == "static":
+            render_fct = render
+        elif self.gaussian_cur.type == "dynamic":
+            render_fct = render_dynamic
+
         if (
             self.time_shader_chbox.checked
             and self.gaussian_cur is not None
@@ -478,7 +486,7 @@ class SLAM_GUI:
             self.gaussian_cur.get_features = alpha * features + (1 - alpha) * torch.from_numpy(rgb_kf).to(
                 features.device
             )
-            rendering_data = render(
+            rendering_data = render_fct(
                 current_cam,
                 self.gaussian_cur,
                 self.pipe,
@@ -487,7 +495,7 @@ class SLAM_GUI:
             )
             self.gaussian_cur.get_features = features
         else:
-            rendering_data = render(
+            rendering_data = render_fct(
                 current_cam,
                 self.gaussian_cur,
                 self.pipe,

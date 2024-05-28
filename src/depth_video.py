@@ -279,8 +279,7 @@ class DepthVideo:
             depth = est_depth * scale_adjustment  # gt_depth
 
             dynamic_mask = self.dynamic_mask[index].clone().to(device)
-            # image = image * (dynamic_mask.unsqueeze(-1).float())
-            # depth = depth * (dynamic_mask.float())
+
 
         return image, depth, intrinsics, c2w, gt_c2w, dynamic_mask
 

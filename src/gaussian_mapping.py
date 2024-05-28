@@ -501,10 +501,6 @@ class GaussianMapper(object):
         if cam.depth is None:
             has_depth = False
 
-        if self.filter_dyn:
-            image = image * cam.dyn_mask
-            depth = depth * cam.dyn_mask
-
         alpha1, alpha2 = self.loss_params.alpha1, self.loss_params.alpha2
         beta = self.loss_params.beta2
 
@@ -522,6 +518,11 @@ class GaussianMapper(object):
             rgb_mask = rgb_pixel_mask.float() * edge_mask.float()
         else:
             rgb_mask = rgb_pixel_mask.float()
+
+        if self.filter_dyn:
+            rgb_mask = rgb_mask * cam.dyn_mask
+            if has_depth:
+                depth_pixel_mask = depth_pixel_mask * cam.dyn_mask
 
         rgb_loss = self.color_loss(image, cam, with_ssim, alpha2, rgb_mask)
         if has_depth:
@@ -638,6 +639,8 @@ class GaussianMapper(object):
         self.info(f"Final mapping loss: {self.loss_list[-1]}")
         self.info(f"{len(self.iteration_info)} iterations, {len(self.cameras)/len(self.iteration_info)} cams/it")
 
+
+
         ## export the cameras and gaussians to the terminate process
         if self.evaluate:
             mapping_queue.put(
@@ -689,6 +692,7 @@ class GaussianMapper(object):
                     self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=False)
                     #self.info(f"Added {self.gaussians.get_xyz.shape[0] - n_g} gaussians based on view {cam.uid}")
 
+            print(cam.depth.shape)
             # We might have 0 Gaussians in some cases
             if len(self.gaussians.get_xyz) == 0:
                 self.info("No Gaussians to optimize, skipping mapping step ...")

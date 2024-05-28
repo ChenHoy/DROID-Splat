@@ -1,6 +1,7 @@
 dataset: 'totalrecon'
-input_folder: "/media/data/totalrecon/dog1-stereo000-leftcam/"
-#input_folder: "/media/data/totalrecon/dog1-stereo001-rightcam"
+#input_folder: "/media/data/totalrecon/human2-stereo000-rightcam"
+input_folder: "/media/data/totalrecon/"
+scene: "dog1"
 png_depth_scale: 6553.5 #for depth image in png format
 
 cam:

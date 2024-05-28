@@ -5,10 +5,12 @@ defaults:
 sleep_delay: 1.0
 stride: 1
 
+run_visualization: True
+
 data:
   cam:
-    H_out: 272
-    W_out: 480
+    H_out: 480
+    W_out: 272
 
 tracking:
   buffer_size: 512

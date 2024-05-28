@@ -73,6 +73,9 @@ class GaussianModel:
         symm = strip_symmetric(actual_covariance)
         return symm
 
+    def __len__(self):
+        return self.get_xyz.shape[0]
+
     @property
     def get_scaling(self):
         return self.scaling_activation(self._scaling)
@@ -198,8 +201,9 @@ class GaussianModel:
 
         new_unique_kfIDs = torch.ones((new_xyz.shape[0])).int() * kf_id
         new_n_obs = torch.zeros((new_xyz.shape[0])).int()
-        # if new_xyz.shape[0] == 0: # No gaussians added
-        #     return
+        if new_xyz.shape[0] == 0: # No gaussians added
+            print(f"No gaussians added for kf_id {kf_id}")
+            return
         self.densification_postfix(
             new_xyz,
             new_features_dc,
@@ -445,8 +449,8 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
-
         self.denom = self.denom[valid_points_mask]
+
         self.max_radii2D = self.max_radii2D[valid_points_mask]
         # FIXME highly suspsect of creating memory bug
         # raises sometimes RuntimeError: out_ptr == out_accessor[thread_count_nonzero[tid + 1]].data()
@@ -622,3 +626,29 @@ class GaussianModel:
 
     def info(self, msg: str) -> None:
         print(colored(f"[Gaussian Mapping] {msg}", "magenta"))
+
+    # def save_gaussians(self, path):
+    #     torch.save(
+    #         {
+    #             "xyz": self._xyz,
+    #             "features_dc": self._features_dc,
+    #             "features_rest": self._features_rest,
+    #             "opacity": self._opacity,
+    #             "scaling": self._scaling,
+    #             "rotation": self._rotation,
+    #             "unique_kfIDs": self.unique_kfIDs,
+    #             "n_obs": self.n_obs,
+    #         },
+    #         path,
+    #     )
+
+    # def load_gaussians(self, path):
+        # checkpoint = torch.load(path)
+        # self._xyz = nn.Parameter(checkpoint["xyz"].to(self.device).requires_grad_(True))
+        # self._features_dc = nn.Parameter(checkpoint["features_dc"].to(self.device).requires_grad_(True))
+        # self._features_rest = nn.Parameter(checkpoint["features_rest"].to(self.device).requires_grad_(True))
+        # self._opacity = nn.Parameter(checkpoint["opacity"].to(self.device).requires_grad_(True))
+        # self._scaling = nn.Parameter(checkpoint["scaling"].to(self.device).requires_grad_(True))
+        # self._rotation = nn.Parameter(checkpoint["rotation"].to(self.device).requires_grad_(True))
+        # self.unique_kfIDs = checkpoint["unique_kfIDs"].to(self.device)
+        # self.n_obs = checkpoint["n_obs"].to(self.device)
