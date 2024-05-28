@@ -2,7 +2,8 @@ defaults:
   - _self_
   # - data: TartanAir/base.yaml
   # - data: DAVIS/base.yaml
-  - data: Replica/base.yaml
+  # - data: Replica/base.yaml
+  - data: Sintel/base.yaml
 
 hydra:
   run:
@@ -12,12 +13,19 @@ hydra:
     name: tartanair
 
 mode: "rgbd"  # "prgbd"
+mono_depth: "metric3d-vit_giant2" # 'zoed-nk', 'metric3d-vit_giant2', 'depthany-vitl-outdoor_left', 'depthany-vitl-indoor_left'
 device: "cuda:0"
 
 # Control what portion of the video we use
 stride: 1
+# NOTE chen: using the full resolution looks nice but can produce quite some lags over vnc
+downscale: 4 # How to downscale the video buffers
 t_start: 0
 t_stop: 500
 
 # Do we want to visualize the dynamic objects in the scene?
-filter_dyn: False
+with_dyn: True
+
+# Control speed of the animation
+sleep_init: 10.0 # This is the freeze after visualizing a single frame to adjust the camera
+delay: 1.0 # This is the delay between frames

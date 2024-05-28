@@ -431,45 +431,45 @@ def main(cfg):
 
     dataset = get_dataset(cfg, device=cfg.device)
     sys_print(f"Running on {len(dataset)} frames")
+    with_dyn = cfg.get("with_dyn", True)
+    t_start = cfg.get("t_start", 0)
+    t_stop = cfg.get("t_stop", len(dataset))
 
     # NOTE here we store the whole scene in memory, which is excessive
     # watch out that this does not OOM (we are fine on a 4090 and ~2000 frames, which is a lot already)
     sample_image = dataset[0][1]
-    len_data_snippet = cfg.t_stop - cfg.t_start
+    len_data_snippet = t_stop - t_start
     datastructure = SimpleVideo(
         ht=sample_image.shape[-2],
         wd=sample_image.shape[-1],
         device=cfg.device,
         buffer=min(len_data_snippet, len(dataset)),
-        downscale=2,
-        has_static_mask=(cfg.with_dyn and dataset.has_dyn_masks),
+        downscale=cfg.get("downscale", None),
+        has_static_mask=(with_dyn and dataset.has_dyn_masks),
     )
 
     i = 0
     for frame in tqdm(dataset):
-        if i < cfg.t_start:
+        if i < t_start:
             i += 1
             continue
 
-        if i >= cfg.t_stop:
+        if i >= t_stop:
             break
 
-        if dataset.has_dyn_masks and cfg.with_dyn:
+        if dataset.has_dyn_masks and with_dyn:
             timestamp, image, depth, intrinsic, gt_pose, stat_mask = frame
             datastructure[i] = (timestamp, image, gt_pose, depth, intrinsic, stat_mask)
         else:
             timestamp, image, depth, intrinsic, gt_pose = frame
             datastructure[i] = (timestamp, image, gt_pose, depth, intrinsic)
+        datastructure.counter.value += 1
         i += 1
-
-    # Reset the counter, as if we never touched the video
-    datastructure.counter.value = 0
 
     # Initialize the visualization process
     q_vis2main = Queue()  # Use a Queue to stop iterating over dataset if wanted triggered from GUI
 
-    show_dynamics = dataset.has_dyn_masks and cfg.with_dyn
-    # show_dynamics = False
+    show_dynamics = dataset.has_dyn_masks and with_dyn
     sys_print(f"Visualizing with dynamics: {show_dynamics}")
     visualization = Process(
         target=droid_visualization,
@@ -477,10 +477,9 @@ def main(cfg):
     )
     visualization.start()
 
-    sleep(3.0)  # Let window pop up first
     # Go over the video and set frames as dirty
-    for i in tqdm(range(len(dataset))):
-        if i > cfg.t_stop:
+    for i in tqdm(range(datastructure.counter.value)):
+        if i > t_stop:
             break
 
         # Get latest signal from Queue to check if we can keep going
@@ -496,7 +495,9 @@ def main(cfg):
         with datastructure.get_lock():
             datastructure.dirty[i - 1] = True
 
-        sleep(0.5)
+        if i == 0:
+            sleep(cfg.get("sleep_init", 5.0))  # Let window pop up first
+        sleep(cfg.get("delay", 0.5))
 
     visualization.join()
     sys_print("Done!")
