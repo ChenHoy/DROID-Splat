@@ -120,6 +120,7 @@ class BaseDataset(Dataset):
         self.color_paths = self.color_paths[:: self.stride]
 
         self.has_dyn_masks = False
+        self.background_value = 0
         self.dilate_masks = True # NOTE chen: some datasets (e.g. Sintel) have masks too small
         self.return_stat_masks = cfg.get("with_dyn", False)
         self.n_img = len(self.color_paths)
@@ -255,7 +256,7 @@ class BaseDataset(Dataset):
             # -> TODO: in this case create array of masks with index 0 static scene, and others individual dyn. masks?
             # NOTE right now we only store a single static scene mask
             mask = cv2.imread(self.mask_paths[index], cv2.IMREAD_GRAYSCALE)
-            mask = mask == 255 # static mask
+            mask = mask == self.background_value # static mask
             if self.dilate_masks:
                 mask = np.uint8(~mask) # Invert to dynamic mask
                 kernel = np.ones((3, 3), np.uint8) 
@@ -425,6 +426,7 @@ class TotalRecon(BaseDataset):
         self.input_folder = os.path.join(cfg.data.input_folder, cfg.data.scene + "-stereo000-leftcam")
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "images/*.jpg")))
         self.mask_paths = sorted(glob.glob(os.path.join(self.input_folder, "masks/*.png")))
+        self.background_value = 0
 
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
@@ -1022,6 +1024,7 @@ class Sintel(BaseDataset):
         super(Sintel, self).__init__(cfg, device)
 
         self.has_dyn_masks = True
+        self.background_value = 255
 
         # Check for endianness, based on Daniel Scharstein's optical flow code.
         # Using little-endian architecture, these two should be equal.
