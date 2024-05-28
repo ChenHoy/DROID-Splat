@@ -120,7 +120,6 @@ class BaseDataset(Dataset):
         self.color_paths = self.color_paths[:: self.stride]
 
         self.has_dyn_masks = False
-        # TODO make configurable?
         self.dilate_masks = True # NOTE chen: some datasets (e.g. Sintel) have masks too small
         self.return_stat_masks = cfg.get("with_dyn", False)
         self.n_img = len(self.color_paths)
@@ -1049,7 +1048,7 @@ class Sintel(BaseDataset):
         elif cfg.mode == "prgbd":
             self.depth_paths = sorted(
                 glob.glob(os.path.join(self.input_folder, cfg.mono_depth, cfg.data.scene, "*.npy"))
-            )
+            )[:-1]
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
