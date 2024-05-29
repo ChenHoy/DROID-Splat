@@ -540,24 +540,48 @@ class DepthVideo:
                 self.opt_intr,
             )
             # JDSA
-            bundle_adjustment(
-                target,
-                weight,
-                eta,
-                self.poses,
-                self.disps,
-                self.intrinsics,
-                ii,
-                jj,
-                t0,
-                t1,
-                self.disps_sens,
-                self.scales,
-                self.shifts,
-                iters=iters + 2,  # Use slightly more iterations here, so we get the scales right for sure!
-                lm=lm,
-                ep=ep,
-                scale_prior=True,
-                structure_only=True,
-                alpha=alpha,
-            )
+            # bundle_adjustment(
+            #     target,
+            #     weight,
+            #     eta,
+            #     self.poses,
+            #     self.disps,
+            #     self.intrinsics,
+            #     ii,
+            #     jj,
+            #     t0,
+            #     t1,
+            #     self.disps_sens,
+            #     self.scales,
+            #     self.shifts,
+            #     iters=iters + 2,  # Use slightly more iterations here, so we get the scales right for sure!
+            #     lm=lm,
+            #     ep=ep,
+            #     scale_prior=True,
+            #     structure_only=True,
+            #     alpha=alpha,
+            # )
+            # HACK we want to reset the prior after each iteration, so that the backend would never work with the wrong scale
+            for _ in range(iters + 2):
+                bundle_adjustment(
+                    target,
+                    weight,
+                    eta,
+                    self.poses,
+                    self.disps,
+                    self.intrinsics,
+                    ii,
+                    jj,
+                    t0,
+                    t1,
+                    self.disps_sens,
+                    self.scales,
+                    self.shifts,
+                    iters=1,
+                    lm=lm,
+                    ep=ep,
+                    scale_prior=True,
+                    structure_only=True,
+                    alpha=alpha,
+                )
+                self.reset_prior()
