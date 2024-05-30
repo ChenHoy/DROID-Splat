@@ -338,9 +338,9 @@ class GaussianMapper(object):
             n_rand = int(len(self.cameras) * random_frames)
             self.info(f"Info. Going over {n_rand} instead of {len(self.cameras)} of frames for optimization ...")
             if len(n_rand) > self.max_frames_refinement:
-                n_chunks = len(n_rand) // self.max_frames_refinement
+                n_chunks = n_rand // self.max_frames_refinement
                 self.info(
-                    f"Warning. {len(n_rand)} Frames is too many! Optimizing over {n_chunks} chunks of frames with size {self.max_frames_refinement} ..."
+                    f"Warning. {n_rand} Frames is too many! Optimizing over {n_chunks} chunks of frames with size {self.max_frames_refinement} ..."
                 )
         else:
             if len(self.cameras) > self.max_frames_refinement:
