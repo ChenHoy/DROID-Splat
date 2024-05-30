@@ -2,6 +2,7 @@ import os
 import ipdb
 from copy import deepcopy
 from typing import List, Dict, Optional
+import math
 import gc
 from termcolor import colored
 from tqdm import tqdm
@@ -336,9 +337,11 @@ class GaussianMapper(object):
 
         if random_frames is not None:
             n_rand = int(len(self.cameras) * random_frames)
-            self.info(f"Info. Going over {n_rand} random frames instead of {len(self.cameras)} of frames for optimization ...")
+            self.info(
+                f"Info. Going over {n_rand} random frames instead of {len(self.cameras)} of frames for optimization ..."
+            )
             if n_rand > self.max_frames_refinement:
-                n_chunks = n_rand // self.max_frames_refinement
+                n_chunks = math.ceil(n_rand / self.max_frames_refinement)
                 self.info(
                     f"Warning. {n_rand} Frames is too many! Optimizing over {n_chunks} chunks of frames with size {self.max_frames_refinement} ..."
                 )
@@ -368,7 +371,7 @@ class GaussianMapper(object):
                 loss = 0
                 for chunk in chunks:
                     loss += self.mapping_step(iter, chunk, self.kf_mng_params.refinement, densify=False)
-                    torch.cuda.empty_cache()
+                    # torch.cuda.empty_cache()
             else:
                 loss = self.mapping_step(
                     iter, frames, self.kf_mng_params.refinement, densify=True, optimize_poses=optimize_poses
@@ -705,6 +708,10 @@ class GaussianMapper(object):
         self.map_refinement(num_iters=self.refinement_iters, optimize_poses=True, random_frames=0.2)
         self.info(f"#Gaussians after Map Refinement: {len(self.gaussians)}")
         self.info("Mapping refinement finished")
+
+        # Free memory after doing refinement
+        torch.cuda.empty_cache()
+        gc.collect()
 
         self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
         self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
