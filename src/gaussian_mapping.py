@@ -337,8 +337,8 @@ class GaussianMapper(object):
 
             # Select a random subset of frames to optimize over
             if random_frames is not None:
-                random_frames = int(len(self.cameras) * random_frames)
-                to_refine = np.random.choice(len(self.cameras), random_frames, replace=False)
+                abs_rand = int(len(self.cameras) * random_frames)
+                to_refine = np.random.choice(len(self.cameras), abs_rand, replace=False)
                 frames = [self.cameras[i] for i in to_refine]
             else:
                 frames = self.cameras
