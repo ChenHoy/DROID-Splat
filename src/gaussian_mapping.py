@@ -761,9 +761,10 @@ class GaussianMapper(object):
         )
 
         self.get_new_cameras()  # Add new cameras
-        self.last_idx = self.new_cameras[-1].uid + 1
+        if len(self.new_cameras) != 0:
+            self.last_idx = self.new_cameras[-1].uid + 1
+            self.info(f"Added {len(self.new_cameras)} new cameras: {[cam.uid for cam in self.new_cameras]}")
 
-        self.info(f"Added {len(self.new_cameras)} new cameras: {[cam.uid for cam in self.new_cameras]}")
         self.frame_updater()  # Update all changed cameras with new information from SLAM system
 
         for cam in self.new_cameras:
