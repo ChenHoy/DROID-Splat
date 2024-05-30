@@ -114,6 +114,7 @@ class BaseDataset(Dataset):
         self.device = device
         self.png_depth_scale = cfg.data.get("png_depth_scale", None)
         self.stride = cfg.get("stride", 1)
+        self.mono_model = cfg.get("mono_depth", "metric3d-vit_giant2")
 
         self.input_folder = cfg.data.input_folder
         self.color_paths = sorted(glob.glob(self.input_folder))
@@ -292,7 +293,7 @@ class ImageFolder(BaseDataset):
             self.color_paths = sorted(glob.glob(input_images))
         self.color_paths = self.color_paths[:: self.stride]
 
-        depth_paths = os.path.join(self.input_folder, cfg.mono_depth, "*.npy")
+        depth_paths = os.path.join(self.input_folder, self.mono_model, "*.npy")
         if len(depth_paths) != 0:
             self.depth_paths = sorted(glob.glob(depth_paths))
             self.depth_paths = self.depth_paths[:: self.stride]
@@ -312,7 +313,7 @@ class Replica(BaseDataset):
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
-            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, cfg.mono_depth, "frame*.npy")))
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model, "frame*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
@@ -352,7 +353,7 @@ class TartanAir(BaseDataset):
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
-            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, cfg.mono_depth, "*.npy")))
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model, "*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
@@ -403,7 +404,7 @@ class DAVIS(BaseDataset):
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
             self.depth_path = self.input_folder.replace(
-                "JPEGImages/Full-Resolution", "Depth/Full-Resolution/" + cfg.mono_depth
+                "JPEGImages/Full-Resolution", "Depth/Full-Resolution/" + self.mono_model
             )
             self.depth_paths = sorted(glob.glob(os.path.join(self.depth_path, self.sequence, "*.npy")))
             assert (
@@ -438,7 +439,7 @@ class TotalRecon(BaseDataset):
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
             self.depth_paths = self.depth_paths[:: self.stride]
         elif cfg.mode == "prgbd":
-            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, cfg.mono_depth, "*.npy")))
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model, "*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
@@ -485,7 +486,7 @@ class KITTI(BaseDataset):
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
-            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", cfg.mono_depth, "*.npy")))
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", self.mono_model, "*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
@@ -1050,7 +1051,7 @@ class Sintel(BaseDataset):
             self.depth_paths = self.depth_paths[:: self.stride]
         elif cfg.mode == "prgbd":
             self.depth_paths = sorted(
-                glob.glob(os.path.join(self.input_folder, cfg.mono_depth, cfg.data.scene, "*.npy"))
+                glob.glob(os.path.join(self.input_folder, self.mono_model, cfg.data.scene, "*.npy"))
             )[:-1]
             assert (
                 len(self.depth_paths) == self.n_img
