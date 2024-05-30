@@ -72,7 +72,7 @@ class GaussianMapper(object):
         self.filter_uncertainty = cfg.mapping.filter_uncertainty
         self.filter_multiview = cfg.mapping.filter_multiview
 
-        self.filter_dyn = cfg.with_dyn
+        self.filter_dyn = cfg.get("with_dyn", False)
 
         self.loss_params = cfg.mapping.loss
 
