@@ -336,7 +336,7 @@ class GaussianMapper(object):
 
         if random_frames is not None:
             n_rand = int(len(self.cameras) * random_frames)
-            self.info(f"Info. Going over {n_rand} instead of {len(self.cameras)} of frames for optimization ...")
+            self.info(f"Info. Going over {n_rand} random frames instead of {len(self.cameras)} of frames for optimization ...")
             if n_rand > self.max_frames_refinement:
                 n_chunks = n_rand // self.max_frames_refinement
                 self.info(
