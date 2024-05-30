@@ -57,6 +57,7 @@ class GaussianMapper(object):
         self.output = slam.output
         self.delay = cfg.mapping.delay  # Delay between tracking and mapping
         self.refinement_iters = cfg.mapping.refinement_iters
+        self.use_non_keyframes = cfg.mapping.use_non_keyframes
         self.mapping_iters = cfg.mapping.mapping_iters
         self.save_renders = cfg.mapping.save_renders
         self.warmup = max(cfg.mapping.warmup, cfg.tracking.warmup)
@@ -71,7 +72,7 @@ class GaussianMapper(object):
         self.n_rand_frames = self.kf_mng_params.n_rand_frames
         # NOTE chen: during refinement we likely go over this number!
         # in order to avoid OOM, we chunk the refinement up
-        self.max_frames = 100  # Maximum number of frames to optimize over
+        self.max_frames_refinement = cfg.mapping.max_frames_refinement  # Maximum number of frames to optimize over
 
         self.filter_uncertainty = cfg.mapping.filter_uncertainty
         self.filter_multiview = cfg.mapping.filter_multiview
@@ -333,8 +334,14 @@ class GaussianMapper(object):
         if prune:
             self.abs_visibility_prune(self.kf_mng_params.abs_visibility_th)
 
-        for iter in range(num_iters):
+        # Make user aware of having a too large map
+        if len(self.cameras) > self.max_frames_refinement:
+            n_chunks = len(self.cameras) // self.max_frames_refinement
+            self.info(
+                f"Warning. {len(self.cameras)} Frames is too many! Optimizing over {n_chunks} chunks of frames with size {self.max_frames_refinement} ..."
+            )
 
+        for iter in tqdm(range(num_iters)):
             # Select a random subset of frames to optimize over
             if random_frames is not None:
                 abs_rand = int(len(self.cameras) * random_frames)
@@ -345,11 +352,8 @@ class GaussianMapper(object):
 
             # Using all frames instead of only keyframes can lead to OOM during optimization
             # -> Use a selection of frames instead!
-            if len(frames) > self.max_frames:
-                chunks = [frames[i : i + self.max_frames] for i in range(0, len(frames), self.max_frames)]
-                self.info(
-                    f"Too many frames! Optimizing over {len(chunks)} chunks of frames with size {self.max_frames} ..."
-                )
+            if len(frames) > self.max_frames_refinement:
+                chunks = [frames[i : i + self.max_frames_refinement] for i in range(0, len(frames), self.max_frames)]
                 loss = 0
                 for chunk in chunks:
                     loss += self.mapping_step(iter, chunk, self.kf_mng_params.refinement, densify=False)
@@ -659,7 +663,7 @@ class GaussianMapper(object):
 
         self.info(f"#Gaussians before Map Refinement: {len(self.gaussians)}")
 
-        if self.slam.dataset is not None:
+        if self.slam.dataset is not None and self.use_non_keyframes:
             self.info("Interpolating trajectory to get non-keyframe Cameras for refinement ...")
             non_kf_cams = self.get_nonkeyframe_cameras(self.slam.dataset, self.slam.traj_filler)
             # Reinstatiate an empty traj_filler, we only reuse this during eval
