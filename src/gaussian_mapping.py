@@ -353,7 +353,10 @@ class GaussianMapper(object):
             # Using all frames instead of only keyframes can lead to OOM during optimization
             # -> Use a selection of frames instead!
             if len(frames) > self.max_frames_refinement:
-                chunks = [frames[i : i + self.max_frames_refinement] for i in range(0, len(frames), self.max_frames)]
+                chunks = [
+                    frames[i : i + self.max_frames_refinement]
+                    for i in range(0, len(frames), self.max_frames_refinement)
+                ]
                 loss = 0
                 for chunk in chunks:
                     loss += self.mapping_step(iter, chunk, self.kf_mng_params.refinement, densify=False)
