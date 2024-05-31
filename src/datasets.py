@@ -123,6 +123,7 @@ class BaseDataset(Dataset):
         self.has_dyn_masks = False
         self.background_value = 0
         self.dilate_masks = True # NOTE chen: some datasets (e.g. Sintel) have masks too small
+        self.dilation_kernel_size = 5
         self.return_stat_masks = cfg.get("with_dyn", False)
         self.n_img = len(self.color_paths)
 
@@ -260,7 +261,7 @@ class BaseDataset(Dataset):
             mask = mask == self.background_value # static mask
             if self.dilate_masks:
                 mask = np.uint8(~mask) # Invert to dynamic mask
-                kernel = np.ones((3, 3), np.uint8) 
+                kernel = np.ones((self.dilation_kernel_size, self.dilation_kernel_size), np.uint8) 
                 mask = cv2.dilate(mask, kernel, iterations=1) 
                 mask = ~mask.astype(bool) # Return back to static mask
             mask = np.uint8(mask)
