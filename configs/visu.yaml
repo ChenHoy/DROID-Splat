@@ -4,13 +4,11 @@ defaults:
   # - data: DAVIS/base.yaml
   # - data: Replica/base.yaml
   - data: Sintel/base.yaml
+ # - data: TotalRecon/base.yaml
 
 hydra:
   run:
     dir: visu/${hydra.job.name}_${now:%Y-%m-%d_%H-%M-%S}
-  job:
-    chdir: False
-    name: tartanair
 
 mode: "rgbd"  # "prgbd"
 mono_depth: "metric3d-vit_giant2" # 'zoed-nk', 'metric3d-vit_giant2', 'depthany-vitl-outdoor_left', 'depthany-vitl-indoor_left'
