@@ -26,3 +26,9 @@
 	path = ext/Metric3D
 	branch = main
 	url = https://github.com/ChenHoy/Metric3D.git
+[submodule "ext/ISAT_with_segment_anything"]
+	path = ext/ISAT_with_segment_anything
+	url = https://github.com/ChenHoy/ISAT_with_segment_anything.git
+[submodule "ext/sam-pt"]
+	path = ext/sam-pt
+	url = https://github.com/SysCV/sam-pt
