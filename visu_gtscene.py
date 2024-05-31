@@ -263,6 +263,9 @@ def droid_visualization(video, device="cuda:0", q_vis2main: Optional[Queue] = No
         video.dirty[dirty_index] = False  # Reset dirty
         poses = torch.index_select(video.poses, 0, dirty_index)
         disps = torch.index_select(video.disps, 0, dirty_index)
+        valid = disps > 0
+        disps = disps.clamp_(min=0.001, max=1000.0)  # Avoid division by zero
+
         # convert poses to 4x4 matrix
         Ps = SE3(poses).inv().matrix().cpu().numpy()
         images = torch.index_select(video.images, 0, dirty_index)
@@ -271,12 +274,14 @@ def droid_visualization(video, device="cuda:0", q_vis2main: Optional[Queue] = No
 
         intrinsics = video.intrinsics[0]
         points = droid_backends.iproj(SE3(poses).inv().data, disps, intrinsics).cpu()
+
         thresh = droid_visualization.mv_filter_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
         # Take global intrinsics, since they should be the same across the video!
         count = droid_backends.depth_filter(video.poses, video.disps, intrinsics, dirty_index, thresh)
         count, disps = count.cpu(), disps.cpu()
         # Only keep points that are consistent across multiple views and not too close by
         masks = (count >= droid_visualization.mv_filter_count) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
+        masks = masks & valid.cpu()  # Remove invalid points (e.g. with 0 depth)
 
         if droid_visualization.with_dynamic:
             stat_masks = torch.index_select(video.static_masks, 0, dirty_index)
@@ -407,10 +412,12 @@ def test_scene(video: SimpleVideo, index: Union[int, torch.Tensor]) -> None:
     Ps = SE3(poses).inv().matrix().cpu().numpy()  # Convert to lietorch SE3
     points = droid_backends.iproj(SE3(poses).inv().data, disps, intrinsics)
 
+    masks = disps > 0  # Filter out invalid disparities (we mark nan's with 0)
+
     geometries = []
     for i in range(len(index)):
-        pts = points[i].reshape(-1, 3).cpu().numpy()
-        clr = images[i].reshape(-1, 3).cpu().numpy()
+        pts = points[i][masks[i], :].reshape(-1, 3).cpu().numpy()
+        clr = images[i][masks[i], :].reshape(-1, 3).cpu().numpy()
         point_actor = create_point_actor(pts, clr)
 
         cam_actor = create_camera_actor(True)
@@ -421,6 +428,23 @@ def test_scene(video: SimpleVideo, index: Union[int, torch.Tensor]) -> None:
 
     # Plot the point cloud
     o3d.visualization.draw_geometries(geometries)
+
+
+def show_masks_video(datastructure: SimpleVideo) -> None:
+    """Use an animation to show the masks over time."""
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation
+
+    fig, ax = plt.subplots(1, 1)
+    ax.axis("off")
+
+    def update(i):
+        mask = datastructure.static_masks[i].cpu().numpy()
+        ax.imshow(mask)
+        ax.set_title(f"Frame {i}")
+
+    ani = FuncAnimation(fig, update, frames=len(datastructure), repeat=False)
+    plt.show()
 
 
 @hydra.main(version_base=None, config_path="./configs/", config_name="visu")
@@ -466,6 +490,12 @@ def main(cfg):
         datastructure.counter.value += 1
         i += 1
 
+    n_frames = datastructure.counter.value - 1
+    datastructure.counter.value = 0  # Reset counter
+
+    # test_scene(datastructure, torch.arange(0, 3, device=datastructure.device)) # Is the reconstruction of individual frames correct?
+    # show_masks_video(datastructure) # How do the masks actually look like?
+
     # Initialize the visualization process
     q_vis2main = Queue()  # Use a Queue to stop iterating over dataset if wanted triggered from GUI
 
@@ -478,7 +508,7 @@ def main(cfg):
     visualization.start()
 
     # Go over the video and set frames as dirty
-    for i in tqdm(range(datastructure.counter.value)):
+    for i in tqdm(range(n_frames)):
         if i > t_stop:
             break
 
@@ -493,7 +523,8 @@ def main(cfg):
                     break
 
         with datastructure.get_lock():
-            datastructure.dirty[i - 1] = True
+            datastructure.dirty[i] = True
+            datastructure.counter.value += 1
 
         if i == 0:
             sleep(cfg.get("sleep_init", 5.0))  # Let window pop up first
