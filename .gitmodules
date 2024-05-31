@@ -22,3 +22,7 @@
 	path = ext/ZoeDepth
 	branch = master
 	url = https://github.com/ChenHoy/ZoeDepth.git
+[submodule "ext/Metric3D"]
+	path = ext/Metric3D
+	branch = main
+	url = https://github.com/ChenHoy/Metric3D.git
