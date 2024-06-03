@@ -245,7 +245,7 @@ class SLAM:
         # only use backend again once we have some slack -> 50% free RAM (12GB in use)
         if self.backend is None and used_mem <= min_ram:
             self.info("Reinstantiating Backend ...")
-            self.backend = BackendWrapper(self.cfg, self.args, self)
+            self.backend = BackendWrapper(self.cfg, self)
             self.backend.to(self.device)
 
     def global_ba(self, rank, run=False):
@@ -264,14 +264,20 @@ class SLAM:
                 sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
         # Run one last time after tracking finished
-        if run and self.backend is not None:
+        if run and self.backend is not None and self.backend.do_refinement:
             with self.video.get_lock():
                 t_end = self.video.counter.value
 
             msg = "Optimize full map: [{}, {}]!".format(0, t_end)
             self.backend.info(msg)
-            _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
-            _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
+
+            # Use loop closure BA for refinement if enabled
+            if self.backend.enable_loop:
+                _, _ = self.backend.optimizer.loop_ba(t_start=0, t_end=t_end, steps=6)
+                _, _ = self.backend.optimizer.loop_ba(t_start=0, t_end=t_end, steps=6)
+            else:
+                _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
+                _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
 
         del self.backend
         torch.cuda.empty_cache()
@@ -287,7 +293,7 @@ class SLAM:
 
         while (self.tracking_finished + self.backend_finished) < 2 and run:
             self.gaussian_mapper(mapping_queue, received_mapping)
-            sleep(self.sleep_time / 2)
+            # sleep(self.sleep_time / 2)
 
         # Run for one last time after everything finished
         finished = False
@@ -536,9 +542,14 @@ class SLAM:
         # for p in processes:
         #     p.start()
 
+        render_freq = 50
+
         for frame in tqdm(stream):
             timestamp, image, depth, intrinsic, gt_pose = frame
             self.frontend(timestamp, image, depth, intrinsic, gt_pose)
 
-            if self.frontend.optimizer.is_initialized:
-                self.gaussian_mapper(None, None)
+        #     # Run Gaussian Rendering on top, but only every k frames
+        #     if self.frontend.optimizer.is_initialized and timestamp % render_freq == 0:
+        #         self.gaussian_mapper(None, None)
+
+        # self.gaussian_mapper._last_call(None, None)
