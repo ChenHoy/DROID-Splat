@@ -472,10 +472,12 @@ class FactorGraph:
                 if self.scale_priors:
                     # Use pure Python BA implementation with scale correction for priors
                     # (This makes it possible to work with monocular depth prediction priors)
-                    self.video.ba_prior(target, weight, damping, ii, jj, t0=t0, t1=t1, iters=iters, lm=lm, ep=ep)
-                    # After optimizing the prior, we need to update the disps_sens and reset the scales
-                    # only then can we use global BA and intrinsics optimization with the CUDA kernel later
-                    self.video.reset_prior()
+                    for i in range(iters):
+                        self.video.reset_prior() # Make sure the motion_only uses the correct disps_sens
+                        self.video.ba_prior(target, weight, damping, ii, jj, t0=t0, t1=t1, iters=1, lm=lm, ep=ep)
+                        # After optimizing the prior, we need to update the disps_sens and reset the scales
+                        # only then can we use global BA and intrinsics optimization with the CUDA kernel later
+                        self.video.reset_prior()
                 else:
                     self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False)
 
@@ -486,7 +488,7 @@ class FactorGraph:
 
     @torch.cuda.amp.autocast(enabled=False)
     def update_lowmem(
-        self, t0=None, t1=None, iters=8, steps=2, max_t=None, lm: float = 1e-4, ep: float = 1e-1, motion_only=False
+        self, t0=None, t1=None, iters=8, steps=2, max_t=None, lm: float = 5e-5, ep: float = 5e-2, motion_only=False
     ):
         """run update operator on factor graph - reduced memory implementation"""
         cur_t = self.video.counter.value
@@ -558,7 +560,7 @@ class FactorGraph:
             self.video.ba(target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep, motion_only)
 
     @torch.cuda.amp.autocast(enabled=False)
-    def prior_update_lowmem(self, t0=None, t1=None, iters=2, steps=8, max_t=None, lm: float = 1e-4, ep: float = 1e-1):
+    def prior_update_lowmem(self, t0=None, t1=None, iters=2, steps=8, max_t=None, lm: float = 5e-5, ep: float = 5e-2):
         """run update operator on factor graph - reduced memory implementation"""
         cur_t = self.video.counter.value
 

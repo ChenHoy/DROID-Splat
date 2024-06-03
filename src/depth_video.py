@@ -72,13 +72,14 @@ class DepthVideo:
 
         self.disps_sens = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         # Scale and shift parameters for ambiguous monocular depth
-        self.optimize_scales = cfg.mode == "prgbd"  # Optimze the scales and shifts for Pseudo-RGBD mode
+        # Optimze the scales and shifts for Pseudo-RGBD mode
+        self.optimize_scales = cfg.mode == "prgbd" and cfg.tracking.frontend.optimize_scales
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
+
         # NOTE chen: This is redundant as is this is simply 1 / disps_sens
         # TODO if we need to squeeze memory we can remove this
         self.depths_gt = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
-
         # FIXME chen: what is this for?
         self.red = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
 
@@ -130,8 +131,8 @@ class DepthVideo:
             self.depths_gt[index] = item[4]
             depth = item[4][..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
             self.disps_sens[index] = torch.where(depth > 0, 1.0 / depth, depth)
-            # if self.cfg.mode != "prgbd":
-            self.disps[index] = self.disps_sens[index].clone()
+            if self.cfg.mode != "prgbd":
+                self.disps[index] = self.disps_sens[index].clone()
 
         if item[5] is not None:
             # NOTE chen: we always work with the downscaled images/disps for optimization so store intrinsics at that scale
@@ -289,6 +290,7 @@ class DepthVideo:
     # FIXME chen: there is some fuckery happening inside gaussian mapping, which attaches the wrong scale to the gaussians!
     # we somehow have a different scale after giving back the exact same ones without any optimization
     # NOTE: this could be due to different optimization objectives, the scale of both Tracking/Rendering stabilizes after some time
+
     def set_mapping_item(self, index: List[torch.Tensor], poses: List[torch.Tensor], depths: List[torch.Tensor]):
         """Set a part of the video from the Rendering module"""
         # Filter out invalid views, where we could not render anything
@@ -312,16 +314,24 @@ class DepthVideo:
 
             disps = torch.where(valid, 1.0 / depths, depths)
             disps.clamp_(min=0.001)  # Sanity for optimization
-            # The Renderer always outputs in the original resolution
+
             s = self.scale_factor
-            self.disps[index] = torch.where(
-                valid[:, 0, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s],
-                disps[:, 0, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].clone().detach().to(self.device),
-                self.disps[index],
-            )
+            # We work with the original resolution in Rendering
             if self.upsampled:
                 self.disps_up[index] = torch.where(
                     valid[:, 0], disps[:, 0].clone().detach().to(self.device), self.disps_up[index]
+                )
+                self.disps[index] = torch.where(
+                    valid[:, 0, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s],
+                    disps[:, 0, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].clone().detach().to(self.device),
+                    self.disps[index],
+                )
+            #  We work with downscaled resolution. This means, we need to upsample the disparities in tracking
+            else:
+                self.disps[index] = torch.where(
+                    valid[:, 0],
+                    disps[:, 0].clone().detach().to(self.device),
+                    self.disps[index],
                 )
 
             if len(poses) != 0:
@@ -473,33 +483,55 @@ class DepthVideo:
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
-            # We only consider the disparity prior in the frontend
-            # NOTE somehow because frontend and backend run in parallel this would destory the map
             if self.optimize_scales:
+                # We only consider the disparity prior in the frontend
+                # NOTE somehow because frontend and backend run in parallel this would destory the map
+                # this might be because of the different objective functions
                 disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
+                # disps_sens = self.disps_sens
+                for i in range(iters):
+                    self.reset_prior()
+                    droid_backends.ba(
+                        self.poses,
+                        self.disps,
+                        self.intrinsics[intrinsic_common_id],
+                        disps_sens,
+                        target,
+                        weight,
+                        eta,
+                        ii,
+                        jj,
+                        t0,
+                        t1,
+                        1,
+                        self.model_id,
+                        lm,
+                        ep,
+                        motion_only,
+                        self.opt_intr,
+                    )
+                    self.disps.clamp_(min=0.001)  # Always make sure that Disparities are non-negative!!!
             else:
-                disps_sens = self.disps_sens
-
-            droid_backends.ba(
-                self.poses,
-                self.disps,
-                self.intrinsics[intrinsic_common_id],
-                disps_sens,
-                target,
-                weight,
-                eta,
-                ii,
-                jj,
-                t0,
-                t1,
-                iters,
-                self.model_id,
-                lm,
-                ep,
-                motion_only,
-                self.opt_intr,
-            )
-            self.disps.clamp_(min=0.001)  # Always make sure that Disparities are non-negative!!!
+                droid_backends.ba(
+                    self.poses,
+                    self.disps,
+                    self.intrinsics[intrinsic_common_id],
+                    self.disps_sens,
+                    target,
+                    weight,
+                    eta,
+                    ii,
+                    jj,
+                    t0,
+                    t1,
+                    iters,
+                    self.model_id,
+                    lm,
+                    ep,
+                    motion_only,
+                    self.opt_intr,
+                )
+                self.disps.clamp_(min=0.001)  # Always make sure that Disparities are non-negative!!!
 
     def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 0.05):
         """Bundle adjustment over structure with a scalable prior.
@@ -540,48 +572,24 @@ class DepthVideo:
                 self.opt_intr,
             )
             # JDSA
-            # bundle_adjustment(
-            #     target,
-            #     weight,
-            #     eta,
-            #     self.poses,
-            #     self.disps,
-            #     self.intrinsics,
-            #     ii,
-            #     jj,
-            #     t0,
-            #     t1,
-            #     self.disps_sens,
-            #     self.scales,
-            #     self.shifts,
-            #     iters=iters + 2,  # Use slightly more iterations here, so we get the scales right for sure!
-            #     lm=lm,
-            #     ep=ep,
-            #     scale_prior=True,
-            #     structure_only=True,
-            #     alpha=alpha,
-            # )
-            # HACK we want to reset the prior after each iteration, so that the backend would never work with the wrong scale
-            for _ in range(iters + 2):
-                bundle_adjustment(
-                    target,
-                    weight,
-                    eta,
-                    self.poses,
-                    self.disps,
-                    self.intrinsics,
-                    ii,
-                    jj,
-                    t0,
-                    t1,
-                    self.disps_sens,
-                    self.scales,
-                    self.shifts,
-                    iters=1,
-                    lm=lm,
-                    ep=ep,
-                    scale_prior=True,
-                    structure_only=True,
-                    alpha=alpha,
-                )
-                self.reset_prior()
+            bundle_adjustment(
+                target,
+                weight,
+                eta,
+                self.poses,
+                self.disps,
+                self.intrinsics,
+                ii,
+                jj,
+                t0,
+                t1,
+                self.disps_sens,
+                self.scales,
+                self.shifts,
+                iters=iters,
+                lm=lm,
+                ep=ep,
+                scale_prior=True,
+                structure_only=True,
+                alpha=alpha,
+            )
