@@ -1,39 +1,28 @@
 import torch
+import ipdb
 
 
 def image_gradient(image):
     # Compute image gradient using Scharr Filter
     c = image.shape[0]
-    conv_y = torch.tensor(
-        [[3, 0, -3], [10, 0, -10], [3, 0, -3]], dtype=torch.float32, device="cuda"
-    )
-    conv_x = torch.tensor(
-        [[3, 10, 3], [0, 0, 0], [-3, -10, -3]], dtype=torch.float32, device="cuda"
-    )
+    conv_y = torch.tensor([[3, 0, -3], [10, 0, -10], [3, 0, -3]], dtype=torch.float32, device=image.device)
+    conv_x = torch.tensor([[3, 10, 3], [0, 0, 0], [-3, -10, -3]], dtype=torch.float32, device=image.device)
     normalizer = 1.0 / torch.abs(conv_y).sum()
     p_img = torch.nn.functional.pad(image, (1, 1, 1, 1), mode="reflect")[None]
-    img_grad_v = normalizer * torch.nn.functional.conv2d(
-        p_img, conv_x.view(1, 1, 3, 3).repeat(c, 1, 1, 1), groups=c
-    )
-    img_grad_h = normalizer * torch.nn.functional.conv2d(
-        p_img, conv_y.view(1, 1, 3, 3).repeat(c, 1, 1, 1), groups=c
-    )
+    img_grad_v = normalizer * torch.nn.functional.conv2d(p_img, conv_x.view(1, 1, 3, 3).repeat(c, 1, 1, 1), groups=c)
+    img_grad_h = normalizer * torch.nn.functional.conv2d(p_img, conv_y.view(1, 1, 3, 3).repeat(c, 1, 1, 1), groups=c)
     return img_grad_v[0], img_grad_h[0]
 
 
 def image_gradient_mask(image, eps=0.01):
     # Compute image gradient mask
     c = image.shape[0]
-    conv_y = torch.ones((1, 1, 3, 3), dtype=torch.float32, device="cuda")
-    conv_x = torch.ones((1, 1, 3, 3), dtype=torch.float32, device="cuda")
+    conv_y = torch.ones((1, 1, 3, 3), dtype=torch.float32, device=image.device)
+    conv_x = torch.ones((1, 1, 3, 3), dtype=torch.float32, device=image.device)
     p_img = torch.nn.functional.pad(image, (1, 1, 1, 1), mode="reflect")[None]
     p_img = torch.abs(p_img) > eps
-    img_grad_v = torch.nn.functional.conv2d(
-        p_img.float(), conv_x.repeat(c, 1, 1, 1), groups=c
-    )
-    img_grad_h = torch.nn.functional.conv2d(
-        p_img.float(), conv_y.repeat(c, 1, 1, 1), groups=c
-    )
+    img_grad_v = torch.nn.functional.conv2d(p_img.float(), conv_x.repeat(c, 1, 1, 1), groups=c)
+    img_grad_h = torch.nn.functional.conv2d(p_img.float(), conv_y.repeat(c, 1, 1, 1), groups=c)
 
     return img_grad_v[0] == torch.sum(conv_x), img_grad_h[0] == torch.sum(conv_y)
 
@@ -47,9 +36,7 @@ def depth_reg(depth, gt_image, huber_eps=0.1, mask=None):
 
     w_h = torch.exp(-10 * gray_grad_h**2)
     w_v = torch.exp(-10 * gray_grad_v**2)
-    err = (w_h * torch.abs(depth_grad_h)).mean() + (
-        w_v * torch.abs(depth_grad_v)
-    ).mean()
+    err = (w_h * torch.abs(depth_grad_h)).mean() + (w_v * torch.abs(depth_grad_v)).mean()
     return err
 
 
@@ -71,14 +58,10 @@ def get_loss_tracking_rgb(config, image, depth, opacity, viewpoint):
     return l1.mean()
 
 
-def get_loss_tracking_rgbd(
-    config, image, depth, opacity, viewpoint, initialization=False
-):
+def get_loss_tracking_rgbd(config, image, depth, opacity, viewpoint, initialization=False):
     alpha = config["Training"]["alpha"] if "alpha" in config["Training"] else 0.95
 
-    gt_depth = torch.from_numpy(viewpoint.depth).to(
-        dtype=torch.float32, device=image.device
-    )[None]
+    gt_depth = torch.from_numpy(viewpoint.depth).to(dtype=torch.float32, device=image.device)[None]
     depth_pixel_mask = (gt_depth > 0.01).view(*depth.shape)
     opacity_mask = (opacity > 0.95).view(*depth.shape)
 
@@ -116,9 +99,7 @@ def get_loss_mapping_rgbd(config, image, depth, viewpoint, initialization=False)
 
     gt_image = viewpoint.original_image.cuda()
 
-    gt_depth = torch.from_numpy(viewpoint.depth).to(
-        dtype=torch.float32, device=image.device
-    )[None]
+    gt_depth = torch.from_numpy(viewpoint.depth).to(dtype=torch.float32, device=image.device)[None]
     rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
     depth_pixel_mask = (gt_depth > 0.01).view(*depth.shape)
 
