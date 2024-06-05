@@ -85,6 +85,10 @@ class GaussianModel:
     def get_xyz(self):
         return self._xyz
 
+    def __len__(self):
+        """Returns the number of 3D Gaussians we have"""
+        return len(self._xyz)
+
     @property
     def get_features(self):
         features_dc = self._features_dc
