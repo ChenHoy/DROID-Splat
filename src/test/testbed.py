@@ -50,13 +50,15 @@ class SlamTestbed(SLAM):
         """Render all views and animate through the scene to see the reconstructed video from the Gaussians"""
 
         views = []
-        for i in len(self.gaussian_mapper.cameras):
+        for i in range(len(self.gaussian_mapper.cameras)):
             title = f"View: {i}"
             fig = self.get_render_snapshot(i, title=title)
             views.append(fig)
         create_animation(views, interval=100, repeat_delay=500, blit=True)
 
-    def custom_render_update(self, record_optimization: bool = False, record_view: int = 0):
+    def custom_render_update(
+        self, record_optimization: bool = False, record_view: int = 0, iters: Optional[int] = None
+    ):
         """Update our rendered map by:
         i) Pull a filtered update from the sparser SLAM map
         ii) Add new Gaussians based on new views
@@ -107,17 +109,33 @@ class SlamTestbed(SLAM):
             renderer.info("No Gaussians to optimize, skipping mapping step ...")
             return
 
+        if record_optimization:
+            view_over_time = []
+            base_title = f"View: {record_view} | Iter: "
+            view_over_time.append(self.get_render_snapshot(record_view, title=base_title + "0"))
+
         # Optimize gaussians
-        for iter in range(renderer.mapping_iters):
+        if iters is None:
+            iters = renderer.mapping_iters
+        for iter in range(iters):
             frames = renderer.select_keyframes()[0] + renderer.new_cameras
             if len(frames) == 0:
                 renderer.loss_list.append(0.0)
                 continue
 
+            # Make sure that the view we want to visualize over time is in the list
+            if record_optimization:
+                to_optimize = [cam.uid for cam in frames]
+                if record_view not in to_optimize:
+                    frames += renderer.cameras[record_view]
+
             loss = renderer.mapping_step(
                 iter, frames, renderer.kf_mng_params.mapping, densify=True, optimize_poses=renderer.optimize_poses
             )
             renderer.loss_list.append(loss / len(frames))
+
+            if record_optimization:
+                view_over_time.append(self.get_render_snapshot(record_view, title=base_title + str(iter + 1)))
 
         # Keep track of how well the Rendering is doing
         renderer.info(f"Loss: {renderer.loss_list[-1]}")
@@ -139,6 +157,9 @@ class SlamTestbed(SLAM):
         # Keep track of added cameras
         renderer.cameras += renderer.new_cameras
         renderer.new_cameras = []
+
+        if record_optimization:
+            return view_over_time
 
     def run(self, stream):
         """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
@@ -164,11 +185,16 @@ class SlamTestbed(SLAM):
 
             if timestamp == 400:
                 self.gaussian_mapper(None, None)
+                # Go through the whole scene and show the rendered video
+                self.render_and_animate_whole_scene()
                 self.gaussian_mapper(None, None)
+                self.render_and_animate_whole_scene()
                 self.gaussian_mapper(None, None)
-                self.gaussian_mapper(None, None)
-                self.gaussian_mapper(None, None)
-                self.render_and_animate_gaussians()
+
+                # Render the scene each iteration of the optimization and show animation of it
+                view_over_time = self.custom_render_update(record_optimization=True, record_view=10)
+                create_animation(view_over_time, interval=200, repeat_delay=500, blit=True)
+                ipdb.set_trace()
 
             # Run Gaussian Rendering on top, but only every k frames
             # if self.frontend.optimizer.is_initialized and timestamp % render_freq == 0:

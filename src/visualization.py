@@ -42,6 +42,17 @@ CAM_POINTS = np.array(
 CAM_LINES = np.array([[1, 2], [2, 3], [3, 4], [4, 1], [1, 0], [0, 2], [3, 0], [0, 4], [5, 7], [7, 6]])
 
 
+def plot_centers(gaussians) -> None:
+    """Plot the optimized 3D Gaussians as a point cloud"""
+    means = gaussians.get_xyz.detach().cpu().numpy()
+    rgb = gaussians.get_features[:, 0, :].detach().cpu().numpy()
+    rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min())
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(means)
+    pcd.colors = o3d.utility.Vector3dVector(rgb)
+    o3d.visualization.draw_geometries([pcd])
+
+
 def plot_3d(rgb: torch.Tensor, depth: torch.Tensor):
     """Use Open3d to plot the 3D point cloud from the monocular depth and input image."""
 
