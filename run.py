@@ -95,7 +95,6 @@ def run_slam(cfg):
 
     sys_print(f"Running on {len(dataset)} frames")
     slam.run(dataset)
-    # slam.test(dataset)
     sys_print("Done!")
 
 

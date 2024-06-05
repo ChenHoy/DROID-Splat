@@ -1,25 +1,18 @@
 import os
 import ipdb
-from omegaconf import DictConfig
+import gc
+from time import sleep
+from typing import List, Optional
+from tqdm import tqdm
 from copy import deepcopy
 from termcolor import colored
 from collections import OrderedDict
-from tqdm import tqdm
-from time import sleep
-import numpy as np
-import pandas as pd
-from typing import List, Optional
-import os.path as osp
-from typing import List, Optional
-from tqdm import tqdm
-import gc
-from time import sleep
-from collections import OrderedDict
 from omegaconf import DictConfig
-from termcolor import colored
-import ipdb
+
 import cv2
 import numpy as np
+import pandas as pd
+
 import torch
 import torch.multiprocessing as mp
 from lietorch import SE3
@@ -31,11 +24,9 @@ from .depth_video import DepthVideo
 from .visualization import droid_visualization, depth2rgb, uncertainty2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .gaussian_mapping import GaussianMapper
+
 from .gaussian_splatting.eval_utils import eval_ate, eval_rendering, save_gaussians
 from .gaussian_splatting.gui import gui_utils, slam_gui
-
-
-from multiprocessing import Manager
 from .gaussian_splatting.multiprocessing_utils import clone_obj
 
 
@@ -526,30 +517,3 @@ class SLAM:
             pass
 
         self.terminate(processes, stream, gaussian_mapper_last_state)
-
-    def test(self, stream):
-        """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
-
-        # processes = [mp.Process(target=self.visualizing, args=(1, True))]
-        # processes = [
-        #     mp.Process(
-        #         target=self.mapping_gui,
-        #         args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
-        #         name="Mapping GUI",
-        #     )
-        # ]
-        # self.num_running_thread[0] += len(processes)
-        # for p in processes:
-        #     p.start()
-
-        render_freq = 50
-
-        for frame in tqdm(stream):
-            timestamp, image, depth, intrinsic, gt_pose = frame
-            self.frontend(timestamp, image, depth, intrinsic, gt_pose)
-
-        #     # Run Gaussian Rendering on top, but only every k frames
-        #     if self.frontend.optimizer.is_initialized and timestamp % render_freq == 0:
-        #         self.gaussian_mapper(None, None)
-
-        # self.gaussian_mapper._last_call(None, None)
