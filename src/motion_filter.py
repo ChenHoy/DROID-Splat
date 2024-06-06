@@ -40,7 +40,6 @@ class MotionFilter:
         # image: [1, b, 3, h, w], return: [1, b, 128, h//8, w//8]
         return self.fnet(image).squeeze(dim=0)
 
-    # TODO chen: static_mask might be a dynamic mask, this needs to resolved on dataloader level!
     @torch.cuda.amp.autocast(enabled=True)
     @torch.no_grad()
     def track(
