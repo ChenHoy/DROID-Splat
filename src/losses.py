@@ -1,4 +1,5 @@
 from typing import List, Optional
+import ipdb
 
 import numpy as np
 import torch
@@ -23,42 +24,50 @@ def mapping_rgbd_loss(
     alpha2: float = 0.85,
     beta: float = 0.001,
     rgb_boundary_threshold: float = 0.01,
-    filter_dyn: bool = False,
+    supervise_with_prior: bool = False,
 ) -> float:
-    has_depth = True
-    if cam.depth is None:
+    if cam.depth is None and cam.depth_prior is None:
         has_depth = False
+    else:
+        has_depth = True
+        if supervise_with_prior:
+            depth_gt = cam.depth_prior
+        else:
+            depth_gt = cam.depth
+
+    image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b  # Transform with exposure to get more realistic image
+    image_gt = cam.original_image
 
     # Mask out pixels with little information and invalid depth pixels
-    rgb_pixel_mask = (cam.original_image.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
-    # Only compute the loss in static regions
-    if filter_dyn:
-        rgb_pixel_mask = rgb_pixel_mask | cam.stat_mask
+    rgb_pixel_mask = (image_gt.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
+    # Include additional attached masks if they exist
+    if cam.mask is not None:
+        rgb_pixel_mask = rgb_pixel_mask & cam.mask
 
     if has_depth:
         # Only use valid depths for supervision
-        depth_pixel_mask = ((cam.depth > MIN_DEPTH) * (cam.depth < MAX_DEPTH)).view(*depth.shape)
-        if filter_dyn:
-            depth_pixel_mask = depth_pixel_mask | cam.stat_mask
+        depth_pixel_mask = ((depth_gt > MIN_DEPTH) * (depth_gt < MAX_DEPTH)).view(*depth.shape)
+        if cam.mask is not None:
+            depth_pixel_mask = depth_pixel_mask & cam.mask
 
     if with_edge_weight:
-        edge_mask_x, edge_mask_y = image_gradient_mask(cam.original_image)  # Use gt reference image for edge weight
+        edge_mask_x, edge_mask_y = image_gradient_mask(image_gt)  # Use gt reference image for edge weight
         edge_mask = edge_mask_x | edge_mask_y  # Combine with logical OR
         rgb_mask = rgb_pixel_mask.float() * edge_mask.float()
     else:
         rgb_mask = rgb_pixel_mask.float()
 
-    loss_rgb = color_loss(image, cam, with_ssim, alpha2, rgb_mask)
+    loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask)
     if has_depth:
-        loss_depth = depth_loss(depth, cam, with_depth_smoothness, beta, depth_pixel_mask)
+        loss_depth = depth_loss(depth, depth_gt, with_depth_smoothness, beta, image_gt, depth_pixel_mask)
         return alpha1 * loss_rgb + (1 - alpha1) * loss_depth
     else:
         return loss_rgb
 
 
 def color_loss(
-    image: torch.Tensor,
-    cam: Camera,
+    image_est: torch.Tensor,
+    image_gt: torch.Tensor,
     with_ssim: bool = True,
     alpha2: float = 0.85,
     mask: Optional[torch.Tensor] = None,
@@ -67,13 +76,13 @@ def color_loss(
     This uses a weighted sum of l1 and ssim loss.
     """
     if mask is None:
-        mask = torch.ones_like(image, device=image.device)
+        mask = torch.ones_like(image_est, device=image_est.device)
 
-    image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
-    l1_rgb = l1_loss(image, cam.original_image, mask)
+    l1_rgb = l1_loss(image_est, image_gt, mask)
     # NOTE this is configured like is done in most monocular depth estimation supervision pipelines
     if with_ssim:
-        ssim_loss = ssim(image.unsqueeze(0), cam.original_image.unsqueeze(0), data_range=1.0, size_average=True)
+        ssim_loss = ms_ssim(image_est.unsqueeze(0), image_gt.unsqueeze(0), data_range=1.0, size_average=True)
+        # ssim_loss = ssim(image_est.unsqueeze(0), image_gt.unsqueeze(0), data_range=1.0, size_average=True)
         rgb_loss = 0.5 * alpha2 * (1 - ssim_loss) + (1 - alpha2) * l1_rgb
     else:
         rgb_loss = l1_rgb
@@ -81,18 +90,19 @@ def color_loss(
 
 
 def depth_loss(
-    depth: torch.Tensor,
-    cam: Camera,
+    depth_est: torch.Tensor,
+    depth_gt: torch.Tensor,
     with_smoothness: bool = False,
     beta: float = 0.001,
+    original_image: Optional[torch.Tensor] = None,
     mask: Optional[torch.Tensor] = None,
 ) -> float:
     if mask is None:
-        mask = torch.ones_like(depth, device=depth.device)
+        mask = torch.ones_like(depth_est, device=depth_est.device)
 
-    l1_depth = l1_loss(cam.depth, depth, mask)
-    if with_smoothness:
-        depth_reg_loss = depth_reg(depth, cam.original_image)
+    l1_depth = l1_loss(depth_est, depth_gt, mask)
+    if with_smoothness and original_image is not None:
+        depth_reg_loss = depth_reg(depth_est, original_image)
         depth_loss = l1_depth + beta * depth_reg_loss
     else:
         depth_loss = l1_depth
