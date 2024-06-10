@@ -29,6 +29,9 @@ def image_gradient_mask(image, eps=0.01):
 
 def depth_reg(depth, gt_image, huber_eps=0.1, mask=None):
     mask_v, mask_h = image_gradient_mask(depth)
+    if mask is not None:
+        mask_v = torch.logical_and(mask_v, mask)
+        mask_h = torch.logical_and(mask_h, mask)
     gray_grad_v, gray_grad_h = image_gradient(gt_image.mean(dim=0, keepdim=True))
     depth_grad_v, depth_grad_h = image_gradient(depth)
     gray_grad_v, gray_grad_h = gray_grad_v[mask_v], gray_grad_h[mask_h]
