@@ -68,6 +68,7 @@ class GaussianMapper(object):
 
         self.filter_uncertainty = cfg.mapping.filter_uncertainty
         self.filter_multiview = cfg.mapping.filter_multiview
+        self.supervise_with_prior = cfg.mapping.use_prior_for_supervision
 
         self.filter_dyn = cfg.get("with_dyn", False)
 
@@ -123,55 +124,48 @@ class GaussianMapper(object):
             self.info(f"Warning. Trying to intialize from empty frame {idx}!")
             return None
 
-        if self.filter_dyn:
-            color, depth, intrinsics, c2w, _, stat_mask = self.video.get_mapping_item(idx, self.device)
-
-        else:
-            color, depth, intrinsics, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
-            stat_mask = None
-
-        return self.camera_from_frame(idx, color, depth, intrinsics, c2w, static_mask=stat_mask)
+        color, depth, depth_prior, intrinsics, c2w, stat_mask = self.video.get_mapping_item(idx, self.device)
+        return self.camera_from_frame(idx, color, c2w, intrinsics, depth, mask=stat_mask)
 
     def camera_from_frame(
         self,
         idx: int,
         image: torch.Tensor,
-        depth: Optional[torch.Tensor],
-        intrinsic: torch.Tensor,
-        gt_pose: torch.Tensor,
-        static_mask: Optional[torch.Tensor] = None,
+        pose_c2w: torch.Tensor,
+        intrinsics: torch.Tensor,
+        depth_init: Optional[torch.Tensor] = None,
+        depth: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
     ):
-        """Given the image, depth, intrinsic and pose, creates a Camera object."""
-        fx, fy, cx, cy = intrinsic
+        """Given the image, depth, intrinsic and pose, creates a Camera object.
+        The depth for supervision and initialization does not need to be the same, e.g. we could initialize
+        the Gaussians with a sparse, but certain depth map and supervise with a dense prior.
+        We also use an optional mask for the objective function, e.g. for supervising only the static parts of the scene
+        explainable by the camera motion."""
+        fx, fy, cx, cy = intrinsics
 
         height, width = image.shape[1:]
-        gt_pose = torch.linalg.inv(gt_pose)
-        fovx = focal2fov(fx, width)
-        fovy = focal2fov(fy, height)
+        fovx, fovy = focal2fov(fx, width), focal2fov(fy, height)
 
-        if self.projection_matrix is None:
-            self.projection_matrix = (
-                getProjectionMatrix2(self.z_near, self.z_far, cx, cy, fx, fy, width, height)
-                .transpose(0, 1)
-                .to(self.device)
-            )
+        projection_matrix = (
+            getProjectionMatrix2(self.z_near, self.z_far, cx, cy, fx, fy, width, height)
+            .transpose(0, 1)
+            .to(self.device)
+        )
 
+        w2c = torch.linalg.inv(pose_c2w)
         return Camera(
             idx,
             image.contiguous(),
+            depth_init,
             depth,
-            gt_pose,
-            self.projection_matrix,
-            fx,
-            fy,
-            cx,
-            cy,
-            fovx,
-            fovy,
-            height,
-            width,
+            w2c,
+            projection_matrix,
+            (fx, fy, cx, cy),
+            (fovx, fovy),
+            (height, width),
             device=self.device,
-            stat_mask=static_mask,
+            mask=mask,
         )
 
     def get_new_cameras(self):
@@ -184,14 +178,12 @@ class GaussianMapper(object):
             to_add = range(self.last_idx, self.cur_idx - self.delay)
 
         for idx in to_add:
-            if self.filter_dyn:
-                color, depth, intrinsics, c2w, _, stat_mask = self.video.get_mapping_item(idx, self.device)
-            else:
-                color, depth, intrinsics, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
-                stat_mask = None
-
-            cam = self.camera_from_frame(idx, color, depth, intrinsics, c2w, static_mask=stat_mask)
-            cam.update_RT(cam.R_gt, cam.T_gt)  # Assuming we found the best pose in tracking
+            color, depth, depth_prior, intrinsics, c2w, stat_mask = self.video.get_mapping_item(
+                idx, device=self.device
+            )
+            cam = self.camera_from_frame(
+                idx, color, c2w, intrinsics, depth_init=depth, depth=depth_prior, mask=stat_mask
+            )
 
             # get the uid's into the self.idx_mapping
             if cam.uid not in self.idx_mapping:
@@ -233,11 +225,15 @@ class GaussianMapper(object):
         to_update = dirty_index[torch.isin(dirty_index, all_idxs)]
 
         for idx in to_update:
-            _, depth, _, c2w, _, _ = self.video.get_mapping_item(idx, self.device)
+            # TODO can the stat_mask potentially change as well?
+            # TODO normally with opt_intr=True intrinsics can change as well -> Reassign intrinsics?!
+            _, depth, depth_prior, intrinsics, c2w, stat_mask = self.video.get_mapping_item(idx, device=self.device)
             cam = all_cameras[idx]
             w2c = torch.inverse(c2w)
             R = w2c[:3, :3].unsqueeze(0).detach()
             T = w2c[:3, 3].detach()
+            # if self.mode == "prgbd":
+            #     cam.depth_prior = depth_prior.detach()  # Update prior in case of scale_change
             cam.depth = depth.detach()
             cam.update_RT(R, T)
 
@@ -255,9 +251,9 @@ class GaussianMapper(object):
         already_mapped = [self.video.timestamp[cam.uid] for cam in self.cameras]
         s = self.video.scale_factor
         if self.video.upsampled:
-            intrinsic = self.video.intrinsics[0].to(self.device) * s
+            intrinsics = self.video.intrinsics[0].to(self.device) * s
         else:
-            intrinsic = self.video.intrinsics[0].to(self.device)
+            intrinsics = self.video.intrinsics[0].to(self.device)
 
         new_cams = []
         for w2c, timestamp in tqdm(zip(all_poses, all_timestamps)):
@@ -270,8 +266,7 @@ class GaussianMapper(object):
             color = stream._get_image(timestamp).clone().squeeze(0).contiguous().to(self.device)
             if not self.video.upsampled:
                 color = color[..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
-            cam = self.camera_from_frame(timestamp, color, None, intrinsic, c2w)
-            cam.update_RT(cam.R_gt, cam.T_gt)
+            cam = self.camera_from_frame(timestamp, color, c2w, intrinsics)
             new_cams.append(cam)
 
         return new_cams
@@ -305,7 +300,7 @@ class GaussianMapper(object):
                     f"Warning. {len(self.cameras)} Frames is too many! Optimizing over {n_chunks} chunks of frames with size {self.max_frames_refinement} ..."
                 )
 
-        for iter in tqdm(range(num_iters)):
+        for iter in tqdm(range(num_iters), desc=colored("Gaussian Refinement", "magenta"), colour="magenta"):
             # Select a random subset of frames to optimize over
             if random_frames is not None:
                 abs_rand = int(len(self.cameras) * random_frames)
@@ -328,6 +323,7 @@ class GaussianMapper(object):
                 loss = self.mapping_step(
                     iter, frames, self.kf_mng_params.refinement, densify=True, optimize_poses=optimize_poses
                 )
+            print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss / len(frames)}", "cyan"))
             self.loss_list.append(loss / len(frames))
 
             if self.use_gui:
@@ -353,12 +349,11 @@ class GaussianMapper(object):
                 depths.append(None)
                 index.append(None)
             else:
-
                 index.append(self.idx_mapping[view.uid])
-                # if self.optimize_poses:
-                transform = torch.eye(4, device=self.device)
-                transform[:3, :3], transform[:3, 3] = view.R, view.T
-                poses.append(transform)
+                if self.optimize_poses:
+                    transform = torch.eye(4, device=self.device)
+                    transform[:3, :3], transform[:3, 3] = view.R, view.T
+                    poses.append(transform)
                 depths.append(render_pkg["depth"])
 
         return {"index": index, "poses": poses, "depths": depths}
@@ -404,7 +399,7 @@ class GaussianMapper(object):
                 alpha2=self.loss_params.alpha2,
                 beta=self.loss_params.beta2,
                 rgb_boundary_threshold=self.loss_params.rgb_boundary_threshold,
-                filter_dyn=self.filter_dyn,
+                supervise_with_prior=self.supervise_with_prior,
             )
 
         # Regularize scale changes of the Gaussians
@@ -423,8 +418,7 @@ class GaussianMapper(object):
             if densify:
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-            if self.last_idx > self.n_last_frames and (iter + 1) % self.kf_mng_params.prune_every == 0:
-
+            if self.last_idx > self.n_last_frames and (iter + 1) % self.kf_mng_params.prune_densify_every == 0:
                 self.gaussians.densify_and_prune(  # General pruning based on opacity and size + densification
                     kf_mng_params.densify_grad_threshold,
                     kf_mng_params.opacity_th,
@@ -585,7 +579,8 @@ class GaussianMapper(object):
             title=f"Loss evolution.{len(self.gaussians)} gaussians",
             output_file=f"{self.output}/loss_{self.mode}.png",
         )
-        self.info(f"Final mapping loss: {self.loss_list[-1]}")
+
+        print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Final mapping loss: {self.loss_list[-1]}", "cyan"))
         self.info(f"{len(self.iteration_info)} iterations, {len(self.cameras)/len(self.iteration_info)} cams/it")
 
         ## export the cameras and gaussians to the terminate process
@@ -628,6 +623,7 @@ class GaussianMapper(object):
             self.last_idx = self.new_cameras[-1].uid + 1
             self.info(f"Added {len(self.new_cameras)} new cameras: {[cam.uid for cam in self.new_cameras]}")
 
+        # This assumes, that we get a useful update from the SLAM system!
         self.frame_updater()  # Update all changed cameras with new information from SLAM system
 
         for cam in self.new_cameras:
@@ -646,22 +642,24 @@ class GaussianMapper(object):
             return
 
         # Optimize gaussians
-        for iter in range(self.mapping_iters):
+        do_densify = len(self.iteration_info) % self.kf_mng_params.densify_every == 0
+        for iter in tqdm(
+            range(self.mapping_iters), desc=colored("Gaussian Optimization", "magenta"), colour="magenta"
+        ):
             frames = self.select_keyframes()[0] + self.new_cameras
             if len(frames) == 0:
                 self.loss_list.append(0.0)
                 continue
 
-            # TODO chen: make sense to update with higher frequency?
             loss = self.mapping_step(
-                iter, frames, self.kf_mng_params.mapping, densify=True, optimize_poses=self.optimize_poses
+                iter, frames, self.kf_mng_params.mapping, densify=do_densify, optimize_poses=self.optimize_poses
             )
             self.loss_list.append(loss / len(frames))
 
         # Keep track of how well the Rendering is doing
-        self.info(f"Loss:  {self.loss_list[-1]}")
+        print(colored("\n[Gaussian Mapper] ", "magenta"), colored(f"Loss: {self.loss_list[-1]}", "cyan"))
 
-        if len(self.iteration_info) % 1 == 0:
+        if len(self.iteration_info) % self.kf_mng_params.prune_every == 0:
             if self.kf_mng_params.prune_mode == "abs":
                 # Absolute visibility pruning for all gaussians
                 self.abs_visibility_prune(self.kf_mng_params.abs_visibility_th)
@@ -677,7 +675,10 @@ class GaussianMapper(object):
         # Update visualization
         if self.use_gui:
             if cam.depth is not None:
-                gtdepth = cam.depth.detach().cpu().numpy()
+                if not self.supervise_with_prior:
+                    gtdepth = cam.depth.detach().cpu().numpy()
+                else:
+                    gtdepth = cam.depth_prior.detach().cpu().numpy()
             else:
                 gtdepth = None
             self.q_main2vis.put_nowait(
