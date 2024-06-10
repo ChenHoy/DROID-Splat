@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2023, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -10,6 +9,7 @@
 #
 
 import math
+from termcolor import colored
 from typing import NamedTuple
 
 import numpy as np
@@ -38,7 +38,13 @@ def getWorld2View2(R, t, translate=torch.tensor([0.0, 0.0, 0.0]), scale=1.0):
     Rt[:3, 3] = t
     Rt[3, 3] = 1.0
 
-    C2W = torch.linalg.inv(Rt)
+    try:
+        C2W = torch.linalg.inv(Rt)
+    except:
+        print(colored("Errorl. getWorldView2() inverting matrix Rt", "red"))
+        print(colored("Using pseudo inverse ...", "red"))
+        C2W = torch.linalg.pinv(Rt + 1e-6 * torch.eye(4, device=R.device))
+
     cam_center = C2W[:3, 3]
     cam_center = (cam_center + translate) * scale
     C2W[:3, 3] = cam_center
