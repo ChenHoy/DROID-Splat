@@ -1,6 +1,7 @@
 import ipdb
 from typing import Optional
 from tqdm import tqdm
+from termcolor import colored
 
 import torch
 import torch.multiprocessing as mp
@@ -9,7 +10,7 @@ import numpy as np
 
 from ..slam import SLAM
 from ..gaussian_splatting.gaussian_renderer import render
-from ..test.visu import plot_side_by_side, create_animation
+from ..test.visu import plot_side_by_side, create_animation, show_img
 from ..gaussian_splatting.gui import gui_utils, slam_gui
 from ..gaussian_splatting.multiprocessing_utils import clone_obj
 
@@ -96,8 +97,6 @@ class SlamTestbed(SLAM):
         for cam in renderer.new_cameras:
             if not renderer.initialized:
                 renderer.initialized = True
-                # FIXME why do we get so few gaussians right now from the cameras?!
-                # i.e. even when adding 20 views we only initialize with 4k Gaussians
                 renderer.gaussians.extend_from_pcd_seq(cam, cam.uid, init=True)
                 renderer.info(f"Initialized with {len(renderer.gaussians)} gaussians")
             else:
@@ -117,7 +116,8 @@ class SlamTestbed(SLAM):
         # Optimize gaussians
         if iters is None:
             iters = renderer.mapping_iters
-        for iter in range(iters):
+
+        for iter in tqdm(range(iters), desc=colored("Gaussian Optimization", "magenta"), colour="magenta"):
             frames = renderer.select_keyframes()[0] + renderer.new_cameras
             if len(frames) == 0:
                 renderer.loss_list.append(0.0)
@@ -127,7 +127,7 @@ class SlamTestbed(SLAM):
             if record_optimization:
                 to_optimize = [cam.uid for cam in frames]
                 if record_view not in to_optimize:
-                    frames += renderer.cameras[record_view]
+                    frames += [renderer.cameras[record_view]]
 
             loss = renderer.mapping_step(
                 iter, frames, renderer.kf_mng_params.mapping, densify=True, optimize_poses=renderer.optimize_poses
@@ -138,14 +138,14 @@ class SlamTestbed(SLAM):
                 view_over_time.append(self.get_render_snapshot(record_view, title=base_title + str(iter + 1)))
 
         # Keep track of how well the Rendering is doing
-        renderer.info(f"Loss: {renderer.loss_list[-1]}")
+        print(colored("\n[Gaussian Mapper] ", "magenta"), colored(f"Loss: {renderer.loss_list[-1]}", "cyan"))
 
-        if len(renderer.iteration_info) % 1 == 0:
-            if renderer.kf_mng_params.prune_mode == "abs":
+        if len(self.iteration_info) % self.kf_mng_params.prune_every == 0:
+            if self.kf_mng_params.prune_mode == "abs":
                 # Absolute visibility pruning for all gaussians
-                renderer.abs_visibility_prune(renderer.kf_mng_params.abs_visibility_th)
-            elif renderer.kf_mng_params.prune_mode == "new":
-                renderer.covisibility_pruning()  # Covisibility pruning for recently added gaussians
+                self.abs_visibility_prune(self.kf_mng_params.abs_visibility_th)
+            elif self.kf_mng_params.prune_mode == "new":
+                self.covisibility_pruning()  # Covisibility pruning for recently added gaussians
 
         # Feed back after pruning
         if renderer.feedback_map:
@@ -160,6 +160,70 @@ class SlamTestbed(SLAM):
 
         if record_optimization:
             return view_over_time
+
+    def run_tracking_then_check(self, stream, backend_freq: int = 50, check_at: int = 400) -> None:
+        """Sequential processing of the stream, where we run
+        i) Tracking + Backend
+        and then stop to run ii) Rendering. This is to
+        check how well the Gaussian Optimization does depending on how it is initialized and how long we run it.
+        We can visualize how well a single run of our Renderer can fit a well-initialized scene.
+        """
+        for frame in tqdm(stream):
+
+            if self.cfg.with_dyn and stream.has_dyn_masks:
+                timestamp, image, depth, intrinsic, gt_pose, static_mask = frame
+            else:
+                timestamp, image, depth, intrinsic, gt_pose = frame
+                static_mask = None
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
+
+            if timestamp == check_at:
+                self.gaussian_mapper(None, None)
+
+                # Go through the whole scene and show the rendered video
+                # self.render_and_animate_whole_scene()
+                # Render the scene each iteration of the optimization and show animation of it
+                view_over_time = self.custom_render_update(record_optimization=True, record_view=20, iters=100)
+                # NOTE chen: matplotlib somehow complains when rendering > 100 frames interactively
+                # create_animation(view_over_time, interval=200, repeat_delay=500, blit=True)
+                create_animation(
+                    view_over_time,
+                    output_file="/home/chen/code/discriminative/Reconstruction/sfm/my-go-slam/outputs/test.mp4",
+                    interval=200,
+                    repeat_delay=500,
+                    blit=True,
+                )
+                ipdb.set_trace()
+
+            if self.frontend.optimizer.is_initialized and timestamp % backend_freq == 0:
+                self.backend()
+
+    def run_track_render(self, stream, backend_freq: int = 10, render_freq: int = 10) -> None:
+        """Sequential processing of the stream, where we run
+            i) Tracking
+            ii) Rendering
+            iii) Global Backend optimization
+        one after the other.
+        This is to check how well the system performs when we run it sequentially.
+        Is the system stable? -> Move on to parallel processing but with a well balanced load.
+        """
+        for frame in tqdm(stream):
+            if self.cfg.with_dyn and stream.has_dyn_masks:
+                timestamp, image, depth, intrinsic, gt_pose, static_mask = frame
+            else:
+                timestamp, image, depth, intrinsic, gt_pose = frame
+                static_mask = None
+
+            # Frontend insert new frames
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
+
+            # Render all new incoming frames
+            if self.frontend.optimizer.is_initialized and timestamp % render_freq == 0:
+                self.gaussian_mapper(None, None)
+
+            # Run backend occasianally
+            if self.frontend.optimizer.is_initialized and timestamp % backend_freq == 0:
+                self.backend()
 
     def run(self, stream):
         """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
@@ -176,36 +240,11 @@ class SlamTestbed(SLAM):
         for p in processes:
             p.start()
 
-        render_freq = 10
+        render_freq = 20
         backend_freq = 50
 
-        for frame in tqdm(stream):
-            timestamp, image, depth, intrinsic, gt_pose = frame
-            self.frontend(timestamp, image, depth, intrinsic, gt_pose)
-
-            if timestamp == 400:
-                self.gaussian_mapper(None, None)
-                # Go through the whole scene and show the rendered video
-                self.render_and_animate_whole_scene()
-                self.gaussian_mapper(None, None)
-                self.render_and_animate_whole_scene()
-                self.gaussian_mapper(None, None)
-
-                # Render the scene each iteration of the optimization and show animation of it
-                view_over_time = self.custom_render_update(record_optimization=True, record_view=10)
-                create_animation(view_over_time, interval=200, repeat_delay=500, blit=True)
-                ipdb.set_trace()
-
-            # Run Gaussian Rendering on top, but only every k frames
-            # if self.frontend.optimizer.is_initialized and timestamp % render_freq == 0:
-            #     self.gaussian_mapper(None, None)
-
-            # if timestamp == 400:
-            #     self.render_and_animate_gaussians()
-
-            if self.frontend.optimizer.is_initialized and timestamp % backend_freq == 0:
-                self.backend()
-
+        # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200)
+        self.run_track_render(stream, backend_freq=backend_freq, render_freq=render_freq)
         ipdb.set_trace()
 
         self.backend()

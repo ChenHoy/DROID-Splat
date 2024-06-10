@@ -9,6 +9,9 @@ import matplotlib.pyplot as plt
 from matplotlib.pyplot import get_cmap
 import matplotlib as mpl
 
+# FIXME why do we only sometimes get the error because wrong backend?!
+mpl.use("Qt5Agg")
+
 
 def array2rgb(
     im: np.ndarray,
@@ -53,7 +56,9 @@ def fig2rgb_array(fig: plt.Figure) -> np.ndarray:
     return rgb
 
 
-def create_animation(images: List[np.ndarray], titles: Optional[List[str]] = None, **kwargs) -> None:
+def create_animation(
+    images: List[np.ndarray], titles: Optional[List[str]] = None, output_file: Optional[str] = None, **kwargs
+) -> None:
     """
     Create an animation from a list of images with additional titles for each frame if wanted
     """
@@ -69,7 +74,10 @@ def create_animation(images: List[np.ndarray], titles: Optional[List[str]] = Non
         plt.axis("off")
         ims.append([im])
     ani = animation.ArtistAnimation(fig, ims, **kwargs)
-    plt.show()
+    if output_file is not None:
+        ani.save(output_file, writer="imagemagick")
+    else:
+        plt.show()
 
 
 def plot_side_by_side(
