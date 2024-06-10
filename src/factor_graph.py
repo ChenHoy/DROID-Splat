@@ -191,15 +191,12 @@ class FactorGraph:
             self.video.poses[ix] = self.video.poses[ix + 1]
             self.video.poses_gt[ix] = self.video.poses_gt[ix + 1]
             self.video.disps[ix] = self.video.disps[ix + 1]
-            self.video.disps_sens[ix] = self.video.disps_sens[ix + 1]
             self.video.disps_up[ix] = self.video.disps_up[ix + 1]
-            self.video.depths_gt[ix] = self.video.depths_gt[ix + 1]
+            self.video.disps_sens[ix] = self.video.disps_sens[ix + 1]
+            self.video.disps_sens_up[ix] = self.video.disps_sens_up[ix + 1]
             self.video.intrinsics[ix] = self.video.intrinsics[ix + 1]
             self.video.poses_clean[ix] = self.video.poses_clean[ix + 1]
             self.video.disps_clean[ix] = self.video.disps_clean[ix + 1]
-
-            # FIXME chen: remove if not needed
-            self.video.red[ix] = self.video.red[ix + 1]
 
             self.video.nets[ix] = self.video.nets[ix + 1]
             self.video.inps[ix] = self.video.inps[ix + 1]
@@ -473,7 +470,7 @@ class FactorGraph:
                     # Use pure Python BA implementation with scale correction for priors
                     # (This makes it possible to work with monocular depth prediction priors)
                     for i in range(iters):
-                        self.video.reset_prior() # Make sure the motion_only uses the correct disps_sens
+                        self.video.reset_prior()  # Make sure the motion_only uses the correct disps_sens
                         self.video.ba_prior(target, weight, damping, ii, jj, t0=t0, t1=t1, iters=1, lm=lm, ep=ep)
                         # After optimizing the prior, we need to update the disps_sens and reset the scales
                         # only then can we use global BA and intrinsics optimization with the CUDA kernel later
