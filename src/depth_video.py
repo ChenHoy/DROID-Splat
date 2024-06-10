@@ -70,18 +70,13 @@ class DepthVideo:
         self.uncertainty = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float)
         self.uncertainty_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
 
+        self.disps_sens_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
         self.disps_sens = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         # Scale and shift parameters for ambiguous monocular depth
         # Optimze the scales and shifts for Pseudo-RGBD mode
         self.optimize_scales = cfg.mode == "prgbd" and cfg.tracking.frontend.optimize_scales
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
-
-        # NOTE chen: This is redundant as is this is simply 1 / disps_sens
-        # TODO if we need to squeeze memory we can remove this
-        self.depths_gt = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
-        # FIXME chen: what is this for?
-        self.red = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
 
         ### feature attributes ###
         self.fmaps = torch.zeros(buffer, c, 128, ht // s, wd // s, dtype=torch.half, device=device).share_memory_()
@@ -103,8 +98,6 @@ class DepthVideo:
 
         # Keep track of which frames have been filtered
         self.filtered_id = torch.tensor([0], dtype=torch.int, device=device).share_memory_()
-        # FIXME chen: this used to be -1 to always get the latest, but now we go consistently forward
-        # self.filtered_id = torch.tensor([-1], dtype=torch.int, device=device).share_memory_()
 
         self.static_masks = torch.ones(buffer, ht, wd, device=device, dtype=torch.bool).share_memory_()
 
@@ -128,9 +121,9 @@ class DepthVideo:
             self.disps[index] = item[3]
 
         if item[4] is not None and self.cfg.mode != "mono":
-            self.depths_gt[index] = item[4]
-            depth = item[4][..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
-            self.disps_sens[index] = torch.where(depth > 0, 1.0 / depth, depth)
+            depth_up = item[4]
+            self.disps_sens_up[index] = torch.where(depth_up > 0, 1.0 / depth_up, depth_up)
+            self.disps_sens[index] = self.disps_sens_up[index][..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
             if self.cfg.mode != "prgbd":
                 self.disps[index] = self.disps_sens[index].clone()
 
@@ -255,41 +248,41 @@ class DepthVideo:
         self.disps_clean[dirty_index] = disps
         self.filtered_id = max(dirty_index.max().item(), self.filtered_id)
 
-    # TODO use est_depth from map to initialize the Gaussians
-    # use depth_sens to supervise the Gaussians in the loss term, but in scale-invariant way
-    def get_mapping_item(self, index, device="cuda:0"):
+    def get_mapping_item(self, index, use_gt=False, device="cuda:0"):
         """Get a part of the video to transfer to the Rendering module"""
 
         s = self.scale_factor
         with self.get_lock():
             if self.upsampled:
-                image = self.images[index].clone().contiguous().to(device)  # [h, w, 3]
+                image = self.images[index].clone().contiguous().to(device)  # [H, W, 3]
+                static_mask = self.static_masks[index].clone().to(device)  # [H, W]
                 intrinsics = self.intrinsics[0].clone().contiguous().to(device) * s  # [4]
+                disp_prior = self.disps_sens_up[index].clone().to(device)  # [H, W]
             else:
                 # Color is always stored in the original resolution, downsample here to match
                 image = self.images[index, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].clone()
-                image = image.contiguous().to(device)  # [C, H, W]
+                image = image.contiguous().to(device)  # [C, H // s, W // s]
+                static_mask = self.static_masks[index, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
+                static_mask = static_mask.contiguous().to(device)  # [H // s, W // s]
                 intrinsics = self.intrinsics[0].clone().contiguous().to(device)  # [4]
+                disp_prior = self.disps_sens[index].clone().to(device)  # [H // s, W // s]
 
-            # gt_depth = self.depths_gt[index].clone().to(device)  # [h, w]
-            est_disp = self.disps_clean[index].clone().to(device)  # [h, w]
+            est_disp = self.disps_clean[index].clone().contiguous().to(device)  # [H, W]
             est_depth = torch.where(est_disp > 0, 1.0 / est_disp, est_disp)
+            # Some modes dont have any disps_sens
+            if self.cfg.mode in ["rgbd", "prgbd"]:
+                depth_prior = torch.where(disp_prior > 0, 1.0 / disp_prior, disp_prior)  # Prior depth
+            else:
+                depth_prior = est_depth
 
-            # origin alignment
-            w2c = lietorch.SE3(self.poses[index].clone()).to(device)  # Tw(droid)_to_c
-            c2w = w2c.inv().matrix()  # [4, 4]
+            if use_gt:
+                c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
+            else:
+                # origin alignment
+                w2c = lietorch.SE3(self.poses[index].clone()).to(device)  # Tw(droid)_to_c
+                c2w = w2c.inv().matrix()  # [4, 4]
 
-            gt_c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
-            # NOTE chen: we adjust the depth scale here, because gaussian mapping defines a different projection
-            depth = est_depth  # gt_depth
-
-            static_mask = self.static_masks[index].clone().to(device)
-
-        return image, depth, intrinsics, c2w, gt_c2w, static_mask
-
-    # FIXME chen: there is some fuckery happening inside gaussian mapping, which attaches the wrong scale to the gaussians!
-    # we somehow have a different scale after giving back the exact same ones without any optimization
-    # NOTE: this could be due to different optimization objectives, the scale of both Tracking/Rendering stabilizes after some time
+        return image, est_depth, depth_prior, intrinsics, c2w, static_mask
 
     def set_mapping_item(self, index: List[torch.Tensor], poses: List[torch.Tensor], depths: List[torch.Tensor]):
         """Set a part of the video from the Rendering module"""
