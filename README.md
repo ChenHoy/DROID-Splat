@@ -244,12 +244,18 @@ We adapted some codes from some awesome repositories including [NICE-SLAM](https
 - [ ] How well does our new mapping work on unbounded / outdoor scenes?
   - [ ] Kitti for driving
   - [x] TartanAir for drone like odometries -> works well, but memory management needs to be taken care of
-  
+
+- [ ] Expand to dynamic scenes:
+    - [x] Implement new Gaussian model like [Dynamic Gaussian Splatting](https://github.com/JonathonLuiten/Dynamic3DGaussians)
+    - [x] Make the GUI show both static and dynamic gaussians
+    - [ ] Make posible to hide/show dynamic/static gaussians from the gui
+    - [ ] Add BCE loss between real mask and rendered mask
+    - [ ] Add Rigid body loss
+    - [ ] Modify model so gaussians can live for certain frames and not the whole video
+    - [ ] Get dynamic masks from tracking instead of gt
+
+
 # Potential Future Features
-- [ ] Change the Gaussian Splatting formulation to a variant like [Dynamic Gaussian Splatting](https://github.com/JonathonLuiten/Dynamic3DGaussians)
-  - This is done for every Gaussian, we can instead factorize more efficiently into static and dynamic based on  
-    i) semantics  
-    ii) uncertainty from the SLAM network
 - [ ] Do tracking from synthesis or synthesis from tracking
   - We can detect objects and track their odometry either based on appearance or by separating the motion of the rendered Gaussians
   - We optimize the objects appearance and motion parameters in a factorized per-instance way, since we have the masks/silhouettes over time
