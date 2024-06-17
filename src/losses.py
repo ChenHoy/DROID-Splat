@@ -84,16 +84,16 @@ def color_loss(
     l1_rgb = l1_loss(image_est, image_gt, mask)
     # NOTE this is configured like is done in most monocular depth estimation supervision pipelines
     if with_ssim:
-        ssim_loss = ms_ssim(
-            image_est.unsqueeze(0), image_gt.unsqueeze(0), data_range=1.0, mask=mask.bool(), size_average=False
-        )
-        # ssim_loss = ssim(
-        #     image_est.unsqueeze(0),
-        #     image_gt.unsqueeze(0),
-        #     data_range=1.0,
-        #     mask=mask.unsqueeze(0).bool(),
-        #     size_average=True,
+        # ssim_loss = ms_ssim(
+        #     image_est.unsqueeze(0), image_gt.unsqueeze(0), data_range=1.0, mask=mask.bool(), size_average=False
         # )
+        ssim_loss = ssim(
+            image_est.unsqueeze(0),
+            image_gt.unsqueeze(0),
+            data_range=1.0,
+            mask=mask.unsqueeze(0).bool(),
+            size_average=True,
+        )
         rgb_loss = 0.5 * alpha2 * (1 - ssim_loss) + (1 - alpha2) * l1_rgb
     else:
         rgb_loss = l1_rgb
@@ -111,7 +111,12 @@ def depth_loss(
     if mask is None:
         mask = torch.ones_like(depth_est, device=depth_est.device)
 
-    l1_depth = l1_loss(depth_est, depth_gt, mask)
+    # Sanity check against missing depths (e.g. everything got filtered out)
+    if depth_gt.sum() == 0:
+        l1_depth = 0.0
+    else:
+        l1_depth = l1_loss(depth_est, depth_gt, mask)
+
     if with_smoothness and original_image is not None:
         depth_reg_loss = depth_reg(depth_est, original_image, mask=mask)
         depth_loss = l1_depth + beta * depth_reg_loss
