@@ -399,7 +399,8 @@ class SLAM_GUI:
 
         if gaussian_packet.gtdepth is not None:
             depth = gaussian_packet.gtdepth
-            depth = imgviz.depth2rgb(depth, min_value=0.1, max_value=5.0, colormap="jet")
+            # TODO make this adaptable for outdoor scenes?
+            depth = imgviz.depth2rgb(depth, min_value=0.1, max_value=5.0, colormap="Spectral")
             depth = torch.from_numpy(depth)
             depth = torch.permute(depth, (2, 0, 1)).float()
             depth = (depth).byte().permute(1, 2, 0).contiguous().cpu().numpy()

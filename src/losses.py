@@ -16,6 +16,64 @@ MAX_DEPTH = 1e7
 MIN_DEPTH = 0.01
 
 
+class ScaleAndShiftInvariantLoss(torch.nn.Module):
+    """
+    Scale-invariant L1 loss from ZoeDepth (monocular depth prediction)
+
+    see: https://github.com/isl-org/ZoeDepth/blob/main/zoedepth/trainers/loss.py
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.name = "SSILoss"
+
+    # TODO does this have a sanity check for when the linear system if not solvable?
+    def compute_scale_and_shift(
+        self, prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor
+    ) -> Tuple[float, float]:
+        # system matrix: A = [[a_00, a_01], [a_10, a_11]]
+        a_00 = torch.sum(mask * prediction * prediction, (1, 2))
+        a_01 = torch.sum(mask * prediction, (1, 2))
+        a_11 = torch.sum(mask, (1, 2))
+
+        # right hand side: b = [b_0, b_1]
+        b_0 = torch.sum(mask * prediction * target, (1, 2))
+        b_1 = torch.sum(mask * target, (1, 2))
+
+        # solution: x = A^-1 . b = [[a_11, -a_01], [-a_10, a_00]] / (a_00 * a_11 - a_01 * a_10) . b
+        x_0 = torch.zeros_like(b_0)
+        x_1 = torch.zeros_like(b_1)
+
+        det = a_00 * a_11 - a_01 * a_01
+        # A needs to be a positive definite matrix.
+        valid = det > 0
+
+        x_0[valid] = (a_11[valid] * b_0[valid] - a_01[valid] * b_1[valid]) / det[valid]
+        x_1[valid] = (-a_01[valid] * b_0[valid] + a_00[valid] * b_1[valid]) / det[valid]
+
+        return x_0, x_1
+
+    def forward(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        mask: torch.Tensor,
+        interpolate: bool = True,
+    ) -> bool:
+        if prediction.shape[-1] != target.shape[-1] and interpolate:
+            prediction = F.interpolate(prediction, target.shape[-2:], mode="bilinear", align_corners=True)
+
+        prediction, target, mask = prediction.squeeze(), target.squeeze(), mask.squeeze()
+        assert (
+            prediction.shape == target.shape
+        ), f"Shape mismatch: Expected same shape but got {prediction.shape} and {target.shape}."
+
+        scale, shift = self.compute_scale_and_shift(prediction, target, mask)
+        scaled_prediction = scale.view(-1, 1, 1) * prediction + shift.view(-1, 1, 1)
+
+        return F.l1_loss(scaled_prediction[mask], target[mask])
+
+
 def mapping_rgbd_loss(
     image: torch.Tensor,
     depth: torch.Tensor,
@@ -28,6 +86,7 @@ def mapping_rgbd_loss(
     beta: float = 0.001,
     rgb_boundary_threshold: float = 0.01,
     supervise_with_prior: bool = False,
+    scale_invariant: bool = False,
 ) -> float:
     if cam.depth is None and cam.depth_prior is None:
         has_depth = False
@@ -62,7 +121,9 @@ def mapping_rgbd_loss(
 
     loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask)
     if has_depth:
-        loss_depth = depth_loss(depth, depth_gt, with_depth_smoothness, beta, image_gt, depth_pixel_mask)
+        loss_depth = depth_loss(
+            depth, depth_gt, with_depth_smoothness, beta, image_gt, depth_pixel_mask, scale_invariant=scale_invariant
+        )
         return alpha1 * loss_rgb + (1 - alpha1) * loss_depth
     else:
         return loss_rgb
@@ -107,18 +168,28 @@ def depth_loss(
     beta: float = 0.001,
     original_image: Optional[torch.Tensor] = None,
     mask: Optional[torch.Tensor] = None,
+    scale_invariant: bool = False,
 ) -> float:
     if mask is None:
         mask = torch.ones_like(depth_est, device=depth_est.device)
 
+    if scale_invariant:
+        loss_func = ScaleAndShiftInvariantLoss()
+    else:
+        loss_func = l1_loss
+
     # Sanity check against missing depths (e.g. everything got filtered out)
-    if depth_gt.sum() == 0:
+    if depth_gt.sum() == 0 or mask.sum() == 0:
         l1_depth = 0.0
     else:
-        l1_depth = l1_loss(depth_est, depth_gt, mask)
+        l1_depth = loss_func(depth_est, depth_gt, mask)
 
     if with_smoothness and original_image is not None:
-        depth_reg_loss = depth_reg(depth_est, original_image, mask=mask)
+        # Sanity check against missing depths (e.g. everything got filtered out)
+        if mask.sum() == 0:
+            depth_reg_loss = 0.0
+        else:
+            depth_reg_loss = depth_reg(depth_est, original_image, mask=mask)
         depth_loss = l1_depth + beta * depth_reg_loss
     else:
         depth_loss = l1_depth

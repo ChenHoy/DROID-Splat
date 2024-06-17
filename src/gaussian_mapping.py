@@ -144,14 +144,10 @@ class GaussianMapper(object):
         explainable by the camera motion."""
         fx, fy, cx, cy = intrinsics
 
-        height, width = image.shape[1:]
+        height, width = image.shape[-2:]
         fovx, fovy = focal2fov(fx, width), focal2fov(fy, height)
-
-        projection_matrix = (
-            getProjectionMatrix2(self.z_near, self.z_far, cx, cy, fx, fy, width, height)
-            .transpose(0, 1)
-            .to(self.device)
-        )
+        projection_matrix = getProjectionMatrix2(self.z_near, self.z_far, cx, cy, fx, fy, width, height)
+        projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
 
         w2c = torch.linalg.inv(pose_c2w)
         return Camera(
@@ -226,14 +222,17 @@ class GaussianMapper(object):
 
         for idx in to_update:
             # TODO can the stat_mask potentially change as well?
-            # TODO normally with opt_intr=True intrinsics can change as well -> Reassign intrinsics?!
-            _, depth, depth_prior, intrinsics, c2w, stat_mask = self.video.get_mapping_item(idx, device=self.device)
+            color, depth, depth_prior, intrinsics, c2w, stat_mask = self.video.get_mapping_item(
+                idx, device=self.device
+            )
             cam = all_cameras[idx]
             w2c = torch.inverse(c2w)
             R = w2c[:3, :3].unsqueeze(0).detach()
             T = w2c[:3, 3].detach()
-            # if self.mode == "prgbd":
-            #     cam.depth_prior = depth_prior.detach()  # Update prior in case of scale_change
+            # update intrinsics in case we use opt_intrinsics
+            cam.update_intrinsics(intrinsics, color.shape[-2:], self.z_near, self.z_far)
+            if self.mode == "prgbd":
+                cam.depth_prior = depth_prior.detach()  # Update prior in case of scale_change
             cam.depth = depth.detach()
             cam.update_RT(R, T)
 
@@ -388,6 +387,8 @@ class GaussianMapper(object):
             # NOTE chen: we sometimes get an illegal memory access error. I think this mainly happens when wrongly intializing the Gaussians
             # since this fails silently its harder to debug! Example: You use a too large bin_thresh during video.filter_map()
             # this leads to filtering away the points and therefore we get an error!
+            # FIXME we definitely get an illegal memmory access when facing the white wall in kitchen
+            # debug this manually to maybe skip a step if we dont have enough signal
             loss += mapping_rgbd_loss(
                 image,
                 depth,

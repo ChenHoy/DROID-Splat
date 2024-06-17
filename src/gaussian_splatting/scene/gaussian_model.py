@@ -10,6 +10,7 @@
 #
 
 import os
+import ipdb
 from termcolor import colored
 
 import numpy as np
@@ -106,19 +107,24 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
+    # TODO how to deal with empty depthmaps? should you just not initialize anything?!
     def create_pcd_from_image(self, cam, init=False, scale=2.0, depthmap=None):
         image_ab = (torch.exp(cam.exposure_a)) * cam.original_image + cam.exposure_b
         image_ab = torch.clamp(image_ab, 0.0, 1.0)
         rgb_raw = (image_ab * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
 
-        if depthmap is not None:
+        if depthmap is not None and depthmap.sum() > 0:
             rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
             depth = o3d.geometry.Image(depthmap.astype(np.float32))
         else:
-            if cam.depth is not None:
+            if cam.depth is not None and cam.depth.sum() > 0:
                 depth_raw = cam.depth.contiguous().cpu().numpy()
+
+            # If we don't have a depth signal, initialize from random
             else:
-                depth_raw = np.empty((cam.image_height, cam.image_width))
+                depth_raw = (
+                    np.ones(rgb_raw.shape[:2]) + (np.random.randn(rgb_raw.shape[0], rgb_raw.shape[1]) - 0.5) * 0.05
+                ) * scale
 
             if self.cfg.sensor_type == "monocular":
                 depth_raw = (
@@ -139,6 +145,7 @@ class GaussianModel:
         point_size = self.cfg.get("point_size", 0.05)
         if self.cfg.get("adaptive_pointsize", True):
             point_size = min(0.05, point_size * np.median(depth))
+
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
             rgb,
             depth,

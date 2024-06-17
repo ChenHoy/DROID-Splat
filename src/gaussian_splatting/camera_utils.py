@@ -4,7 +4,7 @@ from omegaconf import DictConfig
 import torch
 from torch import nn
 
-from .utils.graphics_utils import getProjectionMatrix2, getWorld2View2
+from .utils.graphics_utils import getProjectionMatrix2, getWorld2View2, focal2fov
 from .slam_utils import image_gradient, image_gradient_mask
 
 
@@ -26,9 +26,10 @@ class Camera(nn.Module):
         super(Camera, self).__init__()
         self.uid = uid
         self.device = device
-        fx, fy, cx, cy = intrinsics
-        fovx, fovy = fov
-        img_ht, img_wd = img_size
+
+        self.fx, self.fy, self.cx, self.cy = intrinsics
+        self.FoVx, self.FoVy = fov
+        self.image_height, self.image_width = img_size
 
         self.R_gt = pose_w2c[:3, :3]
         self.T_gt = pose_w2c[:3, 3]
@@ -39,10 +40,6 @@ class Camera(nn.Module):
         self.depth_prior = depth_gt
         self.grad_mask = None
 
-        self.fx, self.fy = fx, fy
-        self.cx, self.cy = cx, cy
-        self.FoVx, self.FoVy = fovx, fovy
-        self.image_height, self.image_width = img_ht, img_wd
         self.mask = mask
 
         self.cam_rot_delta = nn.Parameter(torch.zeros(3, requires_grad=True, device=device))
@@ -101,6 +98,16 @@ class Camera(nn.Module):
     def update_RT(self, R, t):
         self.R = R.to(device=self.device)
         self.T = t.to(device=self.device)
+
+    def update_intrinsics(
+        self, intrinsics: torch.Tensor, image_shape: Tuple[int, int], znear: float, zfar: float
+    ) -> None:
+        self.fx, self.fy, self.cx, self.cy = intrinsics
+        height, width = image_shape
+
+        self.FoVx, self.FoVy = focal2fov(self.fx, width), focal2fov(self.fy, height)
+        projection_matrix = getProjectionMatrix2(znear, zfar, self.cx, self.cy, self.fx, self.fy, width, height)
+        self.projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
 
     def compute_grad_mask(self, config):
         edge_threshold = config["Training"]["edge_threshold"]
