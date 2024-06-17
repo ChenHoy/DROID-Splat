@@ -4,6 +4,7 @@ defaults:
 
 sleep_delay: 1.0
 stride: 1
+opt_intr: True # Ensure, that you dont use scale_optimization in prgbd mode!
 
 data:
   cam:
@@ -13,27 +14,21 @@ data:
 tracking:
   buffer_size: 512
   motion_filter:
-    thresh: 6.0  # add as keyframe if avg flow >
+    thresh: 3.0  # add as keyframe if avg flow >
 
   frontend:
-    thresh: 15.0 
-    radius: 2
-    window: 40
-    nms: 0
-
-    steps1: 4 # 1st outer loop with feature correlation
-    steps2: 2 # 2nd outer loop with feature correlation
-    iters: 6 # Actual BA iterations
+    window: 25
+    radius: 5
 
   backend:
-    warmup: 10
-    thresh: 25.0  
-    radius: 4
-    window: 200 # Limit backend in case we would run OOM
-    nms: 0
+    thresh: 50.0
+    window: 150 # Limit backend in case we would run OOM
+    radius: 2
+    nms: 2
+
     # used for loop detection
     use_loop_closure: False # NOTE True also works well
-    loop_window: 250
-    loop_thresh: 20.0  
-    loop_radius: 4
-    loop_nms: 2
+    loop_window: 100
+    loop_thresh: 50.0  
+    loop_radius: 2
+    loop_nms: 12
