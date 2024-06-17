@@ -1,5 +1,6 @@
 from typing import Optional
 import gc
+import ipdb
 from copy import deepcopy
 
 import numpy as np
@@ -28,6 +29,10 @@ class FactorGraph:
         self.max_factors = max_factors
         self.corr_impl = corr_impl
         self.upsample = upsample
+
+        # TODO make configurable?
+        # Max. distance between frames to consider adding edges
+        self.max_distance = 200
 
         self.scale_priors = self.video.optimize_scales
 
@@ -247,7 +252,7 @@ class FactorGraph:
 
         d = self.video.distance(ii, jj, beta=beta)
         d[ii - rad < jj] = np.inf
-        d[d > 100] = np.inf  # TODO what is this 100?!
+        d[d > self.max_distance] = np.inf
         d = d.reshape(ilen, jlen)
 
         # filter out these edges which had been built before
@@ -376,6 +381,7 @@ class FactorGraph:
             k = ix.pop(0)
             di, dj = k // jlen, k % jlen
 
+            # Only consider edges with small rigid motion difference
             if d[di, dj].item() > thresh:
                 continue
 
@@ -447,6 +453,7 @@ class FactorGraph:
             self.damping[torch.unique(self.ii, sorted=True)] = damping
 
             if use_inactive:
+                # TODO why is this not configurable and is 3 a good value?
                 m = (self.ii_inac >= t0 - 3) & (self.jj_inac >= t0 - 3)
                 ii = torch.cat([self.ii_inac[m], self.ii], dim=0)
                 jj = torch.cat([self.jj_inac[m], self.jj], dim=0)
@@ -469,12 +476,7 @@ class FactorGraph:
                 if self.scale_priors:
                     # Use pure Python BA implementation with scale correction for priors
                     # (This makes it possible to work with monocular depth prediction priors)
-                    for i in range(iters):
-                        self.video.reset_prior()  # Make sure the motion_only uses the correct disps_sens
-                        self.video.ba_prior(target, weight, damping, ii, jj, t0=t0, t1=t1, iters=1, lm=lm, ep=ep)
-                        # After optimizing the prior, we need to update the disps_sens and reset the scales
-                        # only then can we use global BA and intrinsics optimization with the CUDA kernel later
-                        self.video.reset_prior()
+                    self.video.ba_prior(target, weight, damping, ii, jj, t0=t0, t1=t1, iters=iters + 2, lm=lm, ep=ep)
                 else:
                     self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False)
 
@@ -555,77 +557,6 @@ class FactorGraph:
 
             # dense bundle adjustment, fix the first keyframe, while optimize within [1, t]
             self.video.ba(target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep, motion_only)
-
-    @torch.cuda.amp.autocast(enabled=False)
-    def prior_update_lowmem(self, t0=None, t1=None, iters=2, steps=8, max_t=None, lm: float = 5e-5, ep: float = 5e-2):
-        """run update operator on factor graph - reduced memory implementation"""
-        cur_t = self.video.counter.value
-
-        # alternate corr implementation
-        t = max_t if max_t is not None else cur_t
-
-        sel_index = torch.arange(0, cur_t + 2)
-        # rig = 1(mono); 2(stereo)
-        num, rig, ch, ht, wd = self.video.fmaps[sel_index].shape
-        corr_op = AltCorrBlock(self.video.fmaps[sel_index].view(1, num * rig, ch, ht, wd))
-
-        if t0 is None:  # the first keyframe (i.e., 0) should be fixed
-            t0 = max(1, self.ii.min().item() + 1)
-        t0 = max(1, t0)
-        if t1 is None:
-            t1 = max(self.ii.max().item(), self.jj.max().item()) + 1
-
-        for step in range(steps):
-            with torch.cuda.amp.autocast(enabled=False):
-                # [batch, N, h, w, 2]
-                coords1, mask = self.video.reproject(self.ii, self.jj)
-                motion = torch.cat([coords1 - self.coords0, self.target - coords1], dim=-1)
-                motion = motion.permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
-
-            s = 13  # This is 8 in original DROID-SLAM implementation
-            for i in range(self.ii.min(), self.ii.max() + 1, s):
-                v = (self.ii >= i) & (self.ii < i + s)
-                if v.sum() < 1:
-                    continue
-
-                iis = self.ii[v]
-                jjs = self.jj[v]
-
-                # for stereo case, i.e., rig=2, each video.fmaps contain both left and right feature maps
-                # edge ii == jj means stereo pair, corr1: [B, N, (2r+1)^2 * num_levels, H, W]
-                corr1 = corr_op(coords1[:, v], rig * iis, rig * jjs + (iis == jjs).long())
-
-                with torch.cuda.amp.autocast(enabled=True):
-                    # [B, N, C, H, W], [B, N, H, W, 2],[B, N, H, W, 2], [B, s, H, W], [B, s, 8*9*9, H, W]
-                    net, delta, weight, damping, upmask = self.update_op(
-                        self.net[:, v], self.video.inps[None, iis], corr1, motion[:, v], iis, jjs
-                    )
-
-                    if self.upsample:
-                        self.video.upsample(torch.unique(iis, sorted=True), upmask)
-
-                self.net[:, v] = net
-                self.target[:, v] = coords1[:, v] + delta.float()
-                self.weight[:, v] = weight.float()
-                self.damping[torch.unique(iis, sorted=True)] = damping
-
-            # Free memory manually
-            del corr1
-            del coords1
-            del delta
-            del upmask
-            torch.cuda.empty_cache()
-            gc.collect()
-
-            damping_index = torch.arange(t0, t1).long().to(self.ii.device)
-            damping_index = torch.unique(torch.cat([damping_index, self.ii], dim=0), sorted=True)
-            damping = 0.2 * self.damping[damping_index].contiguous() + EPS
-
-            target = self.target.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
-            weight = self.weight.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
-
-            # dense bundle adjustment, fix the first keyframe, while optimize within [1, t]
-            self.video.ba_prior(target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep)
 
     @torch.cuda.amp.autocast(enabled=True)
     def update_fast(self, t0=None, t1=None, iters=2, steps=8, motion_only=False):

@@ -124,7 +124,7 @@ class DepthVideo:
             depth_up = item[4]
             self.disps_sens_up[index] = torch.where(depth_up > 0, 1.0 / depth_up, depth_up)
             self.disps_sens[index] = self.disps_sens_up[index][..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
-            if self.cfg.mode != "prgbd":
+            if self.cfg.mode != "prgbd" and not self.optimize_scales:
                 self.disps[index] = self.disps_sens[index].clone()
 
         if item[5] is not None:
@@ -477,56 +477,32 @@ class DepthVideo:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
             if self.optimize_scales:
-                # We only consider the disparity prior in the frontend
-                # NOTE somehow because frontend and backend run in parallel this would destory the map
-                # this might be because of the different objective functions
-                disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
-                # disps_sens = self.disps_sens
-                for i in range(iters):
-                    self.reset_prior()
-                    droid_backends.ba(
-                        self.poses,
-                        self.disps,
-                        self.intrinsics[intrinsic_common_id],
-                        disps_sens,
-                        target,
-                        weight,
-                        eta,
-                        ii,
-                        jj,
-                        t0,
-                        t1,
-                        1,
-                        self.model_id,
-                        lm,
-                        ep,
-                        motion_only,
-                        self.opt_intr,
-                    )
-                    self.disps.clamp_(min=0.001)  # Always make sure that Disparities are non-negative!!!
-            else:
-                droid_backends.ba(
-                    self.poses,
-                    self.disps,
-                    self.intrinsics[intrinsic_common_id],
-                    self.disps_sens,
-                    target,
-                    weight,
-                    eta,
-                    ii,
-                    jj,
-                    t0,
-                    t1,
-                    iters,
-                    self.model_id,
-                    lm,
-                    ep,
-                    motion_only,
-                    self.opt_intr,
-                )
-                self.disps.clamp_(min=0.001)  # Always make sure that Disparities are non-negative!!!
+                self.reset_prior()
+            droid_backends.ba(
+                self.poses,
+                self.disps,
+                self.intrinsics[intrinsic_common_id],
+                self.disps_sens,  # torch.zeros_like(self.disps_sens, device=self.device)
+                target,
+                weight,
+                eta,
+                ii,
+                jj,
+                t0,
+                t1,
+                iters,
+                self.model_id,
+                lm,
+                ep,
+                motion_only,
+                self.opt_intr,
+            )
+            self.disps.clamp_(min=0.001)  # Always make sure that Disparities are non-negative!!!
+            # Reassing intrinsics after optimization
+            if self.opt_intr:
+                self.intrinsics[: self.counter.value] = self.intrinsics[intrinsic_common_id]
 
-    def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 0.05):
+    def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 5e-3):
         """Bundle adjustment over structure with a scalable prior.
 
         We keep the poses fixed, since this would create an unnecessary ambiguity and can make the system unstable!
@@ -542,47 +518,52 @@ class DepthVideo:
             # Uncertainties are for [x, y] directions -> Take norm to get single scalar
             self.uncertainty[idx] = torch.norm(uncertainty, dim=1)
 
-            # MoBA
-            # Sanity check for non-negative disparities
-            self.disps.clamp_(min=0.001), self.disps_sens.clamp_(min=0.001)
-            droid_backends.ba(
-                self.poses,
-                self.disps,
-                self.intrinsics[0],
-                self.disps_sens,
-                target,
-                weight,
-                eta,
-                ii,
-                jj,
-                t0,
-                t1,
-                iters,
-                self.model_id,
-                lm,
-                ep,
-                True,
-                self.opt_intr,
-            )
-            # JDSA
-            bundle_adjustment(
-                target,
-                weight,
-                eta,
-                self.poses,
-                self.disps,
-                self.intrinsics,
-                ii,
-                jj,
-                t0,
-                t1,
-                self.disps_sens,
-                self.scales,
-                self.shifts,
-                iters=iters,
-                lm=lm,
-                ep=ep,
-                scale_prior=True,
-                structure_only=True,
-                alpha=alpha,
-            )
+            # Block coordinate descent optimization
+            for i in range(iters):
+                # Sanity check for non-negative disparities
+                self.disps.clamp_(min=0.001), self.disps_sens.clamp_(min=0.001)
+                # Motion only Bundle Adjustment (MoBA)
+                droid_backends.ba(
+                    self.poses,
+                    self.disps,
+                    self.intrinsics[0],
+                    self.disps_sens,
+                    target,
+                    weight,
+                    eta,
+                    ii,
+                    jj,
+                    t0,
+                    t1,
+                    1,
+                    self.model_id,
+                    lm,
+                    ep,
+                    True,
+                    False,
+                )
+                # Joint Depth and Scale Adjustment(JDSA)
+                bundle_adjustment(
+                    target,
+                    weight,
+                    eta,
+                    self.poses,
+                    self.disps,
+                    self.intrinsics,
+                    ii,
+                    jj,
+                    t0,
+                    t1,
+                    self.disps_sens,
+                    self.scales,
+                    self.shifts,
+                    iters=1,
+                    lm=lm,
+                    ep=ep,
+                    scale_prior=True,
+                    structure_only=True,
+                    alpha=alpha,
+                )
+                # After optimizing the prior, we need to update the disps_sens and reset the scales
+                # only then can we use global BA and intrinsics optimization with the CUDA kernel later
+                self.reset_prior()

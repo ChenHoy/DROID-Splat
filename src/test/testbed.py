@@ -13,6 +13,7 @@ from ..gaussian_splatting.gaussian_renderer import render
 from ..test.visu import plot_side_by_side, create_animation, show_img
 from ..gaussian_splatting.gui import gui_utils, slam_gui
 from ..gaussian_splatting.multiprocessing_utils import clone_obj
+from ..loop_detection import LoopDetector
 
 
 class SlamTestbed(SLAM):
@@ -22,6 +23,8 @@ class SlamTestbed(SLAM):
 
     def __init__(self, *args, **kwargs):
         super(SlamTestbed, self).__init__(*args, **kwargs)
+        # TODO make this configurable
+        self.loop_detector = LoopDetector(self.net, self.video, flow_thresh=35.0, device=self.device)
 
     def get_render_snapshot(self, view: int, title: Optional[str] = None) -> np.ndarray:
         """Get a snapshot of the current rendering state.
@@ -198,6 +201,19 @@ class SlamTestbed(SLAM):
             if self.frontend.optimizer.is_initialized and timestamp % backend_freq == 0:
                 self.backend()
 
+    # TODO for some reason, the flow gets saturated at some point, i.e. when some frames have quite the distance between
+    # each other
+    def get_frame_distance_stats(self):
+        """How are distances from loop detector distributed?"""
+        d_2nd, d_3rd = {}, {}
+        for key, val in self.loop_detector.distances.items():
+            d_sorted = torch.sort(val)[0]
+            if len(d_sorted) > 1:
+                d_2nd[key] = d_sorted[1]
+            if len(d_sorted) > 2:
+                d_3rd[key] = d_sorted[2]
+        return d_2nd, d_3rd
+
     def run_track_render(self, stream, backend_freq: int = 10, render_freq: int = 10) -> None:
         """Sequential processing of the stream, where we run
             i) Tracking
@@ -208,6 +224,8 @@ class SlamTestbed(SLAM):
         Is the system stable? -> Move on to parallel processing but with a well balanced load.
         """
         for frame in tqdm(stream):
+            frontend_old_count = self.frontend.optimizer.t1  # How many times did the frontend actually run?
+
             if self.cfg.with_dyn and stream.has_dyn_masks:
                 timestamp, image, depth, intrinsic, gt_pose, static_mask = frame
             else:
@@ -217,13 +235,22 @@ class SlamTestbed(SLAM):
             # Frontend insert new frames
             self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
 
-            # Render all new incoming frames
-            if self.frontend.optimizer.is_initialized and timestamp % render_freq == 0:
-                self.gaussian_mapper(None, None)
+            # If new keyframe got inserted
+            if frontend_old_count != self.frontend.optimizer.t1:
+                # Render all new incoming frames
+                if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % render_freq == 0:
+                    self.gaussian_mapper(None, None)
 
-            # Run backend occasianally
-            if self.frontend.optimizer.is_initialized and timestamp % backend_freq == 0:
-                self.backend()
+                # Run backend occasianally
+                if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % backend_freq == 0:
+                    loop_candidates = self.loop_detector.check()
+                    if loop_candidates is not None:
+                        loop_ii, loop_jj = loop_candidates
+                        self.backend(add_ii=loop_ii, add_jj=loop_jj)
+                    else:
+                        self.backend()
+
+        ipdb.set_trace()
 
     def run(self, stream):
         """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
@@ -240,12 +267,11 @@ class SlamTestbed(SLAM):
         for p in processes:
             p.start()
 
-        render_freq = 20
-        backend_freq = 50
+        render_freq = 10000  # Run rendering every k frontends
+        backend_freq = 5  # Run backend every 5 frontends
 
         # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200)
         self.run_track_render(stream, backend_freq=backend_freq, render_freq=render_freq)
-        ipdb.set_trace()
 
         self.backend()
         self.gaussian_mapper._update()
