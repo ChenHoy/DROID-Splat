@@ -32,3 +32,6 @@
 [submodule "ext/sam-pt"]
 	path = ext/sam-pt
 	url = https://github.com/SysCV/sam-pt
+[submodule "ext/RAFT"]
+	path = ext/RAFT
+	url = https://github.com/ChenHoy/RAFT.git
