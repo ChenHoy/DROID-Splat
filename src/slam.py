@@ -47,6 +47,9 @@ class SLAM:
         super(SLAM, self).__init__()
 
         self.cfg = cfg
+        # FIXME chen: include sanity checks to see if the system is correctly configured
+        # example: it is dangerous to optimize the intrinsics and do scale optimization with our block coordinate descent scheme
+
         self.device = cfg.get("device", torch.device("cuda:0"))
         self.mode = cfg.mode
         self.create_out_dirs(output_folder)
@@ -118,6 +121,23 @@ class SLAM:
 
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
+
+    # TODO chen: what are other corner cases which we would like a user to avoid?
+    def sanity_checks(self):
+        """Perform sanity checks to see if the system is misconfigured, this is just supposed
+        to protect the user when running the system"""
+        if self.cfg.mode == "stereo":
+            # NOTE chen: I noticed, that this is really not impemented, i.e.
+            # we would need to do some changes in motion_filter, depth_video, BA, etc. to even store the right images, fmaps, etc.
+            raise NotImplementedError(colored("Stereo mode not supported yet!", "red"))
+        if self.cfg.mode == "prgbd":
+            assert not (self.video.optimize_scales and self.video.opt_intr), colored(
+                """Optimizing both poses, disparities, scale & shift and 
+            intrinsics creates unforeseen ambiguities!
+            This is usually not stable :(
+            """,
+                "red",
+            )
 
     def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
         if output_folder is not None:
