@@ -24,7 +24,14 @@ class SlamTestbed(SLAM):
     def __init__(self, *args, **kwargs):
         super(SlamTestbed, self).__init__(*args, **kwargs)
         # TODO make this configurable
-        self.loop_detector = LoopDetector(self.net, self.video, flow_thresh=35.0, device=self.device)
+        self.loop_detector = LoopDetector(
+            self.net,
+            self.video,
+            flow_thresh=35.0,  # 35.0
+            max_orientation_difference=15.0,
+            use_raft=True,
+            device=self.device,
+        )
 
     def get_render_snapshot(self, view: int, title: Optional[str] = None) -> np.ndarray:
         """Get a snapshot of the current rendering state.
@@ -232,6 +239,12 @@ class SlamTestbed(SLAM):
                 timestamp, image, depth, intrinsic, gt_pose = frame
                 static_mask = None
 
+            # Control when to start and when to stop the SLAM system from outside
+            if timestamp < self.t_start:
+                continue
+            if self.t_stop is not None and timestamp > self.t_stop:
+                break
+
             # Frontend insert new frames
             self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
 
@@ -243,12 +256,12 @@ class SlamTestbed(SLAM):
 
                 # Run backend occasianally
                 if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % backend_freq == 0:
-                    loop_candidates = self.loop_detector.check()
-                    if loop_candidates is not None:
-                        loop_ii, loop_jj = loop_candidates
-                        self.backend(add_ii=loop_ii, add_jj=loop_jj)
-                    else:
-                        self.backend()
+                    # loop_candidates = self.loop_detector.check()
+                    # if loop_candidates is not None:
+                    #     loop_ii, loop_jj = loop_candidates
+                    #     self.backend(add_ii=loop_ii, add_jj=loop_jj)
+                    # else:
+                    self.backend()
 
         ipdb.set_trace()
 
@@ -267,7 +280,7 @@ class SlamTestbed(SLAM):
         for p in processes:
             p.start()
 
-        render_freq = 10000  # Run rendering every k frontends
+        render_freq = 5  # Run rendering every k frontends
         backend_freq = 5  # Run backend every 5 frontends
 
         # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200)

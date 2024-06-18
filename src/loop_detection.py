@@ -22,6 +22,7 @@ def show_nan(tensor: torch.Tensor) -> None:
     plt.show()
 
 
+# TODO test how similar our candidates are when using RAFT and when using our internal module
 class LoopDetector:
     """This class is used to compute the Optical Flow between new frames and previous frames in the video and detect loops based on it.
     We simply return an exra set of edges to insert into a global factor graph.
@@ -33,6 +34,9 @@ class LoopDetector:
     NOTE using a proper optical flow network like RAFT has much worse amortized costs. While a single
     batch pass with the small update network takes ~13ms, RAFT will eventually take 1-2s when we have to check over
     the whole history in later stages.
+
+    NOTE the internal update network does not produce good optical flow like RAFT, but has some correlation to it.
+    We get at least a subset of the edges we would get with RAFT.
     """
 
     def __init__(
@@ -173,7 +177,7 @@ class LoopDetector:
         ii: torch.Tensor,
         jj: torch.Tensor,
         iterations: int = 10,
-        max_batch_size: int = 24,
+        max_batch_size: int = 32,
         direction: str = "forward",
     ) -> torch.Tensor:
         """Compute motion by using a proper Optical Flow network like RAFT."""
@@ -317,7 +321,7 @@ class LoopDetector:
 
             # Get flow from i to all previous frames [0, i-1]
             if self.use_raft:
-                delta_i = self.compute_motion_raft(ii, jj, iterations=2)
+                delta_i = self.compute_motion_raft(ii, jj, iterations=1)
             else:
                 delta_i = self.compute_motion_batch(ii, jj)
 
