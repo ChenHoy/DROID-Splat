@@ -9,6 +9,7 @@
 #
 
 import math
+import ipdb
 from termcolor import colored
 from typing import NamedTuple
 
@@ -41,7 +42,8 @@ def getWorld2View2(R, t, translate=torch.tensor([0.0, 0.0, 0.0]), scale=1.0):
     try:
         C2W = torch.linalg.inv(Rt)
     except:
-        print(colored("Errorl. getWorldView2() inverting matrix Rt", "red"))
+        print(colored("Error. getWorldView2() inverting matrix Rt", "red"))
+        print(f"Looking at matrix: {Rt}")
         print(colored("Using pseudo inverse ...", "red"))
         C2W = torch.linalg.pinv(Rt + 1e-6 * torch.eye(4, device=R.device))
 

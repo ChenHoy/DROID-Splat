@@ -177,6 +177,9 @@ class GaussianMapper(object):
             color, depth, depth_prior, intrinsics, c2w, stat_mask = self.video.get_mapping_item(
                 idx, device=self.device
             )
+            # HOTFIX Sanity check
+            if (depth > 0).sum() == 0:
+                depth = None
             cam = self.camera_from_frame(
                 idx, color, c2w, intrinsics, depth_init=depth, depth=depth_prior, mask=stat_mask
             )
@@ -339,6 +342,7 @@ class GaussianMapper(object):
         # Render frames to extract depth
         index, poses, depths = [], [], []
         for view in frames:
+            # FIXME why do we get an invalid non-invertible matrix for some views?!
             render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
             # NOTE chen: this can be None when self.gaussians is 0. This could happen in some cases
             if render_pkg is None:
@@ -357,6 +361,15 @@ class GaussianMapper(object):
 
         return {"index": index, "poses": poses, "depths": depths}
 
+    def maybe_clean_pose_update(self, frames: List[Camera]) -> None:
+        """Check if pose updates are not degenerate and set to zero if they are."""
+        for view in frames:
+            if torch.isnan(view.cam_rot_delta).any() and torch.isnan(view.cam_trans_delta).any():
+                print(colored(f"NAN in pose optimizer in view {view.uid}!", "red"))
+                print(colored("Setting to zero update ...", "red"))
+                view.cam_rot_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
+                view.cam_trans_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
+
     def mapping_step(
         self, iter: int, frames: List[Camera], kf_mng_params: Dict, densify: bool = True, optimize_poses: bool = False
     ) -> float:
@@ -367,9 +380,11 @@ class GaussianMapper(object):
         if len(self.gaussians) == 0:
             return 0.0
 
+        # NOTE chen: this can happen we have zero depth and an inconvenient pose
+        self.gaussians.check_nans()
+
         if optimize_poses:
             pose_optimizer = self.get_pose_optimizer(frames)
-            # pose_optimizer = self.get_pose_optimizer(self.cameras + frames)
 
         loss = 0.0
         for view in frames:
@@ -384,11 +399,10 @@ class GaussianMapper(object):
             image, radii, depth = render_pkg["render"], render_pkg["radii"], render_pkg["depth"]
             opacity, n_touched = render_pkg["opacity"], render_pkg["n_touched"]
 
-            # NOTE chen: we sometimes get an illegal memory access error. I think this mainly happens when wrongly intializing the Gaussians
-            # since this fails silently its harder to debug! Example: You use a too large bin_thresh during video.filter_map()
-            # this leads to filtering away the points and therefore we get an error!
-            # FIXME we definitely get an illegal memmory access when facing the white wall in kitchen
-            # debug this manually to maybe skip a step if we dont have enough signal
+            if self.supervise_with_prior and self.mode == "prgbd":
+                scale_invariant = True
+            else:
+                scale_invariant = False
             loss += mapping_rgbd_loss(
                 image,
                 depth,
@@ -401,12 +415,17 @@ class GaussianMapper(object):
                 beta=self.loss_params.beta2,
                 rgb_boundary_threshold=self.loss_params.rgb_boundary_threshold,
                 supervise_with_prior=self.supervise_with_prior,
+                scale_invariant=scale_invariant,
             )
 
         # Regularize scale changes of the Gaussians
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
         loss += self.loss_params.beta * len(frames) * isotropic_loss.mean()
+
+        # NOTE chen: this can happen we have zero depth and an inconvenient pose
+        self.gaussians.check_nans()
+
         loss.backward()
 
         with torch.no_grad():
@@ -433,6 +452,7 @@ class GaussianMapper(object):
 
             if optimize_poses:
                 pose_optimizer.step()
+                self.maybe_clean_pose_update(frames)
                 pose_optimizer.zero_grad()
                 # go over all poses that were affected by the pose optimization
                 for view in frames:
@@ -667,7 +687,7 @@ class GaussianMapper(object):
             elif self.kf_mng_params.prune_mode == "new":
                 self.covisibility_pruning()  # Covisibility pruning for recently added gaussians
 
-        # Feed back after pruning
+        # Feed back after optimization and pruning
         if self.feedback_map:
             to_set = self.get_mapping_update(frames)
             self.info("Feeding back to Tracking ...")
