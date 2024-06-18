@@ -1,8 +1,8 @@
-warmup: 12 # Wait until tracking gets to this frame
+warmup: 10 # Wait until tracking gets to this frame
 delay: 2 # Delay between tracking and mapping
 use_non_keyframes: True # Use non-keyframes during map refinement
 max_frames_refinement: 80 # Maximum number of frames to optimize during refinement
-use_prior_for_supervision: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
+use_prior_for_supervision: False # Use the prior for supervision. If not, then use the current filtered map from SLAM
 
 # NOTE chen: please use MORE ITERATIONS than prune_densify_every! 
 # it is important to optimize newly introduced Gaussians due to densification!!!
@@ -24,7 +24,7 @@ keyframes:
 
   densify_every: 2 # Densify Gaussians every k updates
   prune_every: 1 # Prune Gaussians every k updates
-  prune_densify_every: 20 # How often to prune and densify gaussians during optimization
+  prune_densify_every: 10 # How often to prune and densify gaussians during optimization
   prune_mode: "abs" # "abs" or "new" How to prune: either absolute visibility or covisibility of new frames
   visibility_th: 2 # Gaussians not visible by visibility_th other frames are pruned
   prune_last: 5 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
@@ -67,16 +67,16 @@ opt_params:
 
 loss:
   # Decide which loss terms to use
-  with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
+  with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
   use_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
   use_depth_smoothness_reg: True # Similarity loss between depth and image gradients
 
   rgb_boundary_threshold: 0.01 # Pixel information in an image needs to be at least higher than this 
   ### Loss weights
-  alpha1: 0.75 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha1: 0.8 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.85 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta: 5.0 # Regularizer on scale changes of the Gaussians
-  beta2: 0.001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+  beta2: 0.01 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
 # Parameters for transfer SLAM -> Renderer
 input:

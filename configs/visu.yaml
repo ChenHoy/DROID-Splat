@@ -4,7 +4,7 @@ defaults:
   # - data: DAVIS/base.yaml
   # - data: Replica/base.yaml
   - data: Sintel/base.yaml
- # - data: TotalRecon/base.yaml
+  # - data: TotalRecon/base.yaml
 
 hydra:
   run:
@@ -22,6 +22,8 @@ t_start: 0
 t_stop: 500
 
 # Do we want to visualize the dynamic objects in the scene?
+# NOTE because often the masks are not real dynamics, 
+# they will spread into the static scene, creating artifacts
 with_dyn: True
 
 # Control speed of the animation
