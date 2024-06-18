@@ -14,6 +14,8 @@ from .gaussian_splatting.slam_utils import depth_reg, image_gradient_mask
 
 MAX_DEPTH = 1e7
 MIN_DEPTH = 0.01
+# FIX for illegal memory access in case depth goes zero everywhere
+MIN_NUM_POINTS = 100  # At least have 100 points for supervision
 
 
 class ScaleAndShiftInvariantLoss(torch.nn.Module):
@@ -32,6 +34,15 @@ class ScaleAndShiftInvariantLoss(torch.nn.Module):
         self, prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor
     ) -> Tuple[float, float]:
         # system matrix: A = [[a_00, a_01], [a_10, a_11]]
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0)
+        if prediction.ndim == 2:
+            prediction = prediction.unsqueeze(0)
+        if target.ndim == 2:
+            target = target.unsqueeze(0)
+        # Increase precision because we sum over potentially large arrays
+        target, prediction, mask = target.double(), prediction.double(), mask.double()
+
         a_00 = torch.sum(mask * prediction * prediction, (1, 2))
         a_01 = torch.sum(mask * prediction, (1, 2))
         a_11 = torch.sum(mask, (1, 2))
@@ -51,7 +62,7 @@ class ScaleAndShiftInvariantLoss(torch.nn.Module):
         x_0[valid] = (a_11[valid] * b_0[valid] - a_01[valid] * b_1[valid]) / det[valid]
         x_1[valid] = (-a_01[valid] * b_0[valid] + a_00[valid] * b_1[valid]) / det[valid]
 
-        return x_0, x_1
+        return x_0.squeeze().float(), x_1.squeeze().float()
 
     def forward(
         self,
@@ -69,8 +80,7 @@ class ScaleAndShiftInvariantLoss(torch.nn.Module):
         ), f"Shape mismatch: Expected same shape but got {prediction.shape} and {target.shape}."
 
         scale, shift = self.compute_scale_and_shift(prediction, target, mask)
-        scaled_prediction = scale.view(-1, 1, 1) * prediction + shift.view(-1, 1, 1)
-
+        scaled_prediction = scale * prediction + shift
         return F.l1_loss(scaled_prediction[mask], target[mask])
 
 
@@ -106,12 +116,6 @@ def mapping_rgbd_loss(
     if cam.mask is not None:
         rgb_pixel_mask = rgb_pixel_mask & cam.mask
 
-    if has_depth:
-        # Only use valid depths for supervision
-        depth_pixel_mask = ((depth_gt > MIN_DEPTH) * (depth_gt < MAX_DEPTH)).view(*depth.shape)
-        if cam.mask is not None:
-            depth_pixel_mask = depth_pixel_mask & cam.mask
-
     if with_edge_weight:
         edge_mask_x, edge_mask_y = image_gradient_mask(image_gt)  # Use gt reference image for edge weight
         edge_mask = edge_mask_x | edge_mask_y  # Combine with logical OR
@@ -120,7 +124,12 @@ def mapping_rgbd_loss(
         rgb_mask = rgb_pixel_mask.float()
 
     loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask)
+
     if has_depth:
+        # Only use valid depths for supervision
+        depth_pixel_mask = ((depth_gt > MIN_DEPTH) * (depth_gt < MAX_DEPTH)).view(*depth.shape)
+        if cam.mask is not None:
+            depth_pixel_mask = depth_pixel_mask & cam.mask
         loss_depth = depth_loss(
             depth, depth_gt, with_depth_smoothness, beta, image_gt, depth_pixel_mask, scale_invariant=scale_invariant
         )
@@ -179,18 +188,14 @@ def depth_loss(
         loss_func = l1_loss
 
     # Sanity check against missing depths (e.g. everything got filtered out)
-    if depth_gt.sum() == 0 or mask.sum() == 0:
+    if (depth_gt > 0).sum() < MIN_NUM_POINTS or mask.sum() < MIN_NUM_POINTS:
         l1_depth = 0.0
     else:
         l1_depth = loss_func(depth_est, depth_gt, mask)
 
-    if with_smoothness and original_image is not None:
-        # Sanity check against missing depths (e.g. everything got filtered out)
-        if mask.sum() == 0:
-            depth_reg_loss = 0.0
-        else:
-            depth_reg_loss = depth_reg(depth_est, original_image, mask=mask)
-        depth_loss = l1_depth + beta * depth_reg_loss
+    # Sanity check to avoid division by zero
+    if with_smoothness and original_image is not None and mask.sum() > 0:
+        depth_loss = l1_depth + beta * depth_reg(depth_est, original_image, mask=mask)
     else:
         depth_loss = l1_depth
 
@@ -382,11 +387,6 @@ def ssim(
     """
     if not X.shape == Y.shape:
         raise ValueError(f"Input images should have the same dimensions, but got {X.shape} and {Y.shape}.")
-
-    if mask is not None and mask.shape != X.shape:
-        raise ValueError(
-            f"Input mask should have the same dimensions as input images, but got {mask.shape} and {X.shape}."
-        )
 
     for d in range(len(X.shape) - 1, 1, -1):
         X = X.squeeze(dim=d)
