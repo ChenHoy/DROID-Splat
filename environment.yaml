@@ -33,6 +33,8 @@ dependencies:
   - seaborn
   - open3d # This package is actually trouble when installing under conda instead of pip
   - pip:
+    - hydra
+    - omegaconf
     - ipdb
     - PyOpenGL-accelerate  # Installing this manually works, using conda does not
     - dask
