@@ -33,10 +33,10 @@ dependencies:
   - seaborn
   - open3d # This package is actually trouble when installing under conda instead of pip
   - pip:
-    - PyOpenGL-acclerate Installing this manually works, using conda does not
+    - ipdb
+    - PyOpenGL-accelerate  # Installing this manually works, using conda does not
     - dask
     - gdown
-    - pytorch-msssim
     - imageio
     - networkx
     - pandas
