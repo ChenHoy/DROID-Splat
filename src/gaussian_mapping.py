@@ -13,15 +13,15 @@ import torch.multiprocessing as mp
 import numpy as np
 import cv2
 
-from .gaussian_splatting.gui import gui_utils, slam_gui
+from .gaussian_splatting.gui import gui_utils
 from .gaussian_splatting.gaussian_renderer import render
 from .gaussian_splatting.scene.gaussian_model import GaussianModel
-from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
-from .gaussian_splatting.multiprocessing_utils import clone_obj
 from .gaussian_splatting.camera_utils import Camera
-from .gaussian_splatting.pose_utils import update_pose
 from .losses import mapping_rgbd_loss, plot_losses
 
+from .gaussian_splatting.pose_utils import update_pose
+from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
+from .utils.multiprocessing_utils import clone_obj
 from .trajectory_filler import PoseTrajectoryFiller
 
 
@@ -34,6 +34,9 @@ NOTE this could a be standalone SLAM system itself, but we use it on top of an o
 """
 
 
+# FIXME after large map changes (we can flag potential loop closures and map changes), the Gaussians normally would need to be recenterd, i.e.
+# its not enough to simply change the depth_maps in self.update_frames(), because this still requires further optimization to fit the new depth maps
+# We use a heuristic for this: Simply compute a point cloud for
 class GaussianMapper(object):
     """
     SLAM from Rendering with 3D Gaussian Splatting.
@@ -459,15 +462,6 @@ class GaussianMapper(object):
                     update_pose(view)
 
         return loss.item()
-
-    # TODO
-    def construct_dyn_gaussians(self, mask, depth, image, cam: Camera):
-        """Seed new Gaussians around an existing dyn. object mask and use the current scene depth and image as initialization
-
-        i) preoptimize Gaussians for first frame
-        ii) then adjust and finetune over whole list of frames
-        """
-        raise NotImplementedError()
 
     def covisibility_pruning(self):
         """Covisibility based pruning"""
