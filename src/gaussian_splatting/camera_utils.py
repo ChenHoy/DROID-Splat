@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from .utils.graphics_utils import getProjectionMatrix2, getWorld2View2, focal2fov
-from .slam_utils import image_gradient, image_gradient_mask
+from ..utils import image_gradient, image_gradient_mask
 
 
 class Camera(nn.Module):
