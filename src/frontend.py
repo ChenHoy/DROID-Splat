@@ -1,6 +1,7 @@
 import gc
 from copy import deepcopy
 from termcolor import colored
+import ipdb
 from time import gmtime, strftime, time
 
 import torch
@@ -28,11 +29,11 @@ class FrontendWrapper(torch.nn.Module):
         self.optimizer = Frontend(self.net, self.video, self.cfg)
 
     @torch.no_grad()
-    def forward(self, timestamp, image, depth, intrinsic, gt_pose=None, dyn_mask=None):
+    def forward(self, timestamp, image, depth, intrinsic, gt_pose=None, static_mask=None):
         """Add new keyframes according to apparent motion and run a local bundle adjustment optimization"""
 
         ### check there is enough motion
-        self.motion_filter.track(timestamp, image, depth, intrinsic, gt_pose=gt_pose, dyn_mask=dyn_mask)
+        self.motion_filter.track(timestamp, image, depth, intrinsic, gt_pose=gt_pose, static_mask=static_mask)
         # local bundle adjustment
         self.optimizer()
 
@@ -50,7 +51,7 @@ class Frontend:
         # Frontend variables
         self.is_initialized = False
         self.count = 0
-        self.max_age = 25
+        self.max_age = cfg.tracking.frontend.get("max_age", 25)
         self.warmup = cfg.tracking.get("warmup", 8)
         self.upsample = cfg.tracking.get("upsample", True)
 
@@ -139,42 +140,6 @@ class Frontend:
 
         return t_end - t_start_loop, n_edges
 
-    @torch.no_grad()
-    def global_scale_optimization(
-        self, t_start, t_end, steps=4, lm=1e-4, ep=1e-1, radius: int = 200, nms: int = 2, thresh: float = 10.0
-    ):
-        """Optimize the scene globally with the pure Python code for scale optimization. This optimizes poses and structure
-        in a block-coordinate descent way."""
-        assert self.graph.scale_priors == True, "You need to set scale_priors to True when using this function!"
-        assert self.video.optimize_scales == True, "You need to set scale_priors to True when using this function!"
-
-        if t_end is None:
-            t_end = self.video.counter.value
-        n = t_end - t_start
-        max_factors = 16 * t_end  # From DROID-SLAM
-
-        graph = FactorGraph(
-            self.video,
-            self.update_op,
-            device=self.device,
-            corr_impl="volume",
-            max_factors=max_factors,
-            upsample=self.upsample,
-        )
-        n_edges = graph.add_proximity_factors(rad=radius, nms=nms, beta=self.beta, thresh=thresh, remove=False)
-        print(colored(f"[Backend] Performing full scale prior optimization over map with: {n_edges} edges!", "blue"))
-        graph.prior_update_lowmem(t0=t_start, t1=t_end, steps=steps, lm=lm, ep=ep)
-        print(colored("[Backend] Done!", "blue"))
-
-        # Empty cache immediately and release memory
-        graph.clear_edges()
-        del graph
-        torch.cuda.empty_cache()
-        gc.collect()
-
-        with self.video.get_lock():
-            self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
-
     def __update(self):
         """add edges, perform update"""
 
@@ -197,9 +162,9 @@ class Frontend:
             remove=True,
         )
 
-        # NOTE chen: Dont do this with a prior, because it will be harder to correct the scales
         # Condition video.disps based on external sensor data if given before optimizing
-        if not self.video.optimize_scales:
+        # Dont do this with monocular depth, as every new prior has a yet to be determined scale
+        if not self.video.cfg.mode == "prgbd" and not self.video.optimize_scales:
             self.video.disps[self.t1 - 1] = torch.where(
                 self.video.disps_sens[self.t1 - 1] > 0,
                 self.video.disps_sens[self.t1 - 1],
@@ -220,12 +185,12 @@ class Frontend:
             with self.video.get_lock():
                 self.video.counter.value -= 1
                 self.t1 -= 1
-        # Optimize again (This time we do this loop aware)
+        # Optimize again
         else:
             cur_t = self.video.counter.value
             if self.enable_loop and cur_t > self.frontend_window:
                 ### 2nd update
-                n_kf, n_edges = self.loop_closure_update(t_start=0, t_end=cur_t, steps=self.iters2, motion_only=False)
+                n_kf, n_edges = self.loop_closure_update(t_start=0, t_end=cur_t, steps=self.steps2, motion_only=False)
                 self.loop_info(0, cur_t, n_kf, n_edges)
                 self.last_loop_t = cur_t
             else:
@@ -245,7 +210,7 @@ class Frontend:
                 torch.cuda.empty_cache()
                 gc.collect()
 
-        # set pose for next iteration
+        # set pose & disp for next iteration
         self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
         self.video.disps[self.t1] = self.video.disps[self.t1 - 1].mean()
 

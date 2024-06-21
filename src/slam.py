@@ -1,25 +1,18 @@
 import os
 import ipdb
-from omegaconf import DictConfig
+import gc
+from time import sleep
+from typing import List, Optional
+from tqdm import tqdm
 from copy import deepcopy
 from termcolor import colored
 from collections import OrderedDict
-from tqdm import tqdm
-from time import sleep
-import numpy as np
-import pandas as pd
-from typing import List, Optional
-import os.path as osp
-from typing import List, Optional
-from tqdm import tqdm
-import gc
-from time import sleep
-from collections import OrderedDict
 from omegaconf import DictConfig
-from termcolor import colored
-import ipdb
+
 import cv2
 import numpy as np
+import pandas as pd
+
 import torch
 import torch.multiprocessing as mp
 from lietorch import SE3
@@ -31,11 +24,9 @@ from .depth_video import DepthVideo
 from .visualization import droid_visualization, depth2rgb, uncertainty2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .gaussian_mapping import GaussianMapper
+
 from .gaussian_splatting.eval_utils import eval_ate, eval_rendering, save_gaussians
 from .gaussian_splatting.gui import gui_utils, slam_gui
-
-
-from multiprocessing import Manager
 from .gaussian_splatting.multiprocessing_utils import clone_obj
 
 
@@ -56,6 +47,9 @@ class SLAM:
         super(SLAM, self).__init__()
 
         self.cfg = cfg
+        # FIXME chen: include sanity checks to see if the system is correctly configured
+        # example: it is dangerous to optimize the intrinsics and do scale optimization with our block coordinate descent scheme
+
         self.device = cfg.get("device", torch.device("cuda:0"))
         self.mode = cfg.mode
         self.create_out_dirs(output_folder)
@@ -111,7 +105,7 @@ class SLAM:
         if cfg.data.dataset in ["kitti", "tartanair", "euroc"]:
             self.max_depth_visu = 50.0  # Cut of value to show a consistent depth stream
         else:
-            self.max_depth_visu = 5.0
+            self.max_depth_visu = 10.0
 
         if cfg.run_mapping_gui and cfg.run_mapping and not cfg.evaluate:
             self.q_main2vis = mp.Queue()
@@ -127,6 +121,23 @@ class SLAM:
 
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
+
+    # TODO chen: what are other corner cases which we would like a user to avoid?
+    def sanity_checks(self):
+        """Perform sanity checks to see if the system is misconfigured, this is just supposed
+        to protect the user when running the system"""
+        if self.cfg.mode == "stereo":
+            # NOTE chen: I noticed, that this is really not impemented, i.e.
+            # we would need to do some changes in motion_filter, depth_video, BA, etc. to even store the right images, fmaps, etc.
+            raise NotImplementedError(colored("Stereo mode not supported yet!", "red"))
+        if self.cfg.mode == "prgbd":
+            assert not (self.video.optimize_scales and self.video.opt_intr), colored(
+                """Optimizing both poses, disparities, scale & shift and 
+            intrinsics creates unforeseen ambiguities!
+            This is usually not stable :(
+            """,
+                "red",
+            )
 
     def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
         if output_folder is not None:
@@ -194,10 +205,11 @@ class SLAM:
 
         for frame in tqdm(stream):
 
-            # TODO chen: does this mean that the filter_dyn flag is passed to the dataloader?
-            # TODO chen: change this, so we automatically load this with dyn_mask in all dataloaders?
-            timestamp, image, depth, intrinsic, gt_pose, dyn_mask = frame
-
+            if self.cfg.with_dyn and stream.has_dyn_masks:
+                timestamp, image, depth, intrinsic, gt_pose, static_mask = frame
+            else:
+                timestamp, image, depth, intrinsic, gt_pose = frame
+                static_mask = None
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
 
@@ -212,7 +224,7 @@ class SLAM:
                 input_queue.put(image * dyn_mask)
                 input_queue.put(depth)
 
-            self.frontend(timestamp, image, depth, intrinsic, gt_pose, dyn_mask=dyn_mask)
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
 
         del self.frontend
         torch.cuda.empty_cache()
@@ -244,7 +256,7 @@ class SLAM:
         # only use backend again once we have some slack -> 50% free RAM (12GB in use)
         if self.backend is None and used_mem <= min_ram:
             self.info("Reinstantiating Backend ...")
-            self.backend = BackendWrapper(self.cfg, self.args, self)
+            self.backend = BackendWrapper(self.cfg, self)
             self.backend.to(self.device)
 
     def global_ba(self, rank, run=False):
@@ -263,14 +275,20 @@ class SLAM:
                 sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
         # Run one last time after tracking finished
-        if run and self.backend is not None:
+        if run and self.backend is not None and self.backend.do_refinement:
             with self.video.get_lock():
                 t_end = self.video.counter.value
 
             msg = "Optimize full map: [{}, {}]!".format(0, t_end)
             self.backend.info(msg)
-            _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
-            _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
+
+            # Use loop closure BA for refinement if enabled
+            if self.backend.enable_loop:
+                _, _ = self.backend.optimizer.loop_ba(t_start=0, t_end=t_end, steps=6)
+                _, _ = self.backend.optimizer.loop_ba(t_start=0, t_end=t_end, steps=6)
+            else:
+                _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
+                _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
 
         del self.backend
         torch.cuda.empty_cache()
@@ -286,7 +304,7 @@ class SLAM:
 
         while (self.tracking_finished + self.backend_finished) < 2 and run:
             self.gaussian_mapper(mapping_queue, received_mapping)
-            sleep(self.sleep_time / 2)
+            # sleep(self.sleep_time / 2)
 
         # Run for one last time after everything finished
         finished = False
@@ -387,8 +405,8 @@ class SLAM:
         camera_trajectory = self.traj_filler(stream)  # w2cs
         # This does nothing: w2w is just unit pose
         # w2w = SE3(self.video.poses_clean[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
-        camera_trajectory = camera_trajectory.inv() # c2ws
-        traj_est = camera_trajectory.data.cpu().numpy() # 7x1 Lie algebra
+        camera_trajectory = camera_trajectory.inv()  # c2ws
+        traj_est = camera_trajectory.data.cpu().numpy()  # 7x1 Lie algebra
         estimate_c2w_list = camera_trajectory.matrix().data.cpu()  # 4x4 homogenous matrix
 
         # Set keyframes_only to True to compute the APE and plots on keyframes only.
@@ -519,29 +537,3 @@ class SLAM:
             pass
 
         self.terminate(processes, stream, gaussian_mapper_last_state)
-
-    def test(self, stream):
-        """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
-
-        # processes = [mp.Process(target=self.visualizing, args=(1, True))]
-        processes = [
-            mp.Process(
-                target=self.mapping_gui,
-                args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
-                name="Mapping GUI",
-            )
-        ]
-        self.num_running_thread[0] += len(processes)
-        for p in processes:
-            p.start()
-
-        for frame in tqdm(stream):
-            timestamp, image, depth, intrinsic, gt_pose = frame
-            self.frontend(timestamp, image, depth, intrinsic, gt_pose)
-            if self.frontend.optimizer.is_initialized:
-                self.gaussian_mapper.test()
-
-        self.info("Interpolating trajectory to get more frames for Refinement ...")
-        new_cams = self.gaussian_mapper.get_nonkeyframe_cameras(stream, self.traj_filler)
-        self.info("Done!")
-        ipdb.set_trace()

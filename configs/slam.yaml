@@ -16,13 +16,15 @@ hydra:
 device: "cuda:0"
 sync_method: strict
 mode: "mono"  # 'mono', 'prgbd', 'rgbd'
+# mono_depth: "metric3d-vit_giant2" # 'zoed-nk', 'metric3d-vit_giant2', 'depthany-vitl-outdoor_left', 'depthany-vitl-indoor_left'
 stride: 2
 output_folder: ./outputs/
-filter_dyn: False
+with_dyn: False
 opt_intr: False # Optimizes additional intrinsic parameters
 # NOTE when using the Gaussian mapper we can increase this to ~5.0
 # -> you want a backend maybe every 5 frontend updates
 sleep_delay: 5.0 # Time delay to synchronize frontend and backend (default: 2.0)
+
 
 run_frontend: True # This should always be True!
 run_backend: True

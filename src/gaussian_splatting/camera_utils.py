@@ -1,52 +1,46 @@
+from typing import Optional, Tuple
+from omegaconf import DictConfig
+
 import torch
 from torch import nn
 
-from .utils.graphics_utils import getProjectionMatrix2, getWorld2View2
+from .utils.graphics_utils import getProjectionMatrix2, getWorld2View2, focal2fov
 from .slam_utils import image_gradient, image_gradient_mask
 
 
 class Camera(nn.Module):
     def __init__(
         self,
-        uid,
-        color,
-        depth,
-        gt_T,
-        projection_matrix,
-        fx,
-        fy,
-        cx,
-        cy,
-        fovx,
-        fovy,
-        image_height,
-        image_width,
-        device="cuda:0",
-        dyn_mask=None,
+        uid: int,
+        color: torch.Tensor,
+        depth_est: torch.Tensor,
+        depth_gt: torch.Tensor,
+        pose_w2c: torch.Tensor,
+        projection_matrix: torch.Tensor,
+        intrinsics: Tuple[float, float, float, float],
+        fov: Tuple[float, float],
+        img_size: Tuple[int, int],
+        device: str = "cuda:0",
+        mask: Optional[torch.Tensor] = None,
     ):
         super(Camera, self).__init__()
         self.uid = uid
         self.device = device
 
-        T = torch.eye(4, device=device)
-        self.R = T[:3, :3]
-        self.T = T[:3, 3]
-        self.R_gt = gt_T[:3, :3]
-        self.T_gt = gt_T[:3, 3]
+        self.fx, self.fy, self.cx, self.cy = intrinsics
+        self.FoVx, self.FoVy = fov
+        self.image_height, self.image_width = img_size
+
+        self.R_gt = pose_w2c[:3, :3]
+        self.T_gt = pose_w2c[:3, 3]
+        self.update_RT(self.R_gt, self.T_gt)
 
         self.original_image = color
-        self.depth = depth
+        self.depth = depth_est
+        self.depth_prior = depth_gt
         self.grad_mask = None
 
-        self.fx = fx
-        self.fy = fy
-        self.cx = cx
-        self.cy = cy
-        self.FoVx = fovx
-        self.FoVy = fovy
-        self.image_height = image_height
-        self.image_width = image_width
-        self.dyn_mask = dyn_mask
+        self.mask = mask
 
         self.cam_rot_delta = nn.Parameter(torch.zeros(3, requires_grad=True, device=device))
         self.cam_trans_delta = nn.Parameter(torch.zeros(3, requires_grad=True, device=device))
@@ -63,25 +57,31 @@ class Camera(nn.Module):
             idx,
             gt_color,
             gt_depth,
+            gt_depth,
             gt_pose,
             projection_matrix,
-            dataset.fx,
-            dataset.fy,
-            dataset.cx,
-            dataset.cy,
-            dataset.fovx,
-            dataset.fovy,
-            dataset.height,
-            dataset.width,
+            (dataset.fx, dataset.fy, dataset.cx, dataset.cy),
+            (dataset.fovx, dataset.fovy),
+            (dataset.height, dataset.width),
             device=dataset.device,
         )
 
     @staticmethod
     def init_from_gui(uid, T, FoVx, FoVy, fx, fy, cx, cy, H, W):
         projection_matrix = getProjectionMatrix2(
-            znear=0.01, zfar=100.0, fx=fx, fy=fy, cx=cx, cy=cy, W=W, H=H
+            znear=0.001, zfar=10000.0, fx=fx, fy=fy, cx=cx, cy=cy, W=W, H=H
         ).transpose(0, 1)
-        return Camera(uid, None, None, T, projection_matrix, fx, fy, cx, cy, FoVx, FoVy, H, W)
+        return Camera(
+            uid,
+            None,
+            None,
+            None,
+            T,
+            projection_matrix,
+            (fx, fy, cx, cy),
+            (FoVx, FoVy),
+            (H, W),
+        )
 
     @property
     def world_view_transform(self):
@@ -98,6 +98,16 @@ class Camera(nn.Module):
     def update_RT(self, R, t):
         self.R = R.to(device=self.device)
         self.T = t.to(device=self.device)
+
+    def update_intrinsics(
+        self, intrinsics: torch.Tensor, image_shape: Tuple[int, int], znear: float, zfar: float
+    ) -> None:
+        self.fx, self.fy, self.cx, self.cy = intrinsics
+        height, width = image_shape
+
+        self.FoVx, self.FoVy = focal2fov(self.fx, width), focal2fov(self.fy, height)
+        projection_matrix = getProjectionMatrix2(znear, zfar, self.cx, self.cy, self.fx, self.fy, width, height)
+        self.projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
 
     def compute_grad_mask(self, config):
         edge_threshold = config["Training"]["edge_threshold"]
@@ -131,6 +141,7 @@ class Camera(nn.Module):
     def clean(self):
         self.original_image = None
         self.depth = None
+        self.depth_prior = None
         self.grad_mask = None
 
         self.cam_rot_delta = None

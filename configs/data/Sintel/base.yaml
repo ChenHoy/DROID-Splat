@@ -1,0 +1,20 @@
+dataset: "sintel"
+input_folder: "/media/data/Sintel/training/" # base path
+scene: "alley_2" # Switch over scenes
+png_depth_scale: 1.0
+
+### original camera parameters
+cam:
+  H: 436
+  W: 1024
+  H_out: 216
+  W_out: 512
+  H_edge: 0 
+  W_edge: 0
+
+  fx: 576.0
+  fy: 576.0
+  cx: 511.5
+  cy: 217.5
+  calibration_txt: ''
+  camera_model: "pinhole"

@@ -10,6 +10,7 @@
 #
 
 import os
+import ipdb
 from termcolor import colored
 
 import numpy as np
@@ -55,6 +56,9 @@ class GaussianModel:
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
 
+        # Cap the scale so Gaussian dont grow to big and create degenerate cases during rendering
+        self.max_scale = 10000.0
+
         self.covariance_activation = self.build_covariance_from_scaling_rotation
 
         self.opacity_activation = torch.sigmoid
@@ -88,6 +92,16 @@ class GaussianModel:
     def get_xyz(self):
         return self._xyz
 
+    def __len__(self):
+        """Returns the number of 3D Gaussians we have"""
+        return len(self._xyz)
+
+    def get_avg_scale(self, factor: float = 1.0) -> float:
+        points = self.get_xyz
+        depth = points[:, 2]
+        avg_scale = factor * torch.mean(depth, dim=0)
+        return avg_scale.item()
+
     @property
     def get_features(self):
         features_dc = self._features_dc
@@ -110,14 +124,18 @@ class GaussianModel:
         image_ab = torch.clamp(image_ab, 0.0, 1.0)
         rgb_raw = (image_ab * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
 
-        if depthmap is not None:
+        if depthmap is not None and depthmap.sum() > 0:
             rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
             depth = o3d.geometry.Image(depthmap.astype(np.float32))
         else:
-            if cam.depth is not None:
+            if cam.depth is not None and cam.depth.sum() > 0:
                 depth_raw = cam.depth.contiguous().cpu().numpy()
+
+            # If we don't have a depth signal, initialize from random
             else:
-                depth_raw = np.empty((cam.image_height, cam.image_width))
+                depth_raw = (
+                    np.ones(rgb_raw.shape[:2]) + (np.random.randn(rgb_raw.shape[0], rgb_raw.shape[1]) - 0.5) * 0.05
+                ) * self.get_avg_scale(factor=0.5)
 
             if self.cfg.sensor_type == "monocular":
                 depth_raw = (
@@ -138,6 +156,7 @@ class GaussianModel:
         point_size = self.cfg.get("point_size", 0.05)
         if self.cfg.get("adaptive_pointsize", True):
             point_size = min(0.05, point_size * np.median(depth))
+
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
             rgb,
             depth,
@@ -332,6 +351,35 @@ class GaussianModel:
             opacities_new[filter] = self.get_opacity[filter]
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
+
+    def clean_scales(self) -> None:
+        """Sometimes the scales get out of hand due to degenerate supervision"""
+        invalid = torch.isnan(self._scaling) & torch.isinf(self._scaling)
+        if not invalid.any():
+            self._scaling.clamp_(max=self.max_scale)
+            return
+
+        # Reset the scales of out of bound Gaussians to some dummy
+        dummy_scaling = self._scaling[~invalid].mean()
+        scaling_new = self._scaling.clone()
+        scaling_new[invalid] = dummy_scaling
+        scaling_new.clamp_(max=self.max_scale)
+
+        optimizable_tensors = self.replace_tensor_to_optimizer(scaling_new, "scaling")
+        self._scaling = optimizable_tensors["scaling"]
+
+    def check_nans(self):
+        invalid = torch.isnan(self._xyz) | torch.isinf(self._xyz)
+        invalid = invalid | torch.isnan(self._scaling) | torch.isinf(self._scaling)
+        if invalid.ndim > 1:
+            for i in range(invalid.ndim - 1):
+                invalid = invalid.any(dim=-1)
+
+        if invalid.sum() > 0:
+            idx = torch.where(invalid)[0]
+            print(colored(f"[Gaussian Mapper] Found degenerate Gaussians: {idx}", "red"))
+            print(colored("[Gaussian Mapper] Cleaning up by removal ...", "red"))
+            self.prune_points(invalid)
 
     def load_ply(self, path):
         plydata = PlyData.read(path)
@@ -610,8 +658,8 @@ class GaussianModel:
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
-            big_points_vs = self.max_radii2D > max_screen_size # Size
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent 
+            big_points_vs = self.max_radii2D > max_screen_size  # Size
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
 
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
 

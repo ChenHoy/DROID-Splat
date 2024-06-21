@@ -6,10 +6,10 @@ png_depth_scale: 1.0
 cam:
   H: 370
   W: 1226
-  fx: 320.0
-  fy: 320.0
-  cx: 320.0
-  cy: 240.0
+  fx: 718.856 
+  fy: 718.856 
+  cx: 607.1928
+  cy: 185.2157
   H_edge: 0
   W_edge: 0
   H_out: 370

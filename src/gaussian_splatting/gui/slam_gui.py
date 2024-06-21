@@ -176,6 +176,7 @@ class SLAM_GUI:
 
         self.panel.add_child(chbox_tile_geometry)
 
+        # Scale the Gaussians
         slider_tile = gui.Horiz(0.5 * em, gui.Margins(margin))
         slider_label = gui.Label("Gaussian Scale (0-1)")
         self.scaling_slider = gui.Slider(gui.Slider.DOUBLE)
@@ -184,6 +185,16 @@ class SLAM_GUI:
         slider_tile.add_child(slider_label)
         slider_tile.add_child(self.scaling_slider)
         self.panel.add_child(slider_tile)
+
+        # Scale the Cameras
+        slider_tile2 = gui.Horiz(0.5 * em, gui.Margins(margin))
+        slider_label2 = gui.Label("Camera Scale")
+        self.camera_slider = gui.Slider(gui.Slider.DOUBLE)
+        self.camera_slider.set_limits(0.001, 0.1)
+        self.camera_slider.double_value = 0.001
+        slider_tile2.add_child(slider_label2)
+        slider_tile2.add_child(self.camera_slider)
+        self.panel.add_child(slider_tile2)
 
         # screenshot buttom
         self.screenshot_btn = gui.Button("Screenshot")
@@ -361,19 +372,23 @@ class SLAM_GUI:
             self.init = True
 
         if gaussian_packet.current_frame is not None:
-            frustum = self.add_camera(gaussian_packet.current_frame, name="current", color=[0, 1, 0])
+            frustum = self.add_camera(
+                gaussian_packet.current_frame, name="current", color=[0, 1, 0], size=self.camera_slider.double_value
+            )
             if self.followcam_chbox.checked:
                 viewpoint = frustum.view_dir_behind if self.staybehind_chbox.checked else frustum.view_dir
                 self.widget3d.look_at(viewpoint[0], viewpoint[1], viewpoint[2])
 
         if gaussian_packet.keyframe is not None:
             name = "keyframe_{}".format(gaussian_packet.keyframe.uid)
-            frustum = self.add_camera(gaussian_packet.keyframe, name=name, color=[0, 0, 1])
+            frustum = self.add_camera(
+                gaussian_packet.keyframe, name=name, color=[0, 0, 1], size=self.camera_slider.double_value
+            )
 
         if gaussian_packet.keyframes is not None:
             for keyframe in gaussian_packet.keyframes:
                 name = "keyframe_{}".format(keyframe.uid)
-                frustum = self.add_camera(keyframe, name=name, color=[0, 0, 1])
+                frustum = self.add_camera(keyframe, name=name, color=[0, 0, 1], size=self.camera_slider.double_value)
 
         if gaussian_packet.kf_window is not None:
             self.kf_window = gaussian_packet.kf_window
@@ -387,7 +402,8 @@ class SLAM_GUI:
 
         if gaussian_packet.gtdepth is not None:
             depth = gaussian_packet.gtdepth
-            depth = imgviz.depth2rgb(depth, min_value=0.1, max_value=5.0, colormap="jet")
+            # TODO make this adaptable for outdoor scenes?
+            depth = imgviz.depth2rgb(depth, min_value=0.1, max_value=5.0, colormap="Spectral")
             depth = torch.from_numpy(depth)
             depth = torch.permute(depth, (2, 0, 1)).float()
             depth = (depth).byte().permute(1, 2, 0).contiguous().cpu().numpy()
@@ -537,7 +553,10 @@ class SLAM_GUI:
             self.g_camera.fovy = current_cam.FoVy
             self.g_camera.update_resolution(self.window.size.height, w)
             self.g_renderer.set_render_reso(w, self.window.size.height)
-            frustum = create_frustum(np.linalg.inv(cv_gl @ self.widget3d.scene.camera.get_view_matrix()))
+            frustum = create_frustum(
+                np.linalg.inv(cv_gl @ self.widget3d.scene.camera.get_view_matrix()),
+                size=self.camera_slider.double_value,
+            )
 
             self.g_camera.position = frustum.eye.astype(np.float32)
             self.g_camera.target = frustum.center.astype(np.float32)

@@ -8,7 +8,7 @@ import hydra
 import numpy as np
 import torch
 
-from src.slam import SLAM
+from src.test.testbed import SlamTestbed as SLAM
 from src.datasets import get_dataset
 
 """
@@ -85,10 +85,12 @@ def run_slam(cfg):
 
     setup_seed(43)
     torch.multiprocessing.set_start_method("spawn")
-    # Save state for reproducibility
-    backup_source_code(os.path.join(output_folder, "code"))
 
+    sys_print("#######################################")
+    sys_print("TESTBED")
+    sys_print("#######################################")
     sys_print(f"\n\n** Running {cfg.data.input_folder} in {cfg.mode} mode!!! **\n\n")
+
     dataset = get_dataset(cfg, device=cfg.device)
     slam = SLAM(cfg, dataset=dataset, output_folder=output_folder)
 

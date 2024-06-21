@@ -2280,7 +2280,6 @@ SparseBlock schur_block(torch::Tensor E,
 }
 
 
-
 std::vector<torch::Tensor> ba_cuda(
     torch::Tensor poses, 
     torch::Tensor disps, 

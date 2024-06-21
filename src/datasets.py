@@ -2,17 +2,19 @@ import glob
 import os
 import ipdb
 from omegaconf import DictConfig
+from typing import Tuple, List
 
 import cv2
 import numpy as np
 import torch
 import liblzfse
+from PIL import Image
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from kornia.geometry.linalg import compose_transformations
 
 
-def readEXR_onlydepth(filename):
+def readEXR_onlydepth(filename: str):
     """
     Read depth data from EXR image file.
 
@@ -45,6 +47,27 @@ def readEXR_onlydepth(filename):
     Y = None if "Y" not in header["channels"] else channelData["Y"]
 
     return Y
+
+
+def read_sintel_depth(filename: str) -> np.ndarray:
+    """Read depth data from file, return as numpy array."""
+
+    tag_float = 202021.25
+    tag_char = "PIEH"
+
+    f = open(filename, "rb")
+    check = np.fromfile(f, dtype=np.float32, count=1)[0]
+    assert (
+        check == tag_float
+    ), " depth_read:: Wrong tag in flow file (should be: {0}, is: {1}). Big-endian machine? ".format(tag_float, check)
+    width = np.fromfile(f, dtype=np.int32, count=1)[0]
+    height = np.fromfile(f, dtype=np.int32, count=1)[0]
+    size = width * height
+    assert (
+        width > 0 and height > 0 and size > 1 and size < 100000000
+    ), " depth_read:: Wrong input size (width = {0}, height = {1}).".format(width, height)
+    depth = np.fromfile(f, dtype=np.float32, count=-1).reshape((height, width))
+    return depth
 
 
 def quaternion_to_matrix(quaternions: torch.Tensor) -> torch.Tensor:
@@ -91,28 +114,28 @@ class BaseDataset(Dataset):
         self.device = device
         self.png_depth_scale = cfg.data.get("png_depth_scale", None)
         self.stride = cfg.get("stride", 1)
+        self.mono_model = cfg.get("mono_depth", "metric3d-vit_giant2")
 
         self.input_folder = cfg.data.input_folder
         self.color_paths = sorted(glob.glob(self.input_folder))
         self.color_paths = self.color_paths[:: self.stride]
 
-        self.filter_dyn = cfg.filter_dyn if "filter_dyn" in cfg else False
-
+        self.has_dyn_masks = False
+        self.background_value = 0
+        self.dilate_masks = True # NOTE chen: some datasets (e.g. Sintel) have masks too small
+        self.dilation_kernel_size = 5
+        self.return_stat_masks = cfg.get("with_dyn", False)
         self.n_img = len(self.color_paths)
 
         self.depth_paths = None
+        self.mask_paths = None
         self.poses = None
         self.image_timestamps = None
 
-        self.H, self.W, self.fx, self.fy, self.cx, self.cy = (
-            int(cfg.data.cam.H),
-            int(cfg.data.cam.W),
-            float(cfg.data.cam.fx),
-            float(cfg.data.cam.fy),
-            float(cfg.data.cam.cx),
-            float(cfg.data.cam.cy),
-        )
+        self.H, self.W = int(cfg.data.cam.H), int(cfg.data.cam.W)
         self.H_out, self.W_out = int(cfg.data.cam.H_out), int(cfg.data.cam.W_out)
+        self.fx, self.fy = float(cfg.data.cam.fx), float(cfg.data.cam.fy)
+        self.cx, self.cy = float(cfg.data.cam.cx), float(cfg.data.cam.cy)
         self.H_edge, self.W_edge = int(cfg.data.cam.H_edge), int(cfg.data.cam.W_edge)
 
         self.distortion = np.array(cfg.data.cam.distortion) if "distortion" in cfg.data.cam else None
@@ -139,9 +162,13 @@ class BaseDataset(Dataset):
                 decompressed_bytes = liblzfse.decompress(raw_bytes)
                 depth_data = np.frombuffer(decompressed_bytes, dtype=np.float32)
                 depth_data = np.copy(depth_data.reshape(256, 192))  # NOTE leon: their depth shape
-                # print(depth_data.shape)
+        elif ".dpt" in depth_path:  # NOTE chen: Sintel depth files
+            depth_data = read_sintel_depth(depth_path)
         else:
             raise TypeError(depth_path)
+
+        # Sanity check, because some datasets did not clean their depths
+        depth_data[np.isnan(depth_data)] = 0.0
 
         return depth_data
 
@@ -157,23 +184,23 @@ class BaseDataset(Dataset):
         color_data = (
             torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
         )  # bgr -> rgb, [0, 1]
-        color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
+        color_data = color_data.unsqueeze(dim=0)  # [1, C, H, W]
 
         # crop image edge, there are invalid value on the edge of the color image
+        if self.H_edge > 0:
+            7
+            color_data = color_data[:, :, edge:-edge, :]
+
         if self.W_edge > 0:
             edge = self.W_edge
             color_data = color_data[:, :, :, edge:-edge]
 
-        if self.H_edge > 0:
-            edge = self.H_edge
-            color_data = color_data[:, :, edge:-edge, :]
-
         return color_data
-
 
     def __getitem__(self, index: int):
         color_path = self.color_paths[index]
         color_data = cv2.imread(color_path)
+
         if self.distortion is not None:
             K = np.eye(3)
             K[0, 0], K[0, 2], K[1, 1], K[1, 2] = self.fx, self.cx, self.fy, self.cy
@@ -187,15 +214,22 @@ class BaseDataset(Dataset):
         outsize = (H_out_with_edge, W_out_with_edge)
 
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
-        color_data = (
-            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
-        )  # bgr -> rgb, [0, 1]
+        # bgr -> rgb, [0, 1]
+
+        color_data = torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
         color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
 
         depth_data = self.depthloader(index)
         if depth_data is not None:
             depth_data = torch.from_numpy(depth_data).float()
             depth_data = F.interpolate(depth_data[None, None], outsize, mode="nearest")[0, 0]
+            # Crop
+            if self.H_edge > 0:
+                edge = self.H_edge
+                depth_data = depth_data[edge:-edge, :]
+            if self.W_edge > 0:
+                edge = self.W_edge
+                depth_data = depth_data[:, edge:-edge]
 
         intrinsic = torch.as_tensor([self.fx, self.fy, self.cx, self.cy]).float()
         intrinsic[0] *= W_out_with_edge / self.W
@@ -204,41 +238,53 @@ class BaseDataset(Dataset):
         intrinsic[3] *= H_out_with_edge / self.H
 
         # crop image edge, there are invalid value on the edge of the color image
-        if self.W_edge > 0:
-            edge = self.W_edge
-            color_data = color_data[:, :, :, edge:-edge]
-            if depth_data is not None:
-                depth_data = depth_data[:, edge:-edge]
-            intrinsic[2] -= edge
-
         if self.H_edge > 0:
             edge = self.H_edge
             color_data = color_data[:, :, edge:-edge, :]
-            if depth_data is not None:
-                depth_data = depth_data[edge:-edge, :]
             intrinsic[3] -= edge
+
+        if self.W_edge > 0:
+            edge = self.W_edge
+            color_data = color_data[:, :, :, edge:-edge]
+            intrinsic[2] -= edge
 
         if self.poses is not None:
             pose = torch.from_numpy(self.poses[index]).float()
         else:
             pose = None
 
-        # TODO chen: should we just return mask always and it is None if not available?
-        if self.filter_dyn:
-            mask = np.uint8(cv2.imread(self.mask_paths[index], cv2.IMREAD_GRAYSCALE) == 0)
+        if self.has_dyn_masks and self.mask_paths is not None:
+            # NOTE chen: in case we have multiple objects this mask could have range [0, 255]
+            # -> TODO: in this case create array of masks with index 0 static scene, and others individual dyn. masks?
+            # NOTE right now we only store a single static scene mask
+            mask = cv2.imread(self.mask_paths[index], cv2.IMREAD_GRAYSCALE)
+            mask = mask == self.background_value # static mask
+            if self.dilate_masks:
+                mask = np.uint8(~mask) # Invert to dynamic mask
+                kernel = np.ones((self.dilation_kernel_size, self.dilation_kernel_size), np.uint8) 
+                mask = cv2.dilate(mask, kernel, iterations=1) 
+                mask = ~mask.astype(bool) # Return back to static mask
+            mask = np.uint8(mask)
             mask = cv2.resize(mask, (W_out_with_edge, H_out_with_edge))
             mask = torch.from_numpy(mask).bool()
+            if self.H_edge > 0:
+                mask = mask[edge:-edge, :]
+            if self.W_edge > 0:
+                mask = mask[:, edge:-edge]
+
+        if self.return_stat_masks:
+            if not self.has_dyn_masks:
+                raise Warning(
+                    "Warning. Dataset does not have any dynamic masks, please provide some if you want to return them!"
+                )
+            return index, color_data, depth_data, intrinsic, pose, mask
         else:
-            mask = None
-
-
-        return index, color_data, depth_data, intrinsic, pose, mask
+            return index, color_data, depth_data, intrinsic, pose
 
 
 class ImageFolder(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(ImageFolder, self).__init__(cfg, device)
-        self.stride = cfg.get("stride", 1)
         # Get either jpg or png files
         input_images = os.path.join(self.input_folder, "images", "*.jpg")
         self.color_paths = sorted(glob.glob(input_images))
@@ -248,7 +294,7 @@ class ImageFolder(BaseDataset):
             self.color_paths = sorted(glob.glob(input_images))
         self.color_paths = self.color_paths[:: self.stride]
 
-        depth_paths = os.path.join(self.input_folder, "zoed-nk", "*.npy")
+        depth_paths = os.path.join(self.input_folder, self.mono_model, "*.npy")
         if len(depth_paths) != 0:
             self.depth_paths = sorted(glob.glob(depth_paths))
             self.depth_paths = self.depth_paths[:: self.stride]
@@ -263,16 +309,12 @@ class ImageFolder(BaseDataset):
 class Replica(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(Replica, self).__init__(cfg, device)
-        self.stride = cfg.get("stride", 1)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/frame*.jpg")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
-            self.depth_paths = sorted(
-                # glob.glob(os.path.join(self.input_folder, "zoed_nk/frame*.npy"))
-                glob.glob(os.path.join(self.input_folder, "depthany-vitl-indoor/frame*.npy"))
-            )
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model, "frame*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
@@ -284,6 +326,7 @@ class Replica(BaseDataset):
         self.load_poses(os.path.join(self.input_folder, "traj.txt"))
         self.poses = self.poses[:: self.stride]
 
+        # FIXME chen: what exactly is this part?
         relative_poses = True  # True to test the gt stream mapping
         if relative_poses:
             self.poses = torch.from_numpy(np.array(self.poses))
@@ -306,16 +349,12 @@ class Replica(BaseDataset):
 class TartanAir(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(TartanAir, self).__init__(cfg, device)
-        self.stride = cfg.get("stride", 1)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_left/*.png")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
-            self.depth_paths = sorted(
-                glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy"))
-                # glob.glob(os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy"))
-            )
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model, "*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
@@ -354,20 +393,19 @@ class TartanAir(BaseDataset):
 class DAVIS(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(DAVIS, self).__init__(cfg, device)
-        self.stride = cfg.get("stride", 1)
         self.sequence = cfg.data.scene
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, self.sequence, "*.jpg")))
-        ipdb.set_trace()
+
+        self.has_dyn_masks = True
         self.mask_path = self.input_folder.replace("JPEGImages", "Annotations")
-        self.mask_paths = sorted(glob.glob(os.path.join(self.mask_path, "*.png")))
+        self.mask_paths = sorted(glob.glob(os.path.join(self.mask_path, self.sequence, "*.png")))
 
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
-            self.depth_path = self.input_folder.replace("JPEGImages/Full-Resolution", "Depth/Full-Resolution/zoed_nk")
-            self.depth_paths = sorted(
-                glob.glob(os.path.join(self.depth_path, "*.npy"))
-                # glob.glob(os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy"))
+            self.depth_path = self.input_folder.replace(
+                "JPEGImages/Full-Resolution", "Depth/Full-Resolution/" + self.mono_model
             )
+            self.depth_paths = sorted(glob.glob(os.path.join(self.depth_path, self.sequence, "*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
@@ -402,7 +440,7 @@ class TotalRecon(BaseDataset):
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
             self.depth_paths = self.depth_paths[:: self.stride]
         elif cfg.mode == "prgbd":
-            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, cfg.mono_depth, "*.npy")))
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model, "*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
@@ -440,21 +478,17 @@ class TotalRecon(BaseDataset):
         self.fx, self.fy, self.cx, self.cy = RTK[-1]
 
 
+# NOTE this is the KITTI VO dataset
+# we would need to build a different dataloader for the Depth or Sceneflow dataset
 class KITTI(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(KITTI, self).__init__(cfg, device)
-        self.stride = cfg.get("stride", 1)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_2/*.png")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
-            self.depth_paths = sorted(
-                glob.glob(os.path.join(self.input_folder, "zoed_nk_left/*.npy"))  # Use ZoeDepth predictions
-                # glob.glob(
-                #     os.path.join(self.input_folder, "depthany-vitl-outdoor_left/*.npy")
-                # )  # Use DepthAnything predictions
-            )
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", self.mono_model, "*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
@@ -464,7 +498,10 @@ class KITTI(BaseDataset):
             self.depth_paths = None
 
         self.color_paths = self.color_paths[:: self.stride]
+        # Set number of images for loading poses
+        self.n_img = len(self.color_paths)
 
+        # FIXME chen: why fake poses if we can read them?!
         self.poses = [np.eye(4) for _ in range(self.n_img)]  # Fake gt poses
 
 
@@ -473,7 +510,6 @@ class Azure(BaseDataset):
         super(Azure, self).__init__(cfg, device)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "color", "*.jpg")))
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", "*.png")))
-        self.stride = cfg.get("stride", 1)
         self.color_paths = self.color_paths[:: self.stride]
         self.depth_paths = self.depth_paths[:: self.stride]
         self.load_poses(os.path.join(self.input_folder, "scene", "trajectory.log"))
@@ -505,7 +541,6 @@ class Azure(BaseDataset):
 class ScanNet(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(ScanNet, self).__init__(cfg, device)
-        self.stride = cfg.get("stride", 1)
         max_frames = cfg.get("max_frames", -1)
         if max_frames < 0:
             max_frames = int(1e5)
@@ -546,7 +581,6 @@ class CoFusion(BaseDataset):
         self.input_folder = os.path.join(self.input_folder)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "colour", "*.png")))
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth_noise", "*.exr")))
-        self.stride = cfg.get("stride", 1)
         self.color_paths = self.color_paths[:: self.stride]
         self.depth_paths = self.depth_paths[:: self.stride]
         # Set number of images for loading poses
@@ -568,7 +602,6 @@ class TUM_RGBD(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(TUM_RGBD, self).__init__(cfg, device)
         self.color_paths, self.depth_paths, self.poses = self.loadtum(self.input_folder, frame_rate=32)
-        self.stride = cfg.get("stride", 1)
         end_frame = 1000  # Dynamic after 1000 frames
         self.color_paths = self.color_paths[: end_frame : self.stride]
         self.depth_paths = self.depth_paths[: end_frame : self.stride]
@@ -656,7 +689,6 @@ class TUM_RGBD(BaseDataset):
 class ETH3D(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(ETH3D, self).__init__(cfg, device)
-        self.stride = cfg.get("stride", 1)
         (
             self.color_paths,
             self.depth_paths,
@@ -766,7 +798,6 @@ class ETH3D(BaseDataset):
 class EuRoC(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(EuRoC, self).__init__(cfg, device)
-        self.stride = cfg.get("stride", 1)
         self.color_paths, self.right_color_paths, self.poses = self.loadtum(self.input_folder, frame_rate=-1)
         self.color_paths = self.color_paths[:: self.stride]
         self.right_color_paths = self.right_color_paths[:: self.stride]
@@ -991,6 +1022,139 @@ class EuRoC(BaseDataset):
         return pose
 
 
+class Sintel(BaseDataset):
+    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
+        super(Sintel, self).__init__(cfg, device)
+
+        self.has_dyn_masks = True
+        self.background_value = 255
+
+        # Check for endianness, based on Daniel Scharstein's optical flow code.
+        # Using little-endian architecture, these two should be equal.
+        self.tag_float = 202021.25
+        self.tag_char = "PIEH"
+
+        # NOTE chen: moving object masks are defined from frame pairs [t0, t1], we therefore only have n-1 in total
+        # we therefore need to remove the last frame
+        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "final_left", cfg.data.scene, "*.png")))[
+            :-1
+        ]
+        self.n_img = len(self.color_paths)
+        self.mask_paths = sorted(glob.glob(os.path.join(self.input_folder, "rigidity", cfg.data.scene, "*.png")))
+
+        # For Pseudo RGBD, we use monocular depth predictions in another folder
+        if cfg.mode == "rgbd":
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", cfg.data.scene, "*.dpt")))[
+                :-1
+            ]
+            assert (
+                len(self.depth_paths) == self.n_img
+            ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
+            self.depth_paths = self.depth_paths[:: self.stride]
+        elif cfg.mode == "prgbd":
+            self.depth_paths = sorted(
+                glob.glob(os.path.join(self.input_folder, self.mono_model, cfg.data.scene, "*.npy"))
+            )[:-1]
+            assert (
+                len(self.depth_paths) == self.n_img
+            ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
+            self.depth_paths = self.depth_paths[:: self.stride]
+        else:
+            self.depth_paths = None
+
+        self.color_paths = self.color_paths[:: self.stride]
+        self.mask_paths = self.mask_paths[:: self.stride]
+
+        self.pose_paths = sorted(glob.glob(os.path.join(self.input_folder, "camdata_left", cfg.data.scene, "*.cam")))[
+            :-1
+        ]
+        self.pose_paths = self.pose_paths[:: self.stride]
+
+        self.load_poses(self.pose_paths)
+        self.set_intrinsics()
+        # Set number of images for loading poses
+        self.n_img = len(self.color_paths)
+
+    def load_poses(self, paths: List[str]):
+        self.poses = []
+        for path in paths:
+            w2c = np.eye(4)
+            K, T = self.cam_read(path)
+            w2c[:3, :3] = T[:3, :3]
+            w2c[:3, 3] = T[:, 3]
+            c2w = np.linalg.inv(w2c)
+            self.poses.append(c2w)
+
+    def set_intrinsics(self):
+        K, _ = self.cam_read(self.pose_paths[0])
+        self.fx, self.fy, self.cx, self.cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+
+    def cam_read(self, filename: str) -> Tuple[np.ndarray, np.ndarray]:
+        """Read camera data, return (M,N) tuple.
+
+        M is the intrinsic matrix, N is the extrinsic matrix, so that
+
+        x = M*N*X,
+        with x being a point in homogeneous image pixel coordinates, X being a
+        point in homogeneous world coordinates.
+        """
+        f = open(filename, "rb")
+        check = np.fromfile(f, dtype=np.float32, count=1)[0]
+        assert (
+            check == self.tag_float
+        ), " cam_read:: Wrong tag in flow file (should be: {0}, is: {1}). Big-endian machine? ".format(
+            self.tag_float, check
+        )
+        M = np.fromfile(f, dtype="float64", count=9).reshape((3, 3))
+        N = np.fromfile(f, dtype="float64", count=12).reshape((3, 4))
+        return M, N
+
+    def flow_read(self, filename: str) -> Tuple[np.ndarray, np.ndarray]:
+        """Read optical flow from file, return (U,V) tuple.
+
+        Original code by Deqing Sun, adapted from Daniel Scharstein.
+        """
+        f = open(filename, "rb")
+        check = np.fromfile(f, dtype=np.float32, count=1)[0]
+        assert (
+            check == self.tag_float
+        ), " flow_read:: Wrong tag in flow file (should be: {0}, is: {1}). Big-endian machine? ".format(
+            self.tag_float, check
+        )
+        width = np.fromfile(f, dtype=np.int32, count=1)[0]
+        height = np.fromfile(f, dtype=np.int32, count=1)[0]
+        size = width * height
+        assert (
+            width > 0 and height > 0 and size > 1 and size < 100000000
+        ), " flow_read:: Wrong input size (width = {0}, height = {1}).".format(width, height)
+        tmp = np.fromfile(f, dtype=np.float32, count=-1).reshape((height, width * 2))
+        u = tmp[:, np.arange(width) * 2]
+        v = tmp[:, np.arange(width) * 2 + 1]
+        return u, v
+
+    # NOTE since we have depth for the left camera, we dont really need the disparity
+    def disparity_read(self, filename: str) -> np.ndarray:
+        """Return disparity read from filename."""
+        f_in = np.array(Image.open(filename))
+        d_r = f_in[:, :, 0].astype("float64")
+        d_g = f_in[:, :, 1].astype("float64")
+        d_b = f_in[:, :, 2].astype("float64")
+
+        depth = d_r * 4 + d_g / (2**6) + d_b / (2**14)
+        return depth
+
+    # NOTE this is for some super pixel segmentation, not the moving object masks
+    def segmentation_read(filename: str) -> np.ndarray:
+        """Return segmentation read from filename."""
+        f_in = np.array(Image.open(filename))
+        seg_r = f_in[:, :, 0].astype("int32")
+        seg_g = f_in[:, :, 1].astype("int32")
+        seg_b = f_in[:, :, 2].astype("int32")
+
+        segmentation = (seg_r * 256 + seg_g) * 256 + seg_b
+        return segmentation
+
+
 dataset_dict = {
     "folder": ImageFolder,
     "replica": Replica,
@@ -1000,6 +1164,7 @@ dataset_dict = {
     "tumrgbd": TUM_RGBD,
     "eth3d": ETH3D,
     "euroc": EuRoC,
+    "sintel": Sintel,
     "tartanair": TartanAir,
     "kitti": KITTI,
     "davis": DAVIS,

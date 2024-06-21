@@ -22,3 +22,19 @@
 	path = ext/ZoeDepth
 	branch = master
 	url = https://github.com/ChenHoy/ZoeDepth.git
+[submodule "ext/Metric3D"]
+	path = ext/Metric3D
+	branch = main
+	url = https://github.com/ChenHoy/Metric3D.git
+[submodule "ext/ISAT_with_segment_anything"]
+	path = ext/ISAT_with_segment_anything
+	url = https://github.com/ChenHoy/ISAT_with_segment_anything.git
+[submodule "ext/sam-pt"]
+	path = ext/sam-pt
+	url = https://github.com/SysCV/sam-pt
+[submodule "ext/RAFT"]
+	path = ext/RAFT
+	url = https://github.com/ChenHoy/RAFT.git
+[submodule "ext/Python-DBoW3"]
+	path = ext/Python-DBoW3
+	url = https://github.com/ChenHoy/Python-DBoW3.git

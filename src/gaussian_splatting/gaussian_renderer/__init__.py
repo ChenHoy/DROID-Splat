@@ -9,7 +9,9 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import ipdb
 import math
+from typing import List
 
 import torch
 from diff_gaussian_rasterization import (
@@ -20,6 +22,24 @@ from diff_gaussian_rasterization import (
 from ..scene.gaussian_model import GaussianModel
 from ..scene.dynamic_gaussian_model import DynamicGaussianModel
 from ..utils.sh_utils import eval_sh
+
+
+def check_nan(tensor: torch.Tensor) -> bool:
+    return torch.isnan(tensor).any()
+
+
+def check_inf(tensor: torch.Tensor) -> bool:
+    return torch.isinf(tensor).any()
+
+
+def look_for_degenerate_tensors(list_of_tensors: List) -> bool:
+    num_degenerate = 0
+    for tensor in list_of_tensors:
+        if isinstance(tensor, torch.Tensor):
+            if check_nan(tensor) or check_inf(tensor):
+                num_degenerate += 1
+                print(f"Found degenerate tensor: {tensor}")
+    return num_degenerate
 
 
 def render(
@@ -105,6 +125,23 @@ def render(
     else:
         colors_precomp = override_color
 
+    is_degenerate = look_for_degenerate_tensors(
+        [
+            means3D,
+            means2D,
+            mask,
+            shs,
+            opacity,
+            scales,
+            rotations,
+            viewpoint_camera.cam_rot_delta,
+            viewpoint_camera.cam_trans_delta,
+        ]
+    )
+    # FIXME what to do if there are degenerate points?
+    if is_degenerate > 0:
+        ipdb.set_trace()
+
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
     if mask is not None:
         rendered_image, radii, depth, opacity = rasterizer(
@@ -135,9 +172,6 @@ def render(
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
-    # FIXME chen: we sometimes get: "RuntimeError: CUDA error: an illegal memory access was encountered"
-    # when calling radii > 0
-    # This is likely when the map gets out of control and we crash
     return {
         "render": rendered_image,
         "viewspace_points": screenspace_points,

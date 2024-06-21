@@ -1,0 +1,39 @@
+defaults:
+  - /tracking/base@_here_
+
+buffer: 128
+beta: 0.7  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
+warmup: 8
+
+motion_filter:
+  thresh: 6.0  # add as keyframe if avg flow >
+
+frontend:
+  steps1: 8 # 1st outer loop with feature correlation
+  steps2: 4 # 2nd outer loop with feature correlation
+  iters: 4 # Actual BA iterations
+  keyframe_thresh: 4.0  # remove keyframe if avg flow < 
+  thresh: 5.0  
+  window: 25  # local ba window size
+  max_factors: 100  # num of edges within local ba
+  radius: 5
+  nms: 0
+
+  use_loop_closure: False
+  loop_window: 100
+  loop_thresh: 20.0  # only consider edge with avg flow < 
+  loop_radius: 1
+  loop_nms: 12
+
+  
+backend:
+  warmup: 12
+  window: 100 # Dont optimize more keyframes to avoid OOM
+  thresh: 6.0  # only consider edge with avg flow < 
+  radius: 4
+  nms: 0
+
+  steps: 8
+  iters: 2
+
+  use_loop_closure: False

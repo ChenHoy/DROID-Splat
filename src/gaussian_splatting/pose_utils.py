@@ -1,4 +1,5 @@
 import numpy as np
+import ipdb
 import torch
 
 
@@ -33,11 +34,7 @@ def SO3_exp(theta):
     if angle < 1e-5:
         return I + W + 0.5 * W2
     else:
-        return (
-            I
-            + (torch.sin(angle) / angle) * W
-            + ((1 - torch.cos(angle)) / (angle**2)) * W2
-        )
+        return I + (torch.sin(angle) / angle) * W + ((1 - torch.cos(angle)) / (angle**2)) * W2
 
 
 def V(theta):
@@ -50,11 +47,7 @@ def V(theta):
     if angle < 1e-5:
         V = I + 0.5 * W + (1.0 / 6.0) * W2
     else:
-        V = (
-            I
-            + W * ((1.0 - torch.cos(angle)) / (angle**2))
-            + W2 * ((angle - torch.sin(angle)) / (angle**3))
-        )
+        V = I + W * ((1.0 - torch.cos(angle)) / (angle**2)) + W2 * ((angle - torch.sin(angle)) / (angle**3))
     return V
 
 
