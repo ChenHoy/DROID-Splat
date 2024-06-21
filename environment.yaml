@@ -22,7 +22,7 @@ dependencies:
   - ffmpeg
   - kiwisolver
   - ninja
-  - numpy
+  - numpy==1.26.4
   - pillow
   - scikit-image
   - scikit-learn
@@ -33,6 +33,7 @@ dependencies:
     - hydra-core
     - omegaconf
     - torchmetrics
+    - easydict
     - ipdb
     - PyOpenGL-accelerate  # Installing this manually works, using conda does not
     - glfw
