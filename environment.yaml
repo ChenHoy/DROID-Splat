@@ -1,4 +1,4 @@
-name: go-slam
+name: droidsplat
 channels:
   - rusty1s
   - pytorch
@@ -18,15 +18,12 @@ dependencies:
   - opencv
   - tqdm
   - suitesparse
-  - matplotlib
   - pyyaml
   - ffmpeg
   - kiwisolver
   - ninja
   - numpy
   - pillow
-  - pyqt
-  - tk
   - scikit-image
   - scikit-learn
   - scipy
@@ -35,10 +32,21 @@ dependencies:
   - pip:
     - hydra-core
     - omegaconf
+    - torchmetrics
     - ipdb
     - PyOpenGL-accelerate  # Installing this manually works, using conda does not
+    - glfw
+    - imgviz
+    - glm
     - dask
     - gdown
+    - einops
+    - plyfile
+    - tk
+    - kornia
+    - PyQt5
+    - matplotlib
+    - evo
     - imageio
     - networkx
     - pandas
