@@ -1,25 +1,21 @@
 import json
 import os
 
-import cv2
-import evo
 import numpy as np
+import cv2
 import torch
-from evo.core import metrics, trajectory
-from evo.core.metrics import PoseRelation, Unit
-from evo.core.trajectory import PosePath3D, PoseTrajectory3D
-from evo.tools import plot
-from evo.tools.plot import PlotMode
-from evo.tools.settings import SETTINGS
-from matplotlib import pyplot as plt
+
+import evo
+import evo.core.metrics as metrics
+from evo.core.trajectory import PosePath3D
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
+from evo.tools.settings import SETTINGS
+from matplotlib import pyplot as plt
+
 from .gaussian_renderer import render
-from .utils.image_utils import psnr
-from .utils.loss_utils import ssim_torch as ssim
-from .utils.system_utils import mkdir_p
-from .logging_utils import Log
-from .multiprocessing_utils import clone_obj
+from ..losses.image import ssim
+from ..utils import psnr, mkdir_p, clone_obj
 
 
 def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
@@ -40,7 +36,6 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ape_metric.process_data(data)
     ape_stat = ape_metric.get_statistic(metrics.StatisticsType.rmse)
     ape_stats = ape_metric.get_all_statistics()
-    Log("RMSE ATE \[m]", ape_stat, tag="Eval")
 
     with open(
         os.path.join(plot_dir, "stats_{}.json".format(str(label))),
@@ -270,11 +265,6 @@ def eval_rendering(
     output["mean_psnr"] = float(np.mean(psnr_array))
     output["mean_ssim"] = float(np.mean(ssim_array))
     output["mean_lpips"] = float(np.mean(lpips_array))
-
-    Log(
-        f'mean psnr: {output["mean_psnr"]}, ssim: {output["mean_ssim"]}, lpips: {output["mean_lpips"]}',
-        tag="Eval",
-    )
 
     psnr_save_dir = os.path.join(save_dir, "psnr", str(iteration))
     mkdir_p(psnr_save_dir)
