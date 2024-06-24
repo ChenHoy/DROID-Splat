@@ -37,4 +37,4 @@
 	url = https://github.com/ChenHoy/RAFT.git
 [submodule "ext/PyDBoW3"]
 	path = ext/PyDBoW3
-	url = https://github.com/JHMeusener/PyDBoW3
+	url = https://github.com/ChenHoy/PyDBoW3.git
