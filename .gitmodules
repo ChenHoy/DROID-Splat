@@ -35,6 +35,6 @@
 [submodule "ext/RAFT"]
 	path = ext/RAFT
 	url = https://github.com/ChenHoy/RAFT.git
-[submodule "ext/Python-DBoW3"]
-	path = ext/Python-DBoW3
-	url = https://github.com/ChenHoy/Python-DBoW3.git
+[submodule "ext/PyDBoW3"]
+	path = ext/PyDBoW3
+	url = https://github.com/JHMeusener/PyDBoW3
