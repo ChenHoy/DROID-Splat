@@ -138,6 +138,7 @@ class PoseTrajectoryFiller:
                 timestamp, image, depth, intrinsic, _, static_mask = frame
             else:
                 timestamp, image, depth, intrinsic, _ = frame
+                static_mask = None
 
             # When optimizing intrinsics as well, choose the optimized ones instead of the ones from the dataset!
             if self.video.opt_intr:
@@ -159,7 +160,7 @@ class PoseTrajectoryFiller:
                 depths = depths if len(depths) > 0 else None
                 masks = masks if len(masks) > 0 else None
                 pose_list += self.__fill(timestamps, images, depths, intrinsics, static_masks=masks)
-                timestamps, images, depths, intrinsics = [], [], [], []
+                timestamps, images, depths, intrinsics, masks = [], [], [], [], []
 
         if len(timestamps) > 0:
             depths = depths if len(depths) > 0 else None
