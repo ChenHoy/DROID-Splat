@@ -468,9 +468,10 @@ class TotalRecon(BaseDataset):
         for path in paths:
             RTK = np.loadtxt(path)
 
-            c2w = np.eye(4)
-            c2w[:3, :3] = RTK[:3, :3]
-            c2w[:3, 3] = RTK[:3, 3]
+            w2c = np.eye(4)
+            w2c[:3, :3] = RTK[:3, :3]
+            w2c[:3, 3] = RTK[:3, 3]
+            c2w = np.linalg.inv(w2c)
             self.poses.append(c2w)
 
     def set_intrinsics(self):
