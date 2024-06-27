@@ -1,5 +1,6 @@
 from typing import Tuple, List
 from tqdm import tqdm
+import ipdb
 
 import torch
 import lietorch
@@ -10,8 +11,9 @@ from .factor_graph import FactorGraph
 class PoseTrajectoryFiller:
     """This class is used to fill in non-keyframe poses"""
 
-    def __init__(self, net, video, device="cuda:0"):
+    def __init__(self, cfg, net, video, device="cuda:0"):
 
+        self.cfg = cfg
         # split net modules
         self.cnet = net.cnet
         self.fnet = net.fnet
@@ -30,6 +32,13 @@ class PoseTrajectoryFiller:
         """features for correlation volume"""
         return self.fnet(image)
 
+    # FIXME this might not work well in some special cases
+    # i) self.opt_intr = True, then loading new intrinsics will lead to wrong intrinsics!!!
+    # ii) self.mode == "prgbd" and self.frontend.optimize_scales = True -> We have unscaled priors at non-keyframes!
+
+    # FIXME we use the video.buffer to store the non-keyframes, but in some cases we might have a too small buffer size
+    # it would be unwise to use a large buffer size of e.g. 2000 for some scenes!
+    # TODO write a smarter buffer management that allows us to handle this more gracefully
     def __fill(
         self,
         timestamps: List[int],
@@ -57,8 +66,8 @@ class PoseTrajectoryFiller:
 
         # time interval between nearby keyframes
         dt = ts[t1] - ts[t0] + 1e-3
-        dP = Ps[t1] * Ps[t0].inv()
-
+        dP = Ps[t1] * Ps[t0].inv()  # Get relative pose
+        # Do Linear Interpolation in between segments
         v = dP.log() / dt.unsqueeze(dim=-1)
         w = v * (tt - ts[t0]).unsqueeze(dim=-1)
         Gs = SE3.exp(w) * Ps[t0]
@@ -69,7 +78,7 @@ class PoseTrajectoryFiller:
 
         # temporally put the non-keyframe at the end of keyframe queue
         self.video.counter.value += M
-        self.video[N : N + M] = (tt, images[:, 0], Gs.data, 1, depths, intrinsics / 8.0, fmap)
+        self.video[N : N + M] = (tt, images[:, 0], Gs.data, 1, depths, intrinsics, fmap)
 
         graph = FactorGraph(self.video, self.update)
         # build edge between current frame and nearby keyframes for optimization
@@ -84,18 +93,28 @@ class PoseTrajectoryFiller:
 
         return [Gs]
 
+    # TODO handle corner cases!
     @torch.no_grad()
-    def __call__(self, image_stream, batch_size: int = 32, return_tstamps: bool = False) -> torch.Tensor:
+    def __call__(self, image_stream, batch_size: int = 32, return_tstamps: bool = False):
         """fill in poses of non-keyframe images in batch mode. This works by first linear interpolating the
         poses in between the keyframes, then computing the optical flow between these frames and doing a motion only BA
-        refinement"""
+        refinement
 
-        # store all camera poses
-        pose_list = []
+        Returns:
+        ---
+        interpolated poses [lietorch.SE3]
+        """
+
         timestamps, images, depths, intrinsics = [], [], [], []
-        all_timestamps = []
+        # store all camera poses and timestamps
+        pose_list, all_timestamps = [], []
 
-        for timestamp, image, depth, intrinsic, gt_pose in tqdm(image_stream):
+        for frame in tqdm(image_stream):
+            if self.cfg.with_dyn and image_stream.has_dyn_masks:
+                timestamp, image, depth, intrinsic, _, _ = frame
+            else:
+                timestamp, image, depth, intrinsic, _ = frame
+
             all_timestamps.append(timestamp)
             timestamps.append(timestamp)
             images.append(image)

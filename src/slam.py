@@ -25,9 +25,9 @@ from .visualization import droid_visualization, depth2rgb, uncertainty2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .gaussian_mapping import GaussianMapper
 
-from .gaussian_splatting.eval_utils import eval_ate, eval_rendering, save_gaussians
+from .gaussian_splatting.eval_utils import eval_ate, eval_rendering
 from .gaussian_splatting.gui import gui_utils, slam_gui
-from .gaussian_splatting.multiprocessing_utils import clone_obj
+from .utils import clone_obj
 
 
 class SLAM:
@@ -95,9 +95,14 @@ class SLAM:
         self.video = DepthVideo(cfg)  # NOTE: we can use this for getting both gt and rendered images
         self.frontend = FrontendWrapper(cfg, self)
         self.backend = BackendWrapper(cfg, self)
-        self.traj_filler = PoseTrajectoryFiller(net=self.net, video=self.video, device=self.device)
+        self.traj_filler = PoseTrajectoryFiller(self.cfg, net=self.net, video=self.video, device=self.device)
 
+        # evaluation params
         self.do_evaluate = cfg.evaluate
+        self.save_renders = cfg.get("save_renders", False)
+        # Andrei NOTE: if True, only keyframes are used for ATE evaluation
+        self.ate_keyframes_only = cfg.get("ate_keyframes_only", False)
+
         self.dataset = dataset
         self.mapping_queue = mp.Queue()
         self.received_mapping = mp.Event()
@@ -118,6 +123,8 @@ class SLAM:
             )
         else:
             self.gaussian_mapper = GaussianMapper(cfg, self)
+
+        self.sanity_checks()
 
     def info(self, msg) -> None:
         print(colored("[Main]: " + msg, "green"))
@@ -146,14 +153,9 @@ class SLAM:
             self.output = "./outputs/"
 
         os.makedirs(self.output, exist_ok=True)
-        os.makedirs(f"{self.output}/logs/", exist_ok=True)
         os.makedirs(f"{self.output}/renders/mapping/", exist_ok=True)
         os.makedirs(f"{self.output}/renders/final", exist_ok=True)
-        os.makedirs(f"{self.output}/mesh", exist_ok=True)
         os.makedirs(f"{self.output}/evaluation", exist_ok=True)
-
-    def info(self, msg) -> None:
-        print(colored("[Main]: " + msg, "green"))
 
     def update_cam(self, cfg):
         """
@@ -400,28 +402,33 @@ class SLAM:
 
         #### ------------------- ####
         ### Trajectory evaluation ###
-        ## Trajectory filler
-        timestamps = [i for i in range(len(stream))]
-        camera_trajectory = self.traj_filler(stream)  # w2cs
-        # This does nothing: w2w is just unit pose
-        # w2w = SE3(self.video.poses_clean[0].clone().unsqueeze(dim=0)).to(camera_trajectory.device)
-        camera_trajectory = camera_trajectory.inv()  # c2ws
-        traj_est = camera_trajectory.data.cpu().numpy()  # 7x1 Lie algebra
-        estimate_c2w_list = camera_trajectory.matrix().data.cpu()  # 4x4 homogenous matrix
+        ate_display_info = "ATE on keyframes only" if self.ate_keyframes_only else "ATE on all frames"
+        self.info(ate_display_info)
+        # If we dont optimize the scales of our prior, we should also not use scale_adjustment!
+        if self.cfg.mode == "prgbd" and self.video.optimize_scales:
+            monocular = True
+        elif self.cfg.mode == "mono":
+            monocular = True
+        else:
+            monocular = False
 
-        # Set keyframes_only to True to compute the APE and plots on keyframes only.
-        monocular = self.cfg.mode == "mono"
-        result_ate = eval_ate(
-            self.video,
-            kf_ids=list(range(len(self.video.images))),
-            save_dir=eval_path,
-            iterations=-1,
-            final=True,
-            monocular=monocular,
-            keyframes_only=False,
-            camera_trajectory=camera_trajectory,
-            stream=stream,
-        )
+        ## Trajectory filler
+        if not self.ate_keyframes_only:
+            w2c_est_all, timestamps = self.traj_filler(stream, return_tstamps=True)
+            c2w_est_lie = w2c_est_all.inv().vec().cpu().numpy()  # 7x1 Lie algebra
+            result_ate = eval_ate(
+                self.video,
+                frame_ids=timestamps,
+                save_dir=eval_path,
+                keyframes_only=False,
+                monocular=monocular,
+                interpolated_trajectory=c2w_est_lie,
+                stream=stream,
+            )
+        else:
+            kf_ids = self.video.timestamp[: self.video.counter.value]
+            result_ate = eval_ate(self.video, kf_ids.cpu().tolist(), eval_path, True, monocular, stream=stream)
+
         self.info("ATE: {}".format(result_ate))
         trajectory_df = pd.DataFrame([result_ate])
         trajectory_df.to_csv(os.path.join(eval_path, "trajectory_results.csv"), index=False)
@@ -429,9 +436,10 @@ class SLAM:
         # np.save(out_path, estimate_c2w_list.numpy())  # c2ws
 
         ## Joint metrics file ##
-        configuration_columns = ["run_backend", "run_mapping", "stride", "loop_closure"]
+        configuration_columns = ["ate_on_keyframes_only", "run_backend", "run_mapping", "stride", "loop_closure"]
         columns = configuration_columns + ["dataset", "mode", "ape"]
         result_table = [
+            str(self.ate_keyframes_only),
             str(self.cfg.run_backend),
             str(self.cfg.run_mapping),
             str(self.cfg.stride),
@@ -444,25 +452,41 @@ class SLAM:
         ### Rendering evaluation ###
         if self.cfg.run_mapping:
             rendering_result = eval_rendering(
-                gaussian_mapper_last_state.cameras,
+                gaussian_mapper_last_state.cameras,  ## at the end there are the new interpolated cameras appended
+                gaussian_mapper_last_state.timestamps,  ## these are the corresponding timestamps in the dataset for the given frames
                 gaussian_mapper_last_state.gaussians,
                 stream,
                 eval_path,
                 gaussian_mapper_last_state.pipeline_params,
                 gaussian_mapper_last_state.background,
-                kf_indices=[],  ## NOTE: all frames are keyframes
                 iteration="final",
+                save_renders=self.save_renders,  ## should not be run in the batch evaluation script
             )
-            columns += ["psnr", "ssim", "lpips"]
-            result_table += [
-                rendering_result["mean_psnr"],
-                rendering_result["mean_ssim"],
-                rendering_result["mean_lpips"],
-            ]
+            columns += ["psnr", "ssim", "lpips", "extra_non_kf"]
+            # Check if the dataset has depth images
+            if len(stream.depth_paths) != 0:
+                columns += ["l1_depth"]
+                result_table += [
+                    rendering_result["mean_psnr"],
+                    rendering_result["mean_ssim"],
+                    rendering_result["mean_lpips"],
+                    rendering_result["mean_l1"],
+                    str(self.cfg.mapping.keyframes.extra_non_keyframes),
+                ]
+            else:
+                result_table += [
+                    rendering_result["mean_psnr"],
+                    rendering_result["mean_ssim"],
+                    rendering_result["mean_lpips"],
+                    str(self.cfg.mapping.keyframes.extra_non_keyframes),
+                ]
 
         data = [result_table]
         df = pd.DataFrame(data, columns=columns)
         df.to_csv(os.path.join(eval_path, "evaluation_results.csv"), index=False)
+
+        ## save to wandb
+        # wandb.log({"try1": wandb.Table(dataframe=df)})
 
     def save_state(self):
         self.info("Saving checkpoints...")
