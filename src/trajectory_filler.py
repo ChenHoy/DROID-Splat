@@ -1,4 +1,4 @@
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 from tqdm import tqdm
 from termcolor import colored
 import ipdb
@@ -39,12 +39,15 @@ class PoseTrajectoryFiller:
         images: List[torch.Tensor],
         depths: List[torch.Tensor],
         intrinsics: List[torch.Tensor],
+        static_masks: Optional[List[torch.Tensor]] = None,
     ) -> List[SE3]:
         """fill operator"""
         tt = torch.tensor(timestamps, device=self.device)
         images = torch.stack(images, dim=0)
         if depths is not None:
             depths = torch.stack(depths, dim=0)
+        if static_masks is not None:
+            static_masks = torch.stack(static_masks, dim=0)
         intrinsics = torch.stack(intrinsics, 0)
         inputs = images.to(self.device)
 
@@ -72,7 +75,20 @@ class PoseTrajectoryFiller:
 
         # temporally put the non-keyframe at the end of keyframe queue
         self.video.counter.value += M
-        self.video[N : N + M] = (tt, images[:, 0], Gs.data, 1, depths, intrinsics, fmap)
+
+        self.video[N : N + M] = (
+            tt,
+            images[:, 0],
+            Gs.data,
+            1.0,  # NOTE Initializing with 1.0 disparities somehow works well
+            depths,
+            intrinsics,
+            fmap,
+            None,  # No context features
+            None,  # No context features
+            None,  # No groundtruth pose
+            static_masks,
+        )
 
         graph = FactorGraph(self.video, self.update)
         # build edge between current frame and nearby keyframes for optimization
@@ -82,8 +98,11 @@ class PoseTrajectoryFiller:
         for itr in range(6):
             graph.update(N, N + M, motion_only=True)
 
-        Gs = SE3(self.video.poses[N : N + M].clone())
+        Gs = SE3(self.video.poses[N : N + M].clone())  # Extract updated/interpolated poses
+
         self.video.counter.value -= M  # Reset counter back to where it previously was
+        # Remove the non-keyframes again from the video buffer
+        self.video.remove(torch.arange(N, N + M))
 
         return [Gs]
 
@@ -110,13 +129,13 @@ class PoseTrajectoryFiller:
                 )
             )
 
-        timestamps, images, depths, intrinsics = [], [], [], []
+        timestamps, images, depths, intrinsics, masks = [], [], [], [], []
         # store all camera poses and timestamps
         pose_list, all_timestamps = [], []
 
         for frame in tqdm(image_stream):
             if self.cfg.with_dyn and image_stream.has_dyn_masks:
-                timestamp, image, depth, intrinsic, _, _ = frame
+                timestamp, image, depth, intrinsic, _, static_mask = frame
             else:
                 timestamp, image, depth, intrinsic, _ = frame
 
@@ -129,13 +148,17 @@ class PoseTrajectoryFiller:
             images.append(image)
             if depth is not None:
                 depths.append(depth)
+            if static_mask is not None:
+                masks.append(static_mask)
             intrinsics.append(intrinsic)
 
             if len(timestamps) == batch_size:
+
                 # FIXME in prgbd mode together with scale_optimization, we will have the wrong prior here and non-keyframes!
                 # TODO either use no depths or interpolate a memoized scale
                 depths = depths if len(depths) > 0 else None
-                pose_list += self.__fill(timestamps, images, depths, intrinsics)
+                masks = masks if len(masks) > 0 else None
+                pose_list += self.__fill(timestamps, images, depths, intrinsics, static_masks=masks)
                 timestamps, images, depths, intrinsics = [], [], [], []
 
         if len(timestamps) > 0:
