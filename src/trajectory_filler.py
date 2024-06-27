@@ -1,5 +1,6 @@
 from typing import Tuple, List
 from tqdm import tqdm
+from termcolor import colored
 import ipdb
 
 import torch
@@ -32,13 +33,6 @@ class PoseTrajectoryFiller:
         """features for correlation volume"""
         return self.fnet(image)
 
-    # FIXME this might not work well in some special cases
-    # i) self.opt_intr = True, then loading new intrinsics will lead to wrong intrinsics!!!
-    # ii) self.mode == "prgbd" and self.frontend.optimize_scales = True -> We have unscaled priors at non-keyframes!
-
-    # FIXME we use the video.buffer to store the non-keyframes, but in some cases we might have a too small buffer size
-    # it would be unwise to use a large buffer size of e.g. 2000 for some scenes!
-    # TODO write a smarter buffer management that allows us to handle this more gracefully
     def __fill(
         self,
         timestamps: List[int],
@@ -94,6 +88,7 @@ class PoseTrajectoryFiller:
         return [Gs]
 
     # TODO handle corner cases!
+    # ii) self.mode == "prgbd" and self.frontend.optimize_scales = True -> We have unscaled priors at non-keyframes!
     @torch.no_grad()
     def __call__(self, image_stream, batch_size: int = 32, return_tstamps: bool = False):
         """fill in poses of non-keyframe images in batch mode. This works by first linear interpolating the
@@ -104,6 +99,16 @@ class PoseTrajectoryFiller:
         ---
         interpolated poses [lietorch.SE3]
         """
+        # Check for enough slack when interpolating
+        buffer_size = len(self.video.timestamp)
+        slack_buffer = buffer_size - self.video.counter.value
+        if slack_buffer < batch_size:
+            raise Exception(
+                colored(
+                    "Buffer size too small for using a slack when interpolating, please increase either video.buffer or decrease the batch size here!",
+                    "red",
+                )
+            )
 
         timestamps, images, depths, intrinsics = [], [], [], []
         # store all camera poses and timestamps
@@ -115,6 +120,10 @@ class PoseTrajectoryFiller:
             else:
                 timestamp, image, depth, intrinsic, _ = frame
 
+            # When optimizing intrinsics as well, choose the optimized ones instead of the ones from the dataset!
+            if self.video.opt_intr:
+                intrinsic = self.video.intrinsics[0] * self.video.scale_factor
+
             all_timestamps.append(timestamp)
             timestamps.append(timestamp)
             images.append(image)
@@ -123,6 +132,8 @@ class PoseTrajectoryFiller:
             intrinsics.append(intrinsic)
 
             if len(timestamps) == batch_size:
+                # FIXME in prgbd mode together with scale_optimization, we will have the wrong prior here and non-keyframes!
+                # TODO either use no depths or interpolate a memoized scale
                 depths = depths if len(depths) > 0 else None
                 pose_list += self.__fill(timestamps, images, depths, intrinsics)
                 timestamps, images, depths, intrinsics = [], [], [], []
