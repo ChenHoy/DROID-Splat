@@ -446,6 +446,8 @@ class FactorGraph:
 
         self.net, delta, weight, damping, upmask = self.update_op(self.net, self.inp, corr, motion, self.ii, self.jj)
         # NOTE chen: if we have an external static mask, we could use it here to set the weight to 0 for these pixels!
+        # NOTE chen: interestingly this can worsen performance as well, i.e. the system sometimes can have very helpful pixels on objects
+        # it might make sense to just not use external masks, since the system was trained end-to-end with its own weighting mechanism
         weight = self.remove_dynamic_pixels(weight, self.ii)
 
         if t0 is None:
