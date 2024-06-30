@@ -1,5 +1,5 @@
 import ipdb
-from typing import Optional
+from typing import Optional, Dict
 from tqdm import tqdm
 from termcolor import colored
 
@@ -9,10 +9,10 @@ import torch.multiprocessing as mp
 import numpy as np
 
 from ..slam import SLAM
+from ..gaussian_splatting.eval_utils import EvaluatePacket
 from ..gaussian_splatting.gaussian_renderer import render
 from ..test.visu import plot_side_by_side, create_animation, show_img
-from ..gaussian_splatting.gui import gui_utils, slam_gui
-from ..gaussian_splatting.multiprocessing_utils import clone_obj
+from ..utils import clone_obj
 from ..loop_detection import LoopDetector
 
 
@@ -23,15 +23,10 @@ class SlamTestbed(SLAM):
 
     def __init__(self, *args, **kwargs):
         super(SlamTestbed, self).__init__(*args, **kwargs)
-        # TODO make this configurable
-        self.loop_detector = LoopDetector(
-            self.net,
-            self.video,
-            flow_thresh=35.0,  # 35.0
-            max_orientation_difference=15.0,
-            use_raft=True,
-            device=self.device,
-        )
+        if self.cfg.run_loop_closure:
+            self.loop_detector = LoopDetector(self.cfg.loop_closure, self.net, self.video, device=self.device)
+        else:
+            self.loop_detector = None
 
     def get_render_snapshot(self, view: int, title: Optional[str] = None) -> np.ndarray:
         """Get a snapshot of the current rendering state.
@@ -212,14 +207,19 @@ class SlamTestbed(SLAM):
     # each other
     def get_frame_distance_stats(self):
         """How are distances from loop detector distributed?"""
-        d_2nd, d_3rd = {}, {}
-        for key, val in self.loop_detector.distances.items():
+        d_1st, d_2nd, d_3rd = {}, {}, {}
+        for key, val in self.loop_detector.of_distances.items():
+            # Filter out invalid distances (this mainly happens in bag of words)
+            val = val[~torch.isnan(val)]
+            val = val[~torch.isinf(val)]
             d_sorted = torch.sort(val)[0]
+            if len(d_sorted) > 0:
+                d_1st[key] = d_sorted[0]
             if len(d_sorted) > 1:
                 d_2nd[key] = d_sorted[1]
             if len(d_sorted) > 2:
                 d_3rd[key] = d_sorted[2]
-        return d_2nd, d_3rd
+        return d_1st, d_2nd, d_3rd
 
     def run_track_render(self, stream, backend_freq: int = 10, render_freq: int = 10) -> None:
         """Sequential processing of the stream, where we run
@@ -230,6 +230,10 @@ class SlamTestbed(SLAM):
         This is to check how well the system performs when we run it sequentially.
         Is the system stable? -> Move on to parallel processing but with a well balanced load.
         """
+
+        def convert_to_tensor(x: Dict) -> torch.Tensor:
+            return torch.tensor(list(x.values())).to(self.device)
+
         for frame in tqdm(stream):
             frontend_old_count = self.frontend.optimizer.t1  # How many times did the frontend actually run?
 
@@ -254,17 +258,29 @@ class SlamTestbed(SLAM):
                 if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % render_freq == 0:
                     self.gaussian_mapper(None, None)
 
-                # Run backend occasianally
+                # Run backend and loop closure detection occasianally
                 if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % backend_freq == 0:
-                    # loop_candidates = self.loop_detector.check()
-                    # if loop_candidates is not None:
-                    #     loop_ii, loop_jj = loop_candidates
+                    # if self.loop_detector is not None:
+                    #     loop_candidates = self.loop_detector.check()
+                    #     if loop_candidates is not None:
+                    #         loop_ii, loop_jj = loop_candidates
+                    #     else:
+                    #         loop_ii, loop_jj = None, None
                     #     self.backend(add_ii=loop_ii, add_jj=loop_jj)
                     # else:
                     self.backend()
 
-        ipdb.set_trace()
+        # d_1st, d_2nd, d_3rd = self.get_frame_distance_stats()
+        # d_1st = convert_to_tensor(d_1st)
+        # d_2nd, d_3rd = convert_to_tensor(d_2nd), convert_to_tensor(d_3rd)
 
+        # ipdb.set_trace()
+
+    # FIXME we cannot run mapping_gui with bow loop closure detection
+    # reason: loop_detector.db is not thread_safe and pickable
+    # This likely happens because we attach self.video both to loop_detector and the visualization
+    # TODO what happens when we use the gaussian mapping gui, where we pass the whole SLAM system to the gui?
+    # TODO how to isolate loop detector from the threads? Can we just pass the images to it sequentially from the outside?
     def run(self, stream):
         """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
 
@@ -281,14 +297,33 @@ class SlamTestbed(SLAM):
             p.start()
 
         render_freq = 5  # Run rendering every k frontends
-        backend_freq = 5  # Run backend every 5 frontends
+        backend_freq = 20  # Run backend every 5 frontends
 
         # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200)
         self.run_track_render(stream, backend_freq=backend_freq, render_freq=render_freq)
 
         self.backend()
-        self.gaussian_mapper._update()
+        self.gaussian_mapper._update(delay_to_tracking=False)
         self.gaussian_mapper._last_call(None, None)
 
-        while True:
-            pass
+        # We have done a refinement and used all frames of the video, i.e. we added new cameras of non-keyframes
+        # -> We sort the cams in ascending global timestamp for uid's
+        if self.gaussian_mapper.use_non_keyframes and self.gaussian_mapper.refinement_iters > 0:
+            timestamps = torch.tensor([cam.uid for cam in self.gaussian_mapper.cameras])
+        else:
+            timestamps = torch.tensor(list(self.gaussian_mapper.idx_mapping.keys()))
+        eval_packet = EvaluatePacket(
+            pipeline_params=clone_obj(self.gaussian_mapper.pipeline_params),
+            cameras=self.gaussian_mapper.cameras[:],
+            gaussians=clone_obj(self.gaussian_mapper.gaussians),
+            background=clone_obj(self.gaussian_mapper.background),
+            timestamps=timestamps,
+        )
+
+        # ipdb.set_trace()
+
+        self.terminate(processes, stream, eval_packet)
+
+        # Keep this function going until we manually stop it, so we can inspect everything for how long we want to
+        # while True:
+        #     pass
