@@ -19,8 +19,9 @@ import open3d as o3d
 # o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
 
 from matplotlib.pyplot import get_cmap
-import matplotlib.pyplot as plt
 import matplotlib as mpl
+
+# mpl.use("Qt5Agg")
 
 # Ignore warnings [DANGEROUS] (activate this when debugging!)
 # o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
@@ -597,16 +598,16 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
     param = vis.get_view_control().convert_to_pinhole_camera_parameters()
 
     ### Store the geometry and trajectory visualizaton for later inspection when done
-    print(colored("[Visu] Saving the visualization for later usage ...!", "grey"))
-    try:
-        o3d.io.write_pinhole_camera_parameters(save_root + "/final_viewpoint.json", param)
-        pcl_path = str(Path(save_root) / "pointclouds")
-        cam_path = str(Path(save_root) / "cameras")
-        write_pointclouds(droid_visualization.points, pcl_path, ext="xyzrgb")
-        write_linesets(droid_visualization.cameras, cam_path)
-    except Exception as e:
-        print(colored("[Visu] Something went wrong when saving the visualization ...!", "red"))
-        print(colored(e, "red"))
+    # print(colored("[Visu] Saving the visualization for later usage ...!", "grey"))
+    # try:
+    #     o3d.io.write_pinhole_camera_parameters(save_root + "/final_viewpoint.json", param)
+    #     pcl_path = str(Path(save_root) / "pointclouds")
+    #     cam_path = str(Path(save_root) / "cameras")
+    #     write_pointclouds(droid_visualization.points, pcl_path, ext="xyzrgb")
+    #     write_linesets(droid_visualization.cameras, cam_path)
+    # except Exception as e:
+    #     print(colored("[Visu] Something went wrong when saving the visualization ...!", "red"))
+    #     print(colored(e, "red"))
 
     vis.destroy_window()
     return True
