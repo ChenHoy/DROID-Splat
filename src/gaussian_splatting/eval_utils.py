@@ -1,5 +1,6 @@
 import json
 from termcolor import colored
+from tqdm import tqdm
 import ipdb
 from typing import List, Dict, Optional
 import os
@@ -31,7 +32,6 @@ from ..losses.image import ssim  # TODO chen: refactor these by simply importing
 from ..losses.misc import l1_loss
 from ..losses.depth import ScaleAndShiftInvariantLoss
 from ..utils import psnr, mkdir_p, clone_obj
-import shutil
 
 
 class EvaluatePacket:
@@ -348,7 +348,7 @@ def eval_rendering(
     mkdir_p(save_dir)
     mkdir_p(plot_dir)
 
-    for i, idx in enumerate(tstamps):
+    for i, idx in tqdm(enumerate(tstamps)):
 
         saved_frame_idx.append(idx)
         cam = cams[i]  # NOTE chen: Make sure that the order of tstamps and cams is the same and corresponding!
