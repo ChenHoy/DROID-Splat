@@ -1,13 +1,13 @@
 warmup: 10 # Wait until tracking gets to this frame
 delay: 2 # Delay between tracking and mapping
-use_non_keyframes: True # Use non-keyframes during map refinement
-max_frames_refinement: 80 # Maximum number of frames to optimize during refinement
-use_prior_for_supervision: False # Use the prior for supervision. If not, then use the current filtered map from SLAM
+use_non_keyframes: False # Use non-keyframes during map refinement
+max_frames_refinement: 70 # Maximum number of frames to optimize during refinement
+use_prior_for_supervision: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
 
 # NOTE chen: please use MORE ITERATIONS than prune_densify_every! 
 # it is important to optimize newly introduced Gaussians due to densification!!!
-mapping_iters: 30 # Optimization iterations for selected views
-refinement_iters: 50 # Final Optimization iterations for all views
+mapping_iters: 10 # Optimization iterations for selected views
+refinement_iters: 30 # Final Optimization iterations for all views
 # These 2 flags filter out noisy points before Rendering Optimization
 filter_multiview: True # Only initialize Gaussians that are consistent in multiple views
 filter_uncertainty: False # Only use very certain points for intializing Gaussians
@@ -24,7 +24,7 @@ keyframes:
 
   densify_every: 2 # Densify Gaussians every k updates
   prune_every: 1 # Prune Gaussians every k updates
-  prune_densify_every: 10 # How often to prune and densify gaussians during optimization
+  prune_densify_every: 5 # How often to prune and densify gaussians during optimization
   prune_mode: "abs" # "abs" or "new" How to prune: either absolute visibility or covisibility of new frames
   visibility_th: 2 # Gaussians not visible by visibility_th other frames are pruned
   prune_last: 5 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
@@ -32,7 +32,7 @@ keyframes:
 
   filter: # Parameter for filtering incoming points from the SLAM system
     mv_count_thresh: 2 # Pixels need to be consistent within bin_thresh distance across these k views
-    bin_thresh: 0.01 # Distance between points, this depends on the scene scale, so be careful!
+    bin_thresh: 0.005 # Distance between points, this depends on the scene scale, so be careful!
     confidence_thresh: 0.05 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
 
   mapping:
@@ -67,7 +67,7 @@ opt_params:
 
 loss:
   # Decide which loss terms to use
-  with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
+  with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
   use_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
   use_depth_smoothness_reg: True # Similarity loss between depth and image gradients
 
