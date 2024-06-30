@@ -12,10 +12,12 @@ import torch.multiprocessing as mp
 
 import numpy as np
 import cv2
-
 import matplotlib.pyplot as plt
 
+
+
 from .gaussian_splatting.gui import gui_utils
+from .gaussian_splatting.eval_utils import EvaluatePacket
 from .gaussian_splatting.gaussian_renderer import render
 from .gaussian_splatting.scene.gaussian_model import GaussianModel
 from .gaussian_splatting.camera_utils import Camera
@@ -122,11 +124,6 @@ class GaussianMapper(object):
         rgb = np.uint8(255 * render_pkg["render"].detach().cpu().numpy().transpose(1, 2, 0))
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         cv2.imwrite(render_path, bgr)
-        # Do the same but with cam.original_image
-        rgb = np.uint8(255 * cam.original_image.detach().cpu().numpy().transpose(1, 2, 0))
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(render_path.replace(".png", "_gt.png"), bgr)
-
 
     def camera_from_video(self, idx):
         """Extract Camera objects from a part of the video."""
@@ -135,13 +132,14 @@ class GaussianMapper(object):
             return None
 
         color, depth, depth_prior, intrinsics, c2w, stat_mask = self.video.get_mapping_item(idx, self.device)
-        return self.camera_from_frame(idx, color, c2w, intrinsics, depth, mask=stat_mask)
+        w2c = c2w.inv().matrix()
+        return self.camera_from_frame(idx, color, w2c, intrinsics, depth, mask=stat_mask)
 
     def camera_from_frame(
         self,
         idx: int,
         image: torch.Tensor,
-        pose_c2w: torch.Tensor,
+        w2c: torch.Tensor,
         intrinsics: torch.Tensor,
         depth_init: Optional[torch.Tensor] = None,
         depth: Optional[torch.Tensor] = None,
@@ -159,7 +157,6 @@ class GaussianMapper(object):
         projection_matrix = getProjectionMatrix2(self.z_near, self.z_far, cx, cy, fx, fy, width, height)
         projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
 
-        w2c = torch.linalg.inv(pose_c2w)
         return Camera(
             idx,
             image.contiguous(),
@@ -174,24 +171,25 @@ class GaussianMapper(object):
             mask=mask,
         )
 
-    def get_new_cameras(self):
+    def get_new_cameras(self, delay=0):
         """Get all new cameras from the video."""
         # Only add a batch of cameras in batch_mode
         if self.batch_mode:
-            to_add = range(self.last_idx, self.cur_idx - self.delay)
+            to_add = range(self.last_idx, self.cur_idx - delay)
             to_add = to_add[: self.kf_mng_params.default_batch_size]
         else:
-            to_add = range(self.last_idx, self.cur_idx - self.delay)
+            to_add = range(self.last_idx, self.cur_idx - delay)
 
         for idx in to_add:
             color, depth, depth_prior, intrinsics, c2w, stat_mask = self.video.get_mapping_item(
                 idx, device=self.device
             )
-            # HOTFIX Sanity check
+            w2c = c2w.inv().matrix()
+            # HOTFIX Sanity check for when we dont have any good depth
             if (depth > 0).sum() == 0:
                 depth = None
             cam = self.camera_from_frame(
-                idx, color, c2w, intrinsics, depth_init=depth, depth=depth_prior, mask=stat_mask
+                idx, color, w2c, intrinsics, depth_init=depth, depth=depth_prior, mask=stat_mask
             )
 
             # get the uid's into the self.idx_mapping
@@ -218,7 +216,12 @@ class GaussianMapper(object):
 
         return torch.optim.Adam(opt_params)
 
-    def frame_updater(self):
+    # FIXME can we do a readjustment in case of strong changes in the map?
+    # normally people anchor frames to a segment of the map, they then connect segments based on PoseGraphOptimization (PGO)
+    # When we e.g. do a loop closure, we need to realign the Gaussians of the closed loop segments
+    # Since we dont do PGO, we could only recenter Gaussians based on the changed poses and associated unique_kfIDs
+    # (-> Compute the distance in world coordinates between the two poses and move the Gaussians accordingly)
+    def frame_updater(self, delay=0):
         """Gets the list of frames and updates the depth and pose based on the video.
 
         NOTE: this assumes that the tracking on the video is a better estimate than the Gaussians alone. We
@@ -229,7 +232,7 @@ class GaussianMapper(object):
 
         with self.video.get_lock():
             (dirty_index,) = torch.where(self.video.mapping_dirty.clone())
-            dirty_index = dirty_index[dirty_index < self.cur_idx - self.delay]
+            dirty_index = dirty_index[dirty_index < self.cur_idx - delay]
         # Only update already inserted cameras
         to_update = dirty_index[torch.isin(dirty_index, all_idxs)]
 
@@ -238,8 +241,8 @@ class GaussianMapper(object):
             color, depth, depth_prior, intrinsics, c2w, stat_mask = self.video.get_mapping_item(
                 idx, device=self.device
             )
+            w2c = c2w.inv().matrix()
             cam = all_cameras[idx]
-            w2c = torch.inverse(c2w)
             R = w2c[:3, :3].unsqueeze(0).detach()
             T = w2c[:3, 3].detach()
             # update intrinsics in case we use opt_intrinsics
@@ -260,6 +263,8 @@ class GaussianMapper(object):
         NOTE Use this only after tracking finished for refining!
         """
         all_poses, all_timestamps = trajectory_filler(stream, batch_size=batch_size, return_tstamps=True)
+        # NOTE chen: this assumes that cam.uid will correspond to the position in the video buffer
+        # this will later change, where cam.uid will simply correspond to the global timestamp after adding all the cameras
         already_mapped = [self.video.timestamp[cam.uid] for cam in self.cameras]
         s = self.video.scale_factor
         if self.video.upsampled:
@@ -272,24 +277,26 @@ class GaussianMapper(object):
             if timestamp in already_mapped:
                 continue
 
-            c2w = w2c.inv().matrix()  # [4, 4]
-
+            w2c = w2c.matrix()  # [4, 4]
             # color = stream._get_image(timestamp).squeeze(0).permute(1, 2, 0).contiguous().to(self.device)
             color = stream._get_image(timestamp).clone().squeeze(0).contiguous().to(self.device)
             if not self.video.upsampled:
                 color = color[..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
-            
-            cam = self.camera_from_frame(timestamp, color, c2w, intrinsics)
+            cam = self.camera_from_frame(timestamp, color, w2c, intrinsics)
             new_cams.append(cam)
 
         return new_cams
 
+    # TODO how to still densify and grow? should we adjust this in relation to the current number of Gaussians?
+    # FIXME we somehow have some odd Gaussians in the middle of the scene
+    # these seems to be initialized randomly from the ones before
     def map_refinement(
         self,
         num_iters: int = 100,
         optimize_poses: bool = False,
         prune: bool = False,
         random_frames: Optional[float] = None,
+        kf_at_least: Optional[float] = None,
     ) -> None:
         """Refine the map with color only optimization. Instead of going over last frames, we always select random frames from the whole map."""
 
@@ -301,33 +308,40 @@ class GaussianMapper(object):
                     keyframes=self.cameras,
                 )
             )
-        if prune:
-            self.abs_visibility_prune(self.kf_mng_params.abs_visibility_th)
 
+# Optimize over a random subset of all frames
         if random_frames is not None:
-            n_rand = int(len(self.cameras) * random_frames)
+            n_frames = int(len(self.cameras) * random_frames)
             self.info(
-                f"Info. Going over {n_rand} random frames instead of {len(self.cameras)} of frames for optimization ..."
+                f"Info. Going over {n_frames} random frames instead of {len(self.cameras)} of frames for optimization ..."
             )
-            if n_rand > self.max_frames_refinement:
-                n_chunks = math.ceil(n_rand / self.max_frames_refinement)
-                self.info(
-                    f"Warning. {n_rand} Frames is too many! Optimizing over {n_chunks} chunks of frames with size {self.max_frames_refinement} ..."
-                )
         else:
-            if len(self.cameras) > self.max_frames_refinement:
-                n_chunks = len(self.cameras) // self.max_frames_refinement
-                self.info(
-                    f"Warning. {len(self.cameras)} Frames is too many! Optimizing over {n_chunks} chunks of frames with size {self.max_frames_refinement} ..."
-                )
-
+            n_frames = len(self.cameras)
+        # Divide the frames we want to optimize into handable chunks if too many
+        if n_frames > self.max_frames_refinement:
+            n_chunks = math.ceil(n_frames / self.max_frames_refinement)
+            self.info(
+                f"Warning. {n_frames} Frames is too many! Optimizing over {n_chunks} chunks of frames with size {self.max_frames_refinement} ..."
+            )
 
         for iter in tqdm(range(num_iters), desc=colored("Gaussian Refinement", "magenta"), colour="magenta"):
             # Select a random subset of frames to optimize over
             if random_frames is not None:
-                abs_rand = int(len(self.cameras) * random_frames)
-                to_refine = np.random.choice(len(self.cameras), abs_rand, replace=False)
-                frames = [self.cameras[i] for i in to_refine]
+                total_rand = int(len(self.cameras) * random_frames)
+                kf_cams = [cam for cam in self.cameras if cam.uid in self.idx_mapping]
+                non_kf_cams = [cam for cam in self.cameras if cam.uid not in self.idx_mapping]
+                # make sure that at least k% kf are in each chunk
+                if kf_at_least is not None and len(non_kf_cams) > 0:
+                    kf_rand = int(total_rand * kf_at_least)
+                    to_refine_kf = np.random.choice(len(kf_cams), kf_rand, replace=False)
+                    kf_frames = [kf_cams[i] for i in to_refine_kf]
+                    nonkf_rand = total_rand - kf_rand
+                    to_refine_nonkf = np.random.choice(len(non_kf_cams), nonkf_rand, replace=False)
+                    nonkf_frames = [non_kf_cams[i] for i in to_refine_nonkf]
+                    frames = kf_frames + nonkf_frames
+                else:
+                    to_refine = np.random.choice(len(self.cameras), total_rand, replace=False)
+                    frames = [self.cameras[i] for i in to_refine]
             else:
                 frames = self.cameras
 
@@ -347,6 +361,7 @@ class GaussianMapper(object):
                 loss = self.mapping_step(
                     iter, frames, self.kf_mng_params.refinement, densify=False, optimize_poses=optimize_poses
                 )
+
             print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss / len(frames)}", "cyan"))
             self.loss_list.append(loss / len(frames))
 
@@ -354,14 +369,15 @@ class GaussianMapper(object):
                 self.q_main2vis.put_nowait(
                     gui_utils.GaussianPacket(
                         gaussians=clone_obj(self.gaussians),
-                        #keyframes=self.cameras,
+                        keyframes=frames,
                     )
                 )
             
 
 
     def get_mapping_update(self, frames: List[Camera]) -> Dict:
-        """Get the index, poses and depths of the frames that were already optimized."""
+        """Get the index, poses and depths of the frames that were already optimized. We can use this to then feedback
+        the outputs of the Gaussian Rendering optimization back into the video.map."""
 
         # Render frames to extract depth
         index, poses, depths = [], [], []
@@ -381,9 +397,21 @@ class GaussianMapper(object):
                     transform = torch.eye(4, device=self.device)
                     transform[:3, :3], transform[:3, 3] = view.R, view.T
                     poses.append(transform)
-                depths.append(render_pkg["depth"])
+                depths.append(clone_obj(render_pkg["depth"].detach()))
+
+            torch.cuda.empty_cache()
+            gc.collect()
 
         return {"index": index, "poses": poses, "depths": depths}
+
+    def get_camera_trajectory(self, frames: List[Camera]) -> Dict:
+        """Get the camera trajectory of the frames in world coordinates."""
+        poses = {}
+        for view in frames:
+            w2c = torch.eye(4, device=self.device)
+            w2c[:3, :3], w2c[:3, 3] = view.R, view.T
+            poses[view.uid] = w2c
+        return poses
 
     def maybe_clean_pose_update(self, frames: List[Camera]) -> None:
         """Check if pose updates are not degenerate and set to zero if they are."""
@@ -563,7 +591,9 @@ class GaussianMapper(object):
         # Reinstatiate an empty traj_filler, we only reuse this during eval
         # this deletes the graph and frees up memory
         del self.slam.traj_filler
-        self.slam.traj_filler = PoseTrajectoryFiller(net=self.slam.net, video=self.slam.video, device=self.slam.device)
+        self.slam.traj_filler = PoseTrajectoryFiller(
+            self.slam.cfg, net=self.slam.net, video=self.slam.video, device=self.slam.device
+        )
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -575,15 +605,20 @@ class GaussianMapper(object):
         # Keyframe cameras we add during SLAM: cam.uid = video.idx, which is the position in our video buffer
         # Non-keyframe cameras we interpolated: cam.uid = stream.timestamp
         # We can get the global mapping, because: video.timestamp[video.idx] = stream.timestamp
-        new_mapping = {}
+        new_mapping, masked_mapping = {}, {}
         for cam in self.cameras:
             new_id = int(self.video.timestamp[cam.uid].item())
+            masked_mapping[cam.uid] = (new_id, self.gaussians.unique_kfIDs == cam.uid)
             new_mapping[new_id] = cam.uid  # Memoize from timestamp to old video index
             cam.uid = new_id  # Reassign local keyframe ids to global stream ids
+
         self.idx_mapping = new_mapping
+        # Update the keyframe ids for each Gaussian, so they fit the new global cam.uid's
+        for key, val in masked_mapping.items():
+            new_id, mask = val
+            self.gaussians.unique_kfIDs[mask] = new_id
 
         self.cameras += non_kf_cams  # Add to set of cameras
-
         # Reorder according to global uid
         self.cameras = sorted(self.cameras, key=lambda x: x.uid)
 
@@ -599,33 +634,38 @@ class GaussianMapper(object):
         torch.cuda.empty_cache()
         gc.collect()
 
-        self.info(f"#Gaussians before Map Refinement: {len(self.gaussians)}")
-
-        if self.slam.dataset is not None and self.use_non_keyframes:
-            self.add_nonkeyframe_cameras()
-
-        self.info("\nMapping refinement starting")
         # NOTE MonoGS does 26k iterations for a single camera, while we do 100 for multiple cameras
-        self.map_refinement(num_iters=self.refinement_iters, optimize_poses=True, random_frames=0.2)
-        self.info(f"#Gaussians after Map Refinement: {len(self.gaussians)}")
-        self.info("Mapping refinement finished")
+        if self.refinement_iters > 0:
 
-        self.info(f"Feeding back into video.map")
+            self.info(f"Gaussians before Map Refinement: {len(self.gaussians)}")
+            # Add more information for refinement if wanted
+            if self.slam.dataset is not None and self.use_non_keyframes:
+                self.add_nonkeyframe_cameras()
+
+            self.info("\nMapping refinement starting")
+            # Only optimize over 20% of the whole video and always make sure that 30% of each batch is keyframes
+            self.map_refinement(
+                num_iters=self.refinement_iters, optimize_poses=True, random_frames=0.2, kf_at_least=0.3
+            )
+            self.info(f"#Gaussians after Map Refinement: {len(self.gaussians)}")
+            self.info("Mapping refinement finished")
+
+            # Free memory after doing refinement
+            torch.cuda.empty_cache()
+            gc.collect()
+
+        self.info(f"Feeding back into video.map ...")
         # Filter out the non-keyframes which are not stored in the video.object
         only_kf = [cam for cam in self.cameras if cam.uid in self.idx_mapping]
         to_set = self.get_mapping_update(only_kf)
         self.video.set_mapping_item(**to_set)
-
-        # Free memory after doing refinement
-        torch.cuda.empty_cache()
-        gc.collect()
 
         self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
         self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
 
         if self.save_renders:
             for cam in self.cameras:
-                self.save_render(cam, f"{self.output}/renders/final/{cam.uid}.png")
+                self.save_render(cam, f"{self.output}/intermediate_renders/final/{cam.uid}.png")
 
         plot_losses(
             self.loss_list,
@@ -637,23 +677,40 @@ class GaussianMapper(object):
         print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Final mapping loss: {self.loss_list[-1]}", "cyan"))
         self.info(f"{len(self.iteration_info)} iterations, {len(self.cameras)/len(self.iteration_info)} cams/it")
 
-
-
+        # TODO uncomment after we are done debugging
         ## export the cameras and gaussians to the terminate process
-        if self.evaluate:
-            mapping_queue.put(
-                gui_utils.EvaluatePacket(
-                    pipeline_params=clone_obj(self.pipeline_params),
-                    cameras=self.cameras[:],
-                    gaussians=clone_obj(self.gaussians),
-                    background=clone_obj(self.background),
-                )
-            )
-        else:
-            mapping_queue.put("None")
-        received_item.wait()  # Wait until the Packet got delivered
+        # if self.evaluate:
+        #     mapping_queue.put(
+        #         EvaluatePacket(
+        #             pipeline_params=clone_obj(self.pipeline_params),
+        #             cameras=self.cameras[:],
+        #             gaussians=clone_obj(self.gaussians),
+        #             background=clone_obj(self.background),
+        #         )
+        #     )
+        # else:
+        #     mapping_queue.put("None")
+        # received_item.wait()  # Wait until the Packet got delivered
 
-    def _update(self):
+    def add_new_gaussians(self, cameras: List[Camera]) -> Camera | None:
+        """Initialize new Gaussians based on the provided views (images, poses (, depth))"""
+        # Sanity check
+        if len(cameras) == 0:
+            return None
+
+        for cam in cameras:
+            if not self.initialized:
+                self.initialized = True
+                self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=True)
+                self.info(f"Initialized with {len(self.gaussians)} gaussians")
+            else:
+                ng_before = len(self.gaussians)
+                self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=False)
+                # self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on view {cam.uid}")
+
+        return cam    
+
+    def _update(self, delay_to_tracking=True):
         """Update our rendered map by:
         i) Pull a filtered update from the sparser SLAM map
         ii) Add new Gaussians based on new views
@@ -664,7 +721,7 @@ class GaussianMapper(object):
         """
         self.info("Currently has: {} gaussians".format(len(self.gaussians)))
 
-        # Filter map based on multiview_consistency and uncertainty
+        ### Filter map based on multiview_consistency and uncertainty
         # NOTE This could be improved by only filtering the new and existing cameras instead of video.mapping_dirty
         self.video.filter_map(
             min_count=self.kf_mng_params.filter.mv_count_thresh,
@@ -674,32 +731,38 @@ class GaussianMapper(object):
             use_uncertainty=self.filter_uncertainty,
         )
 
-        self.get_new_cameras()  # Add new cameras
+        if delay_to_tracking:
+            delay = self.delay
+        else:
+            delay = 0
+
+        ### Add new cameras based on video index
+        self.get_new_cameras(delay=delay)  # Add new cameras
         if len(self.new_cameras) != 0:
             self.last_idx = self.new_cameras[-1].uid + 1
             self.info(f"Added {len(self.new_cameras)} new cameras: {[cam.uid for cam in self.new_cameras]}")
 
-        # This assumes, that we get a useful update from the SLAM system!
-        self.frame_updater()  # Update all changed cameras with new information from SLAM system
-
-        for cam in self.new_cameras:
-            if not self.initialized:
-                self.initialized = True
-                self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=True)
-                self.info(f"Initialized with {len(self.gaussians)} gaussians")
-            else:
-                ng_before = len(self.gaussians)
-                self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=False)
-                # self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on view {cam.uid}")
-
-
-
+        ### Update the frames based on Tracker and add new Gaussians
+        # NOTE chen: This assumes, that we get a useful update from the SLAM system!
+        # FIXME: we still need to correct loop closures or else we need to rely on expensive re-optimization!
+        # TODO solution reanchor the means of the Gaussians to new iproj depth maps
+        # Problem: it would not make sense to update the whole map by solving a global registration problem
+        # other frameworks resolve this because they have a PoseGraphOptimization between local segments
+        # a loop closure is then defined between segments, i.e. we can use the resolving transformations directly on all segments
+        # TODO solution would be to store both the video buffer map and the Gaussians in a shared datastructure for spatial grouping
+        # -> ultra naive, simply record where we had the biggest changes locally after a global optimization
+        # to do this simply memoize the poses before running bundle adjustment and afterwards and then we know which Gaussians from a certain frame need to be relocated
+        # TODO are gaussians really anchored?
+        # -> naive: use hash map for different temporal segments since they will likely be close to each other, we can memoize during a loop closure which segments are connected
+        # -> advanced: use an octree like datastructure to spatially divide frames into group/segments.
+        self.frame_updater(delay=delay)  # Update all changed cameras with new information from SLAM system
+        last_new_cam = self.add_new_gaussians(self.new_cameras)
         # We might have 0 Gaussians in some cases, so no need to run optimizer
         if len(self.gaussians) == 0:
             self.info("No Gaussians to optimize, skipping mapping step ...")
             return
 
-        # Optimize gaussians
+        ### Optimize gaussians
         do_densify = len(self.iteration_info) % self.kf_mng_params.densify_every == 0
         for iter in tqdm(
             range(self.mapping_iters), desc=colored("Gaussian Optimization", "magenta"), colour="magenta"
@@ -713,16 +776,10 @@ class GaussianMapper(object):
                 iter, frames, self.kf_mng_params.mapping, densify=do_densify, optimize_poses=self.optimize_poses
             )
             self.loss_list.append(loss / len(frames))
-
         # Keep track of how well the Rendering is doing
         print(colored("\n[Gaussian Mapper] ", "magenta"), colored(f"Loss: {self.loss_list[-1]}", "cyan"))
 
-
-        # if len(self.iteration_info) % 1 == 0:
-        #     render_pkg = render(self.new_cameras[-1], self.gaussians, self.pipeline_params, self.background, device=self.device)
-        #     opacity = render_pkg["opacity"]
-        #     self.gaussians.densify_w_opacity(opacity, self.new_cameras[-1])
-
+        ### Prune unreliable Gaussians
         if len(self.iteration_info) % self.kf_mng_params.prune_every == 0:
             if self.kf_mng_params.prune_mode == "abs":
                 # Absolute visibility pruning for all gaussians
@@ -730,41 +787,46 @@ class GaussianMapper(object):
             elif self.kf_mng_params.prune_mode == "new":
                 self.covisibility_pruning()  # Covisibility pruning for recently added gaussians
 
-        
-
-        # Feed back after optimization and pruning
+        ### Feedback new state of map to Tracker
         if self.feedback_map:
             to_set = self.get_mapping_update(frames)
             self.info("Feeding back to Tracking ...")
             self.video.set_mapping_item(**to_set)
 
-        # Update visualization
+        ### Update visualization
         if self.use_gui:
-            cam = self.new_cameras[-1] if len(self.new_cameras) > 0 else self.cameras[-1]
-            if cam.depth is not None:
-                if not self.supervise_with_prior:
-                    gtdepth = cam.depth.detach().cpu().numpy()
+            # Get the latest frame we added together with the input
+            if len(self.new_cameras) > 0 and last_new_cam is not None:
+                img = last_new_cam.original_image
+                if last_new_cam.depth is not None:
+                    if not self.supervise_with_prior:
+                        gtdepth = last_new_cam.depth.detach().cpu().numpy()
+                    else:
+                        gtdepth = last_new_cam.depth_prior.detach().cpu().numpy()
                 else:
-                    gtdepth = cam.depth_prior.detach().cpu().numpy()
+                    gtdepth = None
+            # We did not have any new input, but refine the Gaussians
             else:
-                gtdepth = None
+                img, gtdepth = None, None
+                last_new_cam = self.cameras[-1]
+
             self.q_main2vis.put_nowait(
                 gui_utils.GaussianPacket(
                     gaussians=clone_obj(self.gaussians),
-                    current_frame=cam,
+                    current_frame=last_new_cam,
                     keyframes=self.cameras,
                     kf_window=None,
-                    gtcolor=(cam.original_image),
+                    gtcolor=img,
                     gtdepth=gtdepth,
                 )
             )
 
-        # Save renders
+        ### Save renders for debugging and visualization
         if self.save_renders:
             # Save only every 5th camera to save disk spacse
             for cam in self.cameras:
                 if cam.uid % 5 == 0:
-                    self.save_render(cam, f"{self.output}/renders/mapping/{cam.uid}.png")
+                    self.save_render(cam, f"{self.output}/intermediate_renders/temp/{cam.uid}.png")
 
         self.iteration_info.append(len(self.new_cameras))
         # Keep track of added cameras
@@ -774,12 +836,12 @@ class GaussianMapper(object):
     def __call__(self, mapping_queue: mp.Queue, received_item: mp.Event, the_end=False):
 
         # self.cur_idx = int(self.video.filtered_id.item())
-        self.cur_idx = self.video.counter.value
+        self.cur_idx = self.video.counter.value + 1
         if self.last_idx + self.delay < self.cur_idx and self.cur_idx > self.warmup:
             self._update()
             return False
 
         elif the_end and self.last_idx + self.delay >= self.cur_idx:
-            self._update()  # Run another call to catch the last batch of keyframes
+            self._update(delay_to_tracking=False)  # Run another call to catch the last batch of keyframes
             self._last_call(mapping_queue=mapping_queue, received_item=received_item)
             return True
