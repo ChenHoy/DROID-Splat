@@ -8,8 +8,8 @@ opt_intr: True # Ensure, that you dont use scale_optimization in prgbd mode!
 
 data:
   cam:
-    H_out: 272
-    W_out: 480
+    H_out: 480
+    W_out: 272
 
 tracking:
   buffer_size: 512
