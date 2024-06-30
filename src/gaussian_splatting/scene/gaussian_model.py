@@ -15,10 +15,11 @@ from termcolor import colored
 
 import numpy as np
 import open3d as o3d
+
 import torch
+from torch import nn
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
-from torch import nn
 
 from ..utils.general_utils import (
     build_rotation,
@@ -30,7 +31,17 @@ from ..utils.general_utils import (
 )
 from ..utils.graphics_utils import BasicPointCloud, getWorld2View2
 from ..utils.sh_utils import RGB2SH
-from ..utils.system_utils import mkdir_p
+
+def mkdir_p(folder_path):
+    from errno import EEXIST
+    # Creates a directory. equivalent to using mkdir -p on the command line
+    try:
+        os.makedirs(folder_path)
+    except OSError as exc:  # Python >2.5
+        if exc.errno == EEXIST and os.path.isdir(folder_path):
+            pass
+        else:
+            raise
 
 
 class GaussianModel:
@@ -365,6 +376,7 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
 
     def check_nans(self):
+        """Remove Gaussians with an invalid state, i.e. nan or inf attributes."""
         invalid = torch.isnan(self._xyz) | torch.isinf(self._xyz)
         invalid = invalid | torch.isnan(self._scaling) | torch.isinf(self._scaling)
         if invalid.ndim > 1:
@@ -496,7 +508,7 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
-        # FIXME highly suspsect of creating memory bug
+        # FIXME highly suspect of creating memory bug
         # raises sometimes RuntimeError: out_ptr == out_accessor[thread_count_nonzero[tid + 1]].data()
         self.unique_kfIDs = self.unique_kfIDs[valid_points_mask.cpu()]
         self.n_obs = self.n_obs[valid_points_mask.cpu()]
