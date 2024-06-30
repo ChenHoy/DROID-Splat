@@ -20,6 +20,9 @@ from evo.core.trajectory import PosePath3D, PoseTrajectory3D
 from evo.tools.plot import PlotMode, prepare_axis, traj, traj_colormap
 from matplotlib import pyplot as plt
 
+from evo.tools.settings import SETTINGS
+from matplotlib import pyplot as plt
+
 from .gaussian_renderer import render
 from .scene.gaussian_model import GaussianModel
 from .camera_utils import Camera
