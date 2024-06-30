@@ -422,6 +422,14 @@ class FactorGraph:
         edge_num = len(self.ii)
         return edge_num
 
+    def remove_dynamic_pixels(self, weight: torch.Tensor, ii: torch.Tensor) -> torch.Tensor:
+        """Simply use an external mask to remove dynamic pixels from the optimization"""
+        is_static = self.video.static_masks[ii]
+        s = self.video.scale_factor
+        is_static_down = is_static[..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
+        weight[~is_static_down[None, ...]] = 0.0
+        return weight
+
     @torch.cuda.amp.autocast(enabled=True)
     def update(self, t0=None, t1=None, iters=4, use_inactive=False, lm=1e-4, ep=0.1, motion_only=False):
         """run update operator on factor graph"""
@@ -437,6 +445,10 @@ class FactorGraph:
         corr = self.corr(coords1)
 
         self.net, delta, weight, damping, upmask = self.update_op(self.net, self.inp, corr, motion, self.ii, self.jj)
+        # NOTE chen: if we have an external static mask, we could use it here to set the weight to 0 for these pixels!
+        # NOTE chen: interestingly this can worsen performance as well, i.e. the system sometimes can have very helpful pixels on objects
+        # it might make sense to just not use external masks, since the system was trained end-to-end with its own weighting mechanism
+        weight = self.remove_dynamic_pixels(weight, self.ii)
 
         if t0 is None:
             t0 = max(1, self.ii.min().item() + 1)
@@ -531,6 +543,7 @@ class FactorGraph:
                     net, delta, weight, damping, upmask = self.update_op(
                         self.net[:, v], self.video.inps[None, iis], corr1, motion[:, v], iis, jjs
                     )
+                    weight = self.remove_dynamic_pixels(weight, iis)
 
                     if self.upsample:
                         self.video.upsample(torch.unique(iis, sorted=True), upmask)

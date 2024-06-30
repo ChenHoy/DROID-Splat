@@ -1,5 +1,5 @@
 pretrained: ./pretrained/droid.pth
-buffer: 256 
+buffer: 512
 beta: 0.7  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
 warmup: 8
 upsample: True
@@ -31,7 +31,6 @@ frontend:
   loop_nms: 12 # default GO-SLAM: 12
 
   release_cache: False # Tradeoff: memory vs. speed, This can save up to ~5GB
-
   
 backend:
   warmup: null
@@ -43,6 +42,6 @@ backend:
 
   use_loop_closure: False
   loop_window: 50 # NOTE make sure that loop window is not bigger than the general window of the backend
-  loop_thresh: 50.0  
+  loop_thresh: 50.0 # You want this one to be big, so we add enough edges for loops
   loop_radius: 2
   loop_nms: 12 # default GO-SLAM: 12

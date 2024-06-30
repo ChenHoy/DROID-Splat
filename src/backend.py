@@ -266,9 +266,9 @@ class Backend:
             upsample=self.upsample,
         )
         n_edges = graph.add_proximity_factors(rad=radius, nms=nms, beta=self.beta, thresh=thresh, remove=False)
-        print(colored(f"[Backend] Performing full scale prior optimization over map with: {n_edges} edges!", "blue"))
+        self.info(f"Performing full scale prior optimization over map with: {n_edges} edges!")
         graph.prior_update_lowmem(t0=t_start, t1=t_end, steps=steps, lm=lm, ep=ep)
-        print(colored("[Backend] Done!", "blue"))
+        self.info("Done!")
 
         # Empty cache immediately and release memory
         graph.clear_edges()
@@ -279,16 +279,17 @@ class Backend:
         with self.video.get_lock():
             self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
 
-    # TODO implement sparse BA similar to HI-SLAM
+    # TODO implement sparse Pose Graph Optimization similar to HI-SLAM
     # we dont want to optimize all the local frames, only global links in a loop closure fashion
     # This only optimizes the SIM3 poses, not disparity or intrinsics
-    # NOTE local edges between frames are set to relative constants, so we dont need to optimize them
-    # TODO what logic does this now follow? how do we select the sparse window parts which we wish to connect?!
     @torch.no_grad()
     def sparse_ba(
         self, t_start: int = 0, t_end: Optional[int] = None, steps: int = 6, iter: int = 4, motion_only: bool = False
     ):
-        """Dense Bundle Adjustment over the whole map. Used for global optimization in the Backend."""
+        """Pose graph optimization over multiple segments of the map. Used as sparse global optimization in the Backend.
+
+        This is much more memory efficient and allows to scale to long-term video with thousands of key frames.
+        """
 
         if t_end is None:
             t_end = self.video.counter.value

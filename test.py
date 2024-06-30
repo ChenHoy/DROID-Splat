@@ -78,7 +78,7 @@ def get_in_the_wild_heuristics(ht: int, wd: int, strategy: str = "generic") -> t
     return torch.Tensor([fx, fy, cx, cy], dtype=torch.float32)
 
 
-@hydra.main(version_base=None, config_path="./configs/", config_name="slam")
+@hydra.main(version_base=None, config_path="./configs/", config_name="test")
 def run_slam(cfg):
 
     output_folder = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir

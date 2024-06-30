@@ -10,7 +10,7 @@ from matplotlib.pyplot import get_cmap
 import matplotlib as mpl
 
 # FIXME why do we only sometimes get the error because wrong backend?!
-mpl.use("Qt5Agg")
+# mpl.use("Qt5Agg")
 
 
 def array2rgb(

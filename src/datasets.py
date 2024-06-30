@@ -13,6 +13,8 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from kornia.geometry.linalg import compose_transformations
 
+from .geom import matrix_to_lie
+
 
 def readEXR_onlydepth(filename: str):
     """
@@ -122,7 +124,7 @@ class BaseDataset(Dataset):
 
         self.has_dyn_masks = False
         self.background_value = 0
-        self.dilate_masks = True # NOTE chen: some datasets (e.g. Sintel) have masks too small
+        self.dilate_masks = True  # NOTE chen: some datasets (e.g. Sintel) have masks too small
         self.dilation_kernel_size = 5
         self.return_stat_masks = cfg.get("with_dyn", False)
         self.n_img = len(self.color_paths)
@@ -130,6 +132,8 @@ class BaseDataset(Dataset):
         self.depth_paths = None
         self.mask_paths = None
         self.poses = None
+        self.relative_poses = False  # True to test the gt stream mapping
+
         self.image_timestamps = None
 
         self.H, self.W = int(cfg.data.cam.H), int(cfg.data.cam.W)
@@ -249,7 +253,7 @@ class BaseDataset(Dataset):
             intrinsic[2] -= edge
 
         if self.poses is not None:
-            pose = torch.from_numpy(self.poses[index]).float()
+            pose = matrix_to_lie(torch.tensor(self.poses[index])).float()
         else:
             pose = None
 
@@ -258,12 +262,12 @@ class BaseDataset(Dataset):
             # -> TODO: in this case create array of masks with index 0 static scene, and others individual dyn. masks?
             # NOTE right now we only store a single static scene mask
             mask = cv2.imread(self.mask_paths[index], cv2.IMREAD_GRAYSCALE)
-            mask = mask == self.background_value # static mask
+            mask = mask == self.background_value  # static mask
             if self.dilate_masks:
-                mask = np.uint8(~mask) # Invert to dynamic mask
-                kernel = np.ones((self.dilation_kernel_size, self.dilation_kernel_size), np.uint8) 
-                mask = cv2.dilate(mask, kernel, iterations=1) 
-                mask = ~mask.astype(bool) # Return back to static mask
+                mask = np.uint8(~mask)  # Invert to dynamic mask
+                kernel = np.ones((self.dilation_kernel_size, self.dilation_kernel_size), np.uint8)
+                mask = cv2.dilate(mask, kernel, iterations=1)
+                mask = ~mask.astype(bool)  # Return back to static mask
             mask = np.uint8(mask)
             mask = cv2.resize(mask, (W_out_with_edge, H_out_with_edge))
             mask = torch.from_numpy(mask).bool()
@@ -326,9 +330,7 @@ class Replica(BaseDataset):
         self.load_poses(os.path.join(self.input_folder, "traj.txt"))
         self.poses = self.poses[:: self.stride]
 
-        # FIXME chen: what exactly is this part?
-        relative_poses = True  # True to test the gt stream mapping
-        if relative_poses:
+        if self.relative_poses:
             self.poses = torch.from_numpy(np.array(self.poses))
             trans_10 = torch.inverse(self.poses[0].unsqueeze(0).repeat(self.poses.shape[0], 1, 1))
             self.poses = compose_transformations(trans_10, self.poses).numpy()
@@ -354,7 +356,7 @@ class TartanAir(BaseDataset):
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
-            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model, "*.npy")))
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model + "_left", "*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
@@ -367,8 +369,7 @@ class TartanAir(BaseDataset):
         self.load_poses(os.path.join(self.input_folder, "pose_left.txt"))
         self.poses = self.poses[:: self.stride]
 
-        relative_poses = True  # True to test the gt stream mapping
-        if relative_poses:
+        if self.relative_poses:
             self.poses = torch.from_numpy(np.array(self.poses))
             trans_10 = torch.inverse(self.poses[0].unsqueeze(0).repeat(self.poses.shape[0], 1, 1))
             self.poses = compose_transformations(trans_10, self.poses).numpy()
@@ -468,9 +469,10 @@ class TotalRecon(BaseDataset):
         for path in paths:
             RTK = np.loadtxt(path)
 
-            c2w = np.eye(4)
-            c2w[:3, :3] = RTK[:3, :3]
-            c2w[:3, 3] = RTK[:3, 3]
+            w2c = np.eye(4)
+            w2c[:3, :3] = RTK[:3, :3]
+            w2c[:3, 3] = RTK[:3, 3]
+            c2w = np.linalg.inv(w2c)
             self.poses.append(c2w)
 
     def set_intrinsics(self):
@@ -501,8 +503,8 @@ class KITTI(BaseDataset):
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
 
-        # FIXME chen: why fake poses if we can read them?!
-        self.poses = [np.eye(4) for _ in range(self.n_img)]  # Fake gt poses
+        # TODO read the actual poses from the dataset
+        self.poses = None
 
 
 class Azure(BaseDataset):
@@ -594,7 +596,6 @@ class CoFusion(BaseDataset):
         self.poses = []
         for i in range(self.n_img):
             c2w = np.eye(4)
-
             self.poses.append(c2w)
 
 
@@ -666,6 +667,7 @@ class TUM_RGBD(BaseDataset):
             depths += [os.path.join(datapath, depth_data[j, 1])]
             # timestamp tx ty tz qx qy qz qw
             c2w = self.pose_matrix_from_quaternion(pose_vecs[k])
+            # NOTE always fix the first pose to identity
             if inv_pose is None:
                 inv_pose = np.linalg.inv(c2w)
                 c2w = np.eye(4)
@@ -686,6 +688,7 @@ class TUM_RGBD(BaseDataset):
         return pose
 
 
+# TODO refactor to inherit from TUMRGBD, since it uses similar methods
 class ETH3D(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(ETH3D, self).__init__(cfg, device)
@@ -940,7 +943,7 @@ class EuRoC(BaseDataset):
             intrinsic[3] -= edge
 
         if self.poses is not None:
-            pose = torch.from_numpy(self.poses[index]).float()
+            pose = matrix_to_lie(torch.tensor(self.poses[index])).float()
         else:
             pose = None
 

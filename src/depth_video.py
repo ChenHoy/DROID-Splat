@@ -62,8 +62,8 @@ class DepthVideo:
 
         self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float)
         self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
-        self.poses = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # w2c quaterion
-        self.poses_gt = torch.zeros(buffer, 4, 4, device=device, dtype=torch.float).share_memory_()  # c2w matrix
+        self.poses = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
+        self.poses_gt = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
         self.disps = torch.ones(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         self.disps_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
         # Estimated Uncertainty weights for Optimization reduced for each node from factor graph
@@ -85,7 +85,7 @@ class DepthVideo:
 
         ### Initialize poses to identity transformation
         self.poses[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
-        self.poses_gt[:] = torch.eye(4, dtype=torch.float, device=device)
+        self.poses_gt[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
 
         ### Additional flags for multi-view filter -> Clean map for rendering ###
         if self.cfg.tracking.upsample:
@@ -131,13 +131,13 @@ class DepthVideo:
             # NOTE chen: we always work with the downscaled images/disps for optimization so store intrinsics at that scale
             self.intrinsics[index] = item[5] / s
 
-        if len(item) > 6:
+        if len(item) > 6 and item[6] is not None:
             self.fmaps[index] = item[6]
 
-        if len(item) > 7:
+        if len(item) > 7 and item[7] is not None:
             self.nets[index] = item[7]
 
-        if len(item) > 8:
+        if len(item) > 8 and item[8] is not None:
             self.inps[index] = item[8]
 
         if len(item) > 9 and item[9] is not None:
@@ -167,6 +167,35 @@ class DepthVideo:
             )
 
         return item
+
+    def remove(self, index) -> None:
+        """Given a list of indices, we want to reset these items to the initial values.
+
+        Example use case: In the trajectory filler we use a small intermediate buffer at the end of the video
+        to optimize intermediate poses before returning them. Keeping the overall video buffer clean afterwards should
+        be a priority.
+        """
+        self.timestamp[index] = torch.zeros_like(self.timestamp[index], dtype=torch.float, device=self.device)
+        self.images[index] = torch.zeros_like(self.images[index], dtype=torch.float, device=self.device)
+        self.intrinsics[index] = torch.zeros_like(self.intrinsics[index], dtype=torch.float, device=self.device)
+
+        zero_poses = torch.zeros_like(self.poses[index], dtype=torch.float, device=self.device)
+        zero_poses[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.device)
+        self.poses[index] = zero_poses
+        self.poses_gt[index] = zero_poses
+
+        self.disps[index] = torch.ones_like(self.disps[index], dtype=torch.float, device=self.device)
+        self.disps_up[index] = torch.zeros_like(self.disps_up[index], dtype=torch.float, device=self.device)
+        self.disps_sens[index] = torch.zeros_like(self.disps_sens[index], dtype=torch.float, device=self.device)
+        self.disps_sens_up[index] = torch.zeros_like(self.disps_sens_up[index], dtype=torch.float, device=self.device)
+        self.scales[index] = torch.ones_like(self.scales[index], dtype=torch.float, device=self.device)
+        self.shifts[index] = torch.zeros_like(self.shifts[index], dtype=torch.float, device=self.device)
+
+        self.fmaps[index] = torch.zeros_like(self.fmaps[index], dtype=torch.half, device=self.device)
+        self.nets[index] = torch.zeros_like(self.nets[index], dtype=torch.half, device=self.device)
+        self.inps[index] = torch.zeros_like(self.inps[index], dtype=torch.half, device=self.device)
+
+        self.static_masks[index] = torch.ones_like(self.static_masks[index], dtype=torch.bool, device=self.device)
 
     def append(self, *item):
         with self.get_lock():
@@ -275,14 +304,13 @@ class DepthVideo:
             else:
                 depth_prior = est_depth
 
+            # [7, 1]
             if use_gt:
-                c2w = self.poses_gt[index].clone().to(device)  # [4, 4]
+                c2w = lietorch.SE3(self.poses_gt[index].clone()).to(device)
             else:
-                # origin alignment
-                w2c = lietorch.SE3(self.poses[index].clone()).to(device)  # Tw(droid)_to_c
-                c2w = w2c.inv().matrix()  # [4, 4]
-
-        return image, est_depth, depth_prior, intrinsics, c2w, static_mask
+                w2c = lietorch.SE3(self.poses[index].clone()).to(device)
+                c2w = w2c.inv()
+            return image, est_depth, depth_prior, intrinsics, c2w, static_mask
 
     def set_mapping_item(self, index: List[torch.Tensor], poses: List[torch.Tensor], depths: List[torch.Tensor]):
         """Set a part of the video from the Rendering module"""
@@ -328,10 +356,12 @@ class DepthVideo:
                 )
 
             if len(poses) != 0:
-                c2w = poses.clone().detach().to(self.device)  # [4, 4] homogenous matrix
-                c2w = matrix_to_lie(c2w)  # [7, 1] Lie element
+                w2c = poses.clone().detach().to(self.device)  # [4, 4] homogenous matrix
+                w2c_vec = matrix_to_lie(w2c)  # [7, 1] Lie element
+                # TODO do we really need to invert or does this work?
                 # NOTE chen: We normally would need to invert here, but we already do this in Gaussian Mapper
-                self.poses[index] = c2w.vec()
+                # w2c = lietorch.SE3.InitFromVec(c2w_vec).inv().vec()
+                self.poses[index] = w2c_vec
 
         self.dirty[index] = True  # Mark frames for visualization
 
@@ -476,13 +506,18 @@ class DepthVideo:
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
+            # FIXME chen: I dont understand why the backend cannot use the scaled disps_sens directly as well
+            # but GIORIE-SLAM also could not get this to work
             if self.optimize_scales:
-                self.reset_prior()
+                disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
+            else:
+                disps_sens = self.disps_sens
+
             droid_backends.ba(
                 self.poses,
                 self.disps,
                 self.intrinsics[intrinsic_common_id],
-                self.disps_sens,  # torch.zeros_like(self.disps_sens, device=self.device)
+                disps_sens,
                 target,
                 weight,
                 eta,
@@ -502,6 +537,12 @@ class DepthVideo:
             if self.opt_intr:
                 self.intrinsics[: self.counter.value] = self.intrinsics[intrinsic_common_id]
 
+    # TODO include an initial scale and shift alignment by linear scale optimization like done in GIORIE SLAM
+    # NOTE chen: GIORIE-SLAM uses filter_map to get a clean_map for this initial linear alignment
+
+    # TODO use only low residuals from the initial alignment for JDSA
+    # -> They filter invalid edges in ii by thresholding the error from the linear alignment
+    # you can simply add this index to the bundle adjustment function and concatenate it with non_empty_nodes
     def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 5e-3):
         """Bundle adjustment over structure with a scalable prior.
 

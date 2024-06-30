@@ -526,7 +526,7 @@ class GaussianModel:
         self.denom = self.denom[valid_points_mask]
 
         self.max_radii2D = self.max_radii2D[valid_points_mask]
-        # FIXME highly suspsect of creating memory bug
+        # FIXME highly suspect of creating memory bug
         # raises sometimes RuntimeError: out_ptr == out_accessor[thread_count_nonzero[tid + 1]].data()
         self.unique_kfIDs = self.unique_kfIDs[valid_points_mask.cpu()]
         self.n_obs = self.n_obs[valid_points_mask.cpu()]
