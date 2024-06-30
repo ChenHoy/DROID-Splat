@@ -130,14 +130,18 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_pcd_from_image(self, cam, init=False, scale=2.0, depthmap=None):
+    def create_pcd_from_image(self, cam, init=False, scale=2.0, depthmap=None, mask=None, downsample_factor=None):
         image_ab = (torch.exp(cam.exposure_a)) * cam.original_image + cam.exposure_b
         image_ab = torch.clamp(image_ab, 0.0, 1.0)
+        if mask is not None:
+            image_ab = image_ab * mask
         rgb_raw = (image_ab * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
 
         if depthmap is not None and depthmap.sum() > 0:
             rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
             depth = o3d.geometry.Image(depthmap.astype(np.float32))
+            if mask is not None:
+                depthmap = depthmap * mask.cpu().numpy()
         else:
             if cam.depth is not None and cam.depth.sum() > 0:
                 depth_raw = cam.depth.contiguous().cpu().numpy()
@@ -153,16 +157,20 @@ class GaussianModel:
                     np.ones_like(depth_raw) + (np.random.randn(depth_raw.shape[0], depth_raw.shape[1]) - 0.5) * 0.05
                 ) * scale
 
+            if mask is not None:
+                depth_raw = depth_raw * mask.cpu().numpy()
+
             rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
             depth = o3d.geometry.Image(depth_raw.astype(np.float32))
 
-        return self.create_pcd_from_image_and_depth(cam, rgb, depth, init)
+        return self.create_pcd_from_image_and_depth(cam, rgb, depth, init, downsample_factor=downsample_factor)
 
-    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False):
-        if init:
-            downsample_factor = self.cfg.pcd_downsample_init
-        else:
-            downsample_factor = self.cfg.pcd_downsample
+    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False, downsample_factor=None):
+        if downsample_factor is None:
+            if init:
+                downsample_factor = self.cfg.pcd_downsample_init
+            else:
+                downsample_factor = self.cfg.pcd_downsample
 
         point_size = self.cfg.get("point_size", 0.05)
         if self.cfg.get("adaptive_pointsize", True):
@@ -195,6 +203,10 @@ class GaussianModel:
         new_rgb = np.asarray(pcd_tmp.colors)
 
         pcd = BasicPointCloud(points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3)))
+
+        if pcd.points.shape[0] <= 5:
+            return
+        
         self.ply_input = pcd
 
         fused_point_cloud = torch.from_numpy(np.asarray(pcd.points)).float().cuda()
@@ -231,9 +243,7 @@ class GaussianModel:
 
         new_unique_kfIDs = torch.ones((new_xyz.shape[0])).int() * kf_id
         new_n_obs = torch.zeros((new_xyz.shape[0])).int()
-        if new_xyz.shape[0] == 0: # No gaussians added
-            print(f"No gaussians added for kf_id {kf_id}")
-            return
+
         self.densification_postfix(
             new_xyz,
             new_features_dc,
@@ -245,11 +255,15 @@ class GaussianModel:
             new_n_obs=new_n_obs,
         )
 
-    def extend_from_pcd_seq(self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None):
-        fused_point_cloud, features, scales, rots, opacities = self.create_pcd_from_image(
-            cam_info, init, scale=scale, depthmap=depthmap
+    def extend_from_pcd_seq(self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None, mask=None, downsample_factor=None):
+        features = self.create_pcd_from_image(
+            cam_info, init, scale=scale, depthmap=depthmap, mask=mask, downsample_factor=downsample_factor
         )
-        self.extend_from_pcd(fused_point_cloud, features, scales, rots, opacities, kf_id)
+        if features is not None:
+            fused_point_cloud, features, scales, rots, opacities = features
+            self.extend_from_pcd(fused_point_cloud, features, scales, rots, opacities, kf_id)
+        else:
+            print("No points in the point cloud")
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
@@ -658,6 +672,32 @@ class GaussianModel:
             new_kf_ids=new_kf_id,
             new_n_obs=new_n_obs,
         )
+    
+    def densify_w_opacity(self, opacity, cam, min_opacity=0.1):
+        low_opacity = torch.where(opacity.squeeze() < min_opacity, True, False)
+        #print(f"Low opacity: {low_opacity.sum()/cam.image_height/cam.image_width}")
+        features = self.create_pcd_from_image(cam, mask = low_opacity, downsample_factor=1)
+
+        # Show point cloudi in open3d
+        # pcd = o3d.geometry.PointCloud()
+        # pcd.points = o3d.utility.Vector3dVector(fused_point_cloud.cpu().numpy())
+        # #pcd.colors = o3d.utility.Vector3dVector(features[:, :3, 0].cpu().numpy())
+        # pcd.colors = o3d.utility.Vector3dVector(torch.tensor([[1,0,0]],device=self.device).repeat(fused_point_cloud.shape[0],1).cpu().numpy())
+
+        # pcd2 = o3d.geometry.PointCloud()
+        # pcd2.points = o3d.utility.Vector3dVector(self.get_xyz.cpu().numpy())
+        # pcd2.colors = o3d.utility.Vector3dVector(torch.zeros_like(self.get_xyz,device=self.device).cpu().numpy())
+
+        # o3d.visualization.draw_geometries([pcd,pcd2])
+
+        if features is not None:
+            fused_point_cloud, features, scales, rots, opacities = features
+            #print("Opacity densification added", fused_point_cloud.shape[0])
+            self.extend_from_pcd(fused_point_cloud, features, scales, rots, opacities, cam.uid)
+
+
+
+    
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
@@ -686,29 +726,3 @@ class GaussianModel:
 
     def info(self, msg: str) -> None:
         print(colored(f"[Gaussian Mapping] {msg}", "magenta"))
-
-    # def save_gaussians(self, path):
-    #     torch.save(
-    #         {
-    #             "xyz": self._xyz,
-    #             "features_dc": self._features_dc,
-    #             "features_rest": self._features_rest,
-    #             "opacity": self._opacity,
-    #             "scaling": self._scaling,
-    #             "rotation": self._rotation,
-    #             "unique_kfIDs": self.unique_kfIDs,
-    #             "n_obs": self.n_obs,
-    #         },
-    #         path,
-    #     )
-
-    # def load_gaussians(self, path):
-        # checkpoint = torch.load(path)
-        # self._xyz = nn.Parameter(checkpoint["xyz"].to(self.device).requires_grad_(True))
-        # self._features_dc = nn.Parameter(checkpoint["features_dc"].to(self.device).requires_grad_(True))
-        # self._features_rest = nn.Parameter(checkpoint["features_rest"].to(self.device).requires_grad_(True))
-        # self._opacity = nn.Parameter(checkpoint["opacity"].to(self.device).requires_grad_(True))
-        # self._scaling = nn.Parameter(checkpoint["scaling"].to(self.device).requires_grad_(True))
-        # self._rotation = nn.Parameter(checkpoint["rotation"].to(self.device).requires_grad_(True))
-        # self.unique_kfIDs = checkpoint["unique_kfIDs"].to(self.device)
-        # self.n_obs = checkpoint["n_obs"].to(self.device)

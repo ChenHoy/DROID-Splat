@@ -188,7 +188,7 @@ class BaseDataset(Dataset):
 
         # crop image edge, there are invalid value on the edge of the color image
         if self.H_edge > 0:
-            7
+            edge = self.H_edge
             color_data = color_data[:, :, edge:-edge, :]
 
         if self.W_edge > 0:

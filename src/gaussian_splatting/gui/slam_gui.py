@@ -489,11 +489,6 @@ class SLAM_GUI:
         return current_cam
 
     def rasterise(self, current_cam):
-        if self.gaussian_cur.type == "static":
-            render_fct = render
-        elif self.gaussian_cur.type == "dynamic":
-            render_fct = render_dynamic
-
         if (
             self.time_shader_chbox.checked
             and self.gaussian_cur is not None
@@ -506,7 +501,7 @@ class SLAM_GUI:
             self.gaussian_cur.get_features = alpha * features + (1 - alpha) * torch.from_numpy(rgb_kf).to(
                 features.device
             )
-            rendering_data = render_fct(
+            rendering_data = render(
                 current_cam,
                 self.gaussian_cur,
                 self.pipe,
@@ -515,7 +510,7 @@ class SLAM_GUI:
             )
             self.gaussian_cur.get_features = features
         else:
-            rendering_data = render_fct(
+            rendering_data = render(
                 current_cam,
                 self.gaussian_cur,
                 self.pipe,

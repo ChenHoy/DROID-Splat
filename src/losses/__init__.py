@@ -39,7 +39,7 @@ def mapping_rgbd_loss(
             depth_gt = cam.depth
 
     # Transform with exposure (done in other papers)
-    image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
+    #image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
     image_gt = cam.original_image
 
     # Mask out pixels with little information and invalid depth pixels

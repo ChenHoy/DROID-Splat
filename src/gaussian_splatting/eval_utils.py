@@ -11,6 +11,7 @@ from evo.core.trajectory import PosePath3D
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from evo.tools.settings import SETTINGS
+from evo.tools import plot
 from matplotlib import pyplot as plt
 
 from .gaussian_renderer import render
@@ -44,12 +45,12 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ) as f:
         json.dump(ape_stats, f, indent=4)
 
-    plot_mode = evo.tools.plot.PlotMode.xy
+    plot_mode = plot.PlotMode.xy
     fig = plt.figure()
-    ax = evo.tools.plot.prepare_axis(fig, plot_mode)
+    ax = plot.prepare_axis(fig, plot_mode)
     ax.set_title(f"ATE RMSE: {ape_stat}")
-    evo.tools.plot.traj(ax, plot_mode, traj_ref, "--", "gray", "gt")
-    evo.tools.plot.traj_colormap(
+    plot.traj(ax, plot_mode, traj_ref, "--", "gray", "gt")
+    plot.traj_colormap(
         ax,
         traj_est_aligned,
         ape_metric.error,
@@ -118,7 +119,7 @@ def eval_ate(
         for kf_id in kf_ids:
             kf = frames[kf_id]
 
-            _, _, c2w, _, _, _ = video.get_mapping_item(kf_id, video.device)
+            _, _, _, _, c2w, _ = video.get_mapping_item(kf_id, device=video.device)
             w2c = torch.inverse(c2w)
             R_est = w2c[:3, :3].unsqueeze(0).detach()
             T_est = w2c[:3, 3].detach()

@@ -27,7 +27,7 @@ from .gaussian_mapping import GaussianMapper
 
 from .gaussian_splatting.eval_utils import eval_ate, eval_rendering, save_gaussians
 from .gaussian_splatting.gui import gui_utils, slam_gui
-from .gaussian_splatting.multiprocessing_utils import clone_obj
+from .utils.multiprocessing_utils import clone_obj
 
 
 class SLAM:
@@ -418,7 +418,7 @@ class SLAM:
             iterations=-1,
             final=True,
             monocular=monocular,
-            keyframes_only=False,
+            keyframes_only=True,
             camera_trajectory=camera_trajectory,
             stream=stream,
         )

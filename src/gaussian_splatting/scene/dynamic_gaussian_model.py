@@ -29,7 +29,7 @@ from ..utils.general_utils import (
 )
 from ..utils.graphics_utils import BasicPointCloud, getWorld2View2
 from ..utils.sh_utils import RGB2SH
-from ..utils.system_utils import mkdir_p
+from ...utils.system_utils import mkdir_p
 from .gaussian_model import GaussianModel
 
 
