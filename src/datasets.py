@@ -659,15 +659,14 @@ class TUM_RGBD(BaseDataset):
                 indicies += [i]
 
         images, poses, depths, intrinsics = [], [], [], []
-        inv_pose = None  # FIXME chen: this does not make sense
+        inv_pose = None
         for ix in indicies:
             (i, j, k) = associations[ix]
             images += [os.path.join(datapath, image_data[i, 1])]
             depths += [os.path.join(datapath, depth_data[j, 1])]
             # timestamp tx ty tz qx qy qz qw
             c2w = self.pose_matrix_from_quaternion(pose_vecs[k])
-            # FIXME chen: this does not make sense
-            # Why would we always choose c2w to be identity?
+            # NOTE always fix the first pose to identity
             if inv_pose is None:
                 inv_pose = np.linalg.inv(c2w)
                 c2w = np.eye(4)
