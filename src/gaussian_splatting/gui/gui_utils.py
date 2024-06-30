@@ -1,3 +1,4 @@
+from typing import Dict, List
 import queue
 
 import cv2
@@ -165,35 +166,3 @@ class ParamsGUI:
         self.background = background
         self.gaussians = gaussians
         self.q_main2vis = q_main2vis
-
-
-class EvaluatePacket:
-    """
-    This class is used to pass params from the gaussian_mapper to the terminate thread
-    for evaluation
-    """
-
-    def __init__(self, pipeline_params=None, background=None, gaussians=None, cameras=None):
-        self.has_gaussians = False
-        if gaussians is not None:
-            self.has_gaussians = True
-            self.get_xyz = gaussians.get_xyz.detach().clone()
-            self.active_sh_degree = gaussians.active_sh_degree
-            self.get_opacity = gaussians.get_opacity.detach().clone()
-            self.get_scaling = gaussians.get_scaling.detach().clone()
-            self.get_rotation = gaussians.get_rotation.detach().clone()
-            self.max_sh_degree = gaussians.max_sh_degree
-            self.get_features = gaussians.get_features.detach().clone()
-
-            self._rotation = gaussians._rotation.detach().clone()
-            self.rotation_activation = torch.nn.functional.normalize
-            self.unique_kfIDs = gaussians.unique_kfIDs.clone()
-            self.n_obs = gaussians.n_obs.clone()
-
-        self.pipeline_params = pipeline_params
-        self.background = background
-        self.cameras = cameras
-        self.gaussians = gaussians
-
-    def __str__(self) -> str:
-        print("Im getting something: {} {}".format(self.pipeline_params, len(self.cameras)))

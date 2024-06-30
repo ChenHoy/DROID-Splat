@@ -3,6 +3,7 @@ import threading
 import gc
 import time
 from datetime import datetime
+from termcolor import colored
 
 import cv2
 import glfw
@@ -23,7 +24,10 @@ from .gl_render import util, util_gau
 from .gl_render.render_ogl import OpenGLRenderer
 from .gui_utils import GaussianPacket, create_frustum, cv_gl, get_latest_queue
 from ..camera_utils import Camera
-from ..logging_utils import Log
+
+
+def sys_print(msg, tag="GUI"):
+    print(colored(f"[{tag}] {msg}", "green"))
 
 
 class SLAM_GUI:
@@ -408,7 +412,7 @@ class SLAM_GUI:
             self.in_depth_widget.update_image(rgb)
 
         if gaussian_packet.finish:
-            Log("Received terminate signal", tag="GUI")
+            sys_print("Received terminate signal", tag="GUI")
             # clean up the pipe
             while not self.q_main2vis.empty():
                 self.q_main2vis.get()
@@ -602,7 +606,7 @@ class SLAM_GUI:
             self.step += 1
             if self.process_finished:
                 o3d.visualization.gui.Application.instance.quit()
-                Log("Closing Visualization", tag="GUI")
+                sys_print("Closing Visualization", tag="GUI")
                 break
 
             def update():

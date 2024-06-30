@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from .utils.graphics_utils import getProjectionMatrix2, getWorld2View2, focal2fov
-from .slam_utils import image_gradient, image_gradient_mask
+from ..utils import image_gradient, image_gradient_mask
 
 
 class Camera(nn.Module):
@@ -15,7 +15,7 @@ class Camera(nn.Module):
         color: torch.Tensor,
         depth_est: torch.Tensor,
         depth_gt: torch.Tensor,
-        pose_w2c: torch.Tensor,
+        pose_c2w: torch.Tensor,
         projection_matrix: torch.Tensor,
         intrinsics: Tuple[float, float, float, float],
         fov: Tuple[float, float],
@@ -31,8 +31,8 @@ class Camera(nn.Module):
         self.FoVx, self.FoVy = fov
         self.image_height, self.image_width = img_size
 
-        self.R_gt = pose_w2c[:3, :3]
-        self.T_gt = pose_w2c[:3, 3]
+        self.R_gt = pose_c2w[:3, :3]
+        self.T_gt = pose_c2w[:3, 3]
         self.update_RT(self.R_gt, self.T_gt)
 
         self.original_image = color

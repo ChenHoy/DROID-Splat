@@ -1,66 +1,134 @@
 import json
+from termcolor import colored
+import ipdb
+from typing import List, Dict, Optional
 import os
 
-import cv2
-import evo
 import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+
 import torch
-from evo.core import metrics, trajectory
-from evo.core.metrics import PoseRelation, Unit
-from evo.core.trajectory import PosePath3D, PoseTrajectory3D
-from evo.tools import plot
-from evo.tools.plot import PlotMode
-from evo.tools.settings import SETTINGS
-from matplotlib import pyplot as plt
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from lietorch import SE3
+from ..geom import matrix_to_lie
+
+from evo.core import metrics, sync
+
+# NOTE chen: MonoGS uses PosePath3D, everyone else uses PoseTrajectory3D which seems more compatible with our video structure
+from evo.core.trajectory import PosePath3D, PoseTrajectory3D
+from evo.tools.plot import PlotMode, prepare_axis, traj, traj_colormap
+from matplotlib import pyplot as plt
 
 from .gaussian_renderer import render
-from .utils.image_utils import psnr
-from .utils.loss_utils import ssim_torch as ssim
-from .utils.system_utils import mkdir_p
-from .logging_utils import Log
-from .multiprocessing_utils import clone_obj
+from .scene.gaussian_model import GaussianModel
+from .camera_utils import Camera
+from ..depth_video import DepthVideo
+from ..losses.image import ssim  # TODO chen: refactor these by simply importing them in __init__ of submodule?
+from ..losses.misc import l1_loss
+from ..losses.depth import ScaleAndShiftInvariantLoss
+from ..utils import psnr, mkdir_p, clone_obj
+import shutil
 
 
-def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
-    ## Plot
-    traj_ref = PosePath3D(poses_se3=poses_gt)
-    traj_est = PosePath3D(poses_se3=poses_est)
-    # traj_est_aligned = trajectory.align_trajectory(
-    #     traj_est, traj_ref, correct_scale=monocular
-    # )
+class EvaluatePacket:
+    """This class is used to pass data from the gaussian_mapper to the main thread for evaluation."""
+
+    def __init__(
+        self,
+        pipeline_params: Dict = None,
+        background: torch.Tensor = None,
+        gaussians: GaussianModel = None,
+        cameras: List[Camera] = None,
+        timestamps: torch.Tensor = None,
+    ):
+        self.has_gaussians = False
+        if gaussians is not None:
+            self.has_gaussians = True
+            self.get_xyz = gaussians.get_xyz.detach().clone()
+            self.active_sh_degree = gaussians.active_sh_degree
+            self.get_opacity = gaussians.get_opacity.detach().clone()
+            self.get_scaling = gaussians.get_scaling.detach().clone()
+            self.get_rotation = gaussians.get_rotation.detach().clone()
+            self.max_sh_degree = gaussians.max_sh_degree
+            self.get_features = gaussians.get_features.detach().clone()
+
+            self._rotation = gaussians._rotation.detach().clone()
+            self.rotation_activation = torch.nn.functional.normalize
+            self.unique_kfIDs = gaussians.unique_kfIDs.clone()
+            self.n_obs = gaussians.n_obs.clone()
+
+        self.pipeline_params = pipeline_params
+        self.background = background
+        self.cameras = cameras
+        self.timestamps = timestamps
+        self.gaussians = gaussians
+
+    def __str__(self) -> str:
+        print("Im getting something: {} {}".format(self.pipeline_params, len(self.cameras)))
+
+
+### Odometry ###
+
+
+def evaluate_evo(
+    poses_est: List[np.ndarray],
+    poses_gt: List[np.ndarray],
+    timestamps: List[int],
+    plot_dir: str,
+    label: str,
+    monocular: bool = False,
+) -> Dict:
+    """Evaluate the odometry using the evo package. This expect a list/ an array of poses in c2w convention, i.e. you have
+    to invert the direct outputs from DROID-SLAM convention.
+
+    NOTE The plotting functionality of evo expects c2w convention.
+    """
+    # NOTE chen: MonoGS uses PosePath3D, where we need to supply 4x4 homogeneous matrices, others use se3 liealgebra directly in PoseTrajectory3D
+    # traj_est, traj_ref  = PosePath3D(poses_se3=poses_est), PosePath3D(poses_se3=poses_gt)
+    traj_est = PoseTrajectory3D(
+        positions_xyz=poses_est[:, :3], orientations_quat_wxyz=poses_est[:, 3:], timestamps=np.array(timestamps)
+    )
+    traj_ref = PoseTrajectory3D(
+        positions_xyz=poses_gt[:, :3], orientations_quat_wxyz=poses_gt[:, 3:], timestamps=np.array(timestamps)
+    )
+
+    traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est)
+    # Scale correct monocular odometry for a fair comparison if needed
+    # NOTE chen: monocular can sometimes even be better than RGBD due to the adjustment
     traj_est_aligned = clone_obj(traj_est)
-    traj_est_aligned.align(traj_ref, correct_scale=monocular)  ## throws
-    # traj_est_aligned.align_origin(traj_ref)
+    traj_est_aligned.align(traj_ref, correct_scale=monocular)
 
-    ## RMSE
-    pose_relation = metrics.PoseRelation.translation_part
+    # Get APE statistics
+    ape_metric = metrics.APE(metrics.PoseRelation.translation_part)
     data = (traj_ref, traj_est_aligned)
-    ape_metric = metrics.APE(pose_relation)
     ape_metric.process_data(data)
-    ape_stat = ape_metric.get_statistic(metrics.StatisticsType.rmse)
+    rmse = ape_metric.get_statistic(metrics.StatisticsType.rmse)
+    if monocular:
+        print(colored(f"[Eval] scaled RMSE ATE [m]: {rmse}", "red"))  ## Andrei NOTE: this is in m not cm
+    else:
+        print(colored(f"[Eval] RMSE ATE [m]: {rmse}", "red"))  ## Andrei NOTE: this is in m not cm
     ape_stats = ape_metric.get_all_statistics()
-    Log("RMSE ATE \[m]", ape_stat, tag="Eval")
+    # NOTE chen: this sometimes contains a numpy.float32 instead of normal float :/
+    for key, value in ape_stats.items():
+        ape_stats[key] = float(value)
 
-    with open(
-        os.path.join(plot_dir, "stats_{}.json".format(str(label))),
-        "w",
-        encoding="utf-8",
-    ) as f:
+    with open(os.path.join(plot_dir, "stats_{}.json".format(str(label))), "w", encoding="utf-8") as f:
         json.dump(ape_stats, f, indent=4)
 
-    plot_mode = evo.tools.plot.PlotMode.xy
+    plot_mode = PlotMode.xy
     fig = plt.figure()
-    ax = evo.tools.plot.prepare_axis(fig, plot_mode)
-    ax.set_title(f"ATE RMSE: {ape_stat}")
-    evo.tools.plot.traj(ax, plot_mode, traj_ref, "--", "gray", "gt")
-    evo.tools.plot.traj_colormap(
+    ax = prepare_axis(fig, plot_mode)
+    ax.set_title(f"ATE RMSE: {rmse}")
+    traj(ax, plot_mode, traj_ref, "--", "gray", "gt", plot_start_end_markers=True)
+    traj_colormap(
         ax,
         traj_est_aligned,
         ape_metric.error,
         plot_mode,
         min_map=ape_stats["min"],
         max_map=ape_stats["max"],
+        plot_start_end_markers=True,
     )
     ax.legend()
     plt.savefig(os.path.join(plot_dir, "evo_2dplot_{}.png".format(str(label))), dpi=90)
@@ -68,230 +136,285 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     return ape_stats
 
 
-def get_c2w_list(camera_trajectory, stream):
+def get_gt_c2w_from_stream(stream) -> torch.Tensor:
+    """Get all 4x4 homogenous matrices in c2w format from the dataset stream.
+    We transform these into a (N x 7 x 1) lie vector.
     """
-    Gets the camera trajectory and the stream of poses and returns the estimated and gt poses for
-    all frames after trajectory filler
+    poses = np.stack(stream.poses)
+    if np.isnan(poses).any() or np.isinf(poses).any():
+        raise Exception(colored(f"Error. Nan or Inf found in gt poses!", "red"))
+    return matrix_to_lie(torch.from_numpy(poses))
+
+
+def get_odometry_from_video(video: DepthVideo) -> torch.Tensor:
+    """Extract the whole odometry from the video object for both our estimated poses and the groundtruth"""
+
+    trj_est, trj_gt = [], []
+    for i in range(video.counter.value):
+        _, _, _, _, c2w_est, _ = video.get_mapping_item(i, use_gt=False, device=video.device)
+        _, _, _, _, c2w_gt, _ = video.get_mapping_item(i, use_gt=True, device=video.device)
+        if torch.abs(c2w_gt.vec().sum()) < 1e-7:
+            raise ValueError("Groundtruth pose is zero. Video object likely does not have any gt poses!")
+        trj_est.append(c2w_est.vec().detach().cpu().numpy())
+        trj_gt.append(c2w_gt.vec().detach().cpu().numpy())
+
+    return np.stack(trj_est), np.stack(trj_gt)
+
+
+def write_out_kitti_style(
+    traj: List[np.ndarray] | np.ndarray, poses_in: str = "matrix", outfile: str = "test.txt"
+) -> None:
+    """Given a list of 4x4 homogeneous matrices, write out the poses in KITTI style format.
+    For each pose, we write a line in a .txt file as follows:
+        a b c d
+        e f g h -> a b c d e f g h i j k l
+        i j k l
+        0 0 0 1
     """
-    estimate_c2w_list = camera_trajectory.matrix().data.cpu()
-    traj_ref = []
-    for i in range(len(stream.poses)):
-        val = stream.poses[i].sum()
-        if np.isnan(val) or np.isinf(val):
-            print(f"Nan or Inf found in gt poses, skipping {i}th pose!")
-            continue
-        traj_ref.append(stream.poses[i])
+    with open(outfile, "w") as f:
+        for pose in traj:
+            if poses_in == "matrix":
+                pose = pose.flatten()
+            elif poses_in == "lie":
+                pose = SE3.InitFromVec(torch.from_numpy(pose)).matrix().numpy().flatten()
+            else:
+                raise Exception(
+                    "Unknown pose format! Please provide them either as a 4x4 homogeneous matrix or as a 7x1 lie element"
+                )
 
-    gt_c2w_list = torch.from_numpy(np.stack(traj_ref, axis=0))
-
-    return estimate_c2w_list, gt_c2w_list
+            for i in range(12):
+                if i == 11:
+                    f.write(str(pose[i]))  # Dont leave a trailing space
+                else:
+                    f.write(str(pose[i]) + " ")
+            f.write("\n")
 
 
 def eval_ate(
-    video,
-    kf_ids,
-    save_dir,
-    iterations,
-    final=False,
-    monocular=False,
-    keyframes_only=True,
-    camera_trajectory=None,
-    stream=None,
+    traj_est: np.ndarray,
+    traj_gt: np.ndarray,
+    timestamps: List | np.ndarray,
+    save_dir: str,
+    monocular: bool = False,
 ):
     """
-    video: DepthVideo
-    kf_ids: list of keyframe indices | in case of the video object all of them are keyframes
-    used poses_gt for gt and poses for estimated poses
-    stream: Dataset
-    camera_trajectory: poses after trajectory filler
+    Evaluate the absolute trajectory error by comparing the estimated camera odometry with a groundtruth reference.
+
+    args:
+    ---
+        traj_est, traj_gt:  Trajectories of shape (B, 7, 1) in c2w format
+        timestamps:         List of timestamps for each frame. These are the global id's in the video!
+        save_dir:           Where to save the evaluation results
+        monocular:          Whether the odometry is monocular or not. If yes, then we scale adjust the estimates to the gt
     """
-    frames = video.images
+    assert traj_est.shape == traj_gt.shape, "Trajectories should have the same shape!"
+    assert len(timestamps) == len(traj_est), "Timestamps should have the same length as the trajectories!"
 
-    trj_data = dict()
-    latest_frame_idx = kf_ids[-1] + 2 if final else kf_ids[-1] + 1
-    trj_id, trj_est, trj_gt = [], [], []
-    trj_est_np, trj_gt_np = [], []
+    plot_dir = os.path.join(save_dir, "plots")
+    mkdir_p(plot_dir)
 
-    def gen_pose_matrix(R, T):
-        pose = np.eye(4)
-        pose[0:3, 0:3] = R.cpu().numpy()
-        pose[0:3, 3] = T.cpu().numpy()
-        return pose
+    # Write out serialized string to read later
+    trj_data = {"trj_est": traj_est.tolist(), "trj_gt": traj_gt.tolist()}
+    with open(os.path.join(save_dir, f"trj_final.json"), "w", encoding="utf-8") as f:
+        json.dump(trj_data, f, indent=4)
+    ate = evaluate_evo(
+        poses_est=traj_est,
+        poses_gt=traj_gt,
+        timestamps=timestamps,
+        plot_dir=plot_dir,
+        label="final",
+        monocular=monocular,
+    )
+    return ate
 
-    if keyframes_only:
 
-        for kf_id in kf_ids:
-            kf = frames[kf_id]
+### Rendering ###
 
-            _, _, c2w, _, _, _ = video.get_mapping_item(kf_id, video.device)
-            w2c = torch.inverse(c2w)
-            R_est = w2c[:3, :3].unsqueeze(0).detach()
-            T_est = w2c[:3, 3].detach()
 
-            gt_c2w = video.poses_gt[kf_id].clone().to(video.device)  # [4, 4]
-            gt_w2c = torch.inverse(gt_c2w)
-            R_gt = gt_w2c[:3, :3].unsqueeze(0).detach()
-            T_gt = gt_w2c[:3, 3].detach()
+def create_comparison_figure(
+    gt_img: np.ndarray,
+    est_img: np.ndarray,
+    gt_depth: Optional[np.ndarray] = None,
+    est_depth: Optional[np.ndarray] = None,
+) -> plt.Figure:
+    """Create a plot with both gt and estimate images side by side"""
 
-            pose_est = np.linalg.inv(gen_pose_matrix(R_est, T_est))
-            pose_gt = np.linalg.inv(gen_pose_matrix(R_gt, T_gt))
+    # Sanity
+    assert gt_img.shape == est_img.shape, "Both images should have the same shape!"
+    assert gt_img.dtype == est_img.dtype, "Both images should have the same dtype!"
+    if gt_depth is not None:
+        assert est_depth is not None, "Both gt and estimated depth should be provided!"
 
-            # trj_id.append(frames[kf_id].uid)
-            trj_est.append(pose_est.tolist())
-            trj_gt.append(pose_gt.tolist())
+        fig, axes = plt.subplots(2, 2, figsize=(10, 5))
+        # Display the ground truth image
+        axes[0, 0].imshow(gt_img.squeeze())
+        axes[0, 0].set_title("Ground Truth")
+        axes[0, 0].axis("off")
 
-            trj_est_np.append(pose_est)
-            trj_gt_np.append(pose_gt)
+        # Display the predicted image
+        axes[0, 1].imshow(est_img.squeeze())
+        axes[0, 1].set_title("Prediction")
+        axes[0, 1].axis("off")
 
-        # trj_data["trj_id"] = trj_id
-        trj_data["trj_est"] = trj_est
-        trj_data["trj_gt"] = trj_gt
+        min_depth = min(gt_depth.min(), est_depth.min())
+        max_depth = max(gt_depth.max(), est_depth.max())
 
-        plot_dir = os.path.join(save_dir, "trajectory-plots")
-        mkdir_p(plot_dir)
+        # Display the gt depth
+        axes[1, 0].imshow(gt_depth.squeeze(), cmap="Spectral", vmin=min_depth, vmax=max_depth)
+        axes[1, 0].set_title("Groundtruth")
+        axes[1, 0].axis("off")
 
-        label_evo = "final" if final else "{:04}".format(iterations)
-        with open(os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8") as f:
-            json.dump(trj_data, f, indent=4)
-
-        ate = evaluate_evo(
-            poses_gt=trj_gt_np,
-            poses_est=trj_est_np,
-            plot_dir=plot_dir,
-            label=label_evo,
-            monocular=monocular,
-        )
-        return ate
+        # Display the predicted depth
+        axes[1, 1].imshow(est_depth.squeeze(), cmap="Spectral", vmin=min_depth, vmax=max_depth)
+        axes[1, 1].set_title("Prediction")
+        axes[1, 1].axis("off")
 
     else:
-        estimate_c2w_list, gt_c2w_list = get_c2w_list(camera_trajectory, stream)
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
 
-        assert len(estimate_c2w_list) == len(gt_c2w_list), "Length of estimated and gt poses should be same"
+        # Display the ground truth image
+        axes[0].imshow(gt_img.squeeez())
+        axes[0].set_title("Ground Truth")
+        axes[0].axis("off")
 
-        no_poses = len(estimate_c2w_list)
+        # Display the predicted image
+        axes[1].imshow(est_img.squeeze())
+        axes[1].set_title("Prediction")
+        axes[1].axis("off")
 
-        for i in range(no_poses):
-            c2w_est = estimate_c2w_list[i]
-            c2w_gt = gt_c2w_list[i]
+    return fig
 
-            w2c_est = torch.inverse(c2w_est)
-            w2c_gt = torch.inverse(c2w_gt)
 
-            R_est = w2c_est[:3, :3].unsqueeze(0).detach()
-            T_est = w2c_est[:3, 3].detach()
+def save_gaussians(gaussians: GaussianModel, save_dir: str, iteration: Optional[int] = None) -> None:
+    if iteration is not None:
+        point_cloud_path = os.path.join(save_dir, "point_cloud/iteration_{}".format(str(iteration)))
+    else:
+        point_cloud_path = os.path.join(save_dir, "point_cloud/final")
+    gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
 
-            R_gt = w2c_gt[:3, :3].unsqueeze(0).detach()
-            T_gt = w2c_gt[:3, 3].detach()
 
-            pose_est = np.linalg.inv(gen_pose_matrix(R_est, T_est))
-            pose_gt = np.linalg.inv(gen_pose_matrix(R_gt, T_gt))
+def torch_intersect1d(t1: torch.Tensor, t2: torch.Tensor):
+    assert t1.dim() == 1 and t2.dim() == 1, "t1, t2 should be 1D Tensors"
+    # NOTE: requires t1, t2 to be unique 1D Tensor in advance.
+    # Method: based on unique's count
+    num_t1, num_t2 = t1.numel(), t2.numel()
+    u, inv, cnt = torch.unique(torch.cat([t1, t2]), return_counts=True, return_inverse=True)
 
-            # trj_id.append(frames[kf_id].uid)
-            trj_est.append(pose_est.tolist())
-            trj_gt.append(pose_gt.tolist())
+    cnt_12 = cnt[inv]
+    cnt_t1, cnt_t2 = cnt_12[:num_t1], cnt_12[num_t1:]
+    m_t1 = cnt_t1 == 2
+    inds_t1 = m_t1.nonzero()[..., 0]
+    inds_t1_exclusive = (~m_t1).nonzero()[..., 0]
+    inds_t2_exclusive = (cnt_t2 == 1).nonzero()[..., 0]
 
-            trj_est_np.append(pose_est)
-            trj_gt_np.append(pose_gt)
-
-        trj_data["trj_est"] = trj_est
-        trj_data["trj_gt"] = trj_gt
-
-        plot_dir = os.path.join(save_dir, "plot")
-        mkdir_p(plot_dir)
-
-        label_evo = "final" if final else "{:04}".format(iterations)
-        with open(os.path.join(plot_dir, f"trj_{label_evo}.json"), "w", encoding="utf-8") as f:
-            json.dump(trj_data, f, indent=4)
-
-        ate = evaluate_evo(
-            poses_gt=trj_gt_np,
-            poses_est=trj_est_np,
-            plot_dir=plot_dir,
-            label=label_evo,
-            monocular=monocular,
-        )
-        return ate
+    intersection = t1[inds_t1]
+    t1_exclusive = t1[inds_t1_exclusive]
+    t2_exclusive = t2[inds_t2_exclusive]
+    return intersection, t1_exclusive, t2_exclusive
 
 
 def eval_rendering(
-    frames,
-    gaussians,
+    cams: List[Camera],
+    tstamps: List[int],
+    gaussians: GaussianModel,
     dataset,
-    save_dir,
-    pipe,
-    background,
-    kf_indices,
-    iteration="final",
+    render_pipeline_cfg: Dict,
+    background: torch.Tensor,
+    save_dir: str,
+    save_renders: bool = True,
+    monocular: bool = True,
 ):
+    """Evaluate the rendering quality of the estimated Scene model and Camera poses by comparing with the dataset groundtruth.
+
+    This function loops over a list of Camera objects, which store an estimated pose. The timestamps are a list of equal size, which
+    correspond to the frame indices in the dataset. We use these indices to get the groundtruth depth and image and compare our rendered
+    estimates.
+
+    If monocular, we will compute a scale-invariant l1 loss between the rendered depth and gt depth, otherwise we directly compare the depths.
     """
-    mapper: GaussianMapper
-    """
-    interval = 1
-    img_pred, img_gt, saved_frame_idx = [], [], []
-    end_idx = len(frames) - 1 if iteration == "final" or "before_opt" else iteration
-    psnr_array, ssim_array, lpips_array = [], [], []
+    # Collect all the frames
+    img_pred, img_gt, depth_pred, depth_gt, saved_frame_idx = [], [], [], [], []
+    psnr_array, ssim_array, lpips_array, depth_l1 = [], [], [], []
     cal_lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to("cuda")
 
-    """
-    Runs this only for frames that are not keyframes
-    """
+    dataset.return_stat_masks = False  # Dont return dynamic object masks here
+    has_gt_depth = len(dataset.depth_paths) != 0  # Check if the dataset has depth images
 
-    for idx in range(0, end_idx, interval):
-        if idx in kf_indices:
-            continue
+    plot_dir = os.path.join(save_dir, "plots")
+    print(colored(f"[Evaluation] Saving Rendering evaluation in: {save_dir}", "green"))
+    mkdir_p(save_dir)
+    mkdir_p(plot_dir)
+
+    for i, idx in enumerate(tstamps):
+
         saved_frame_idx.append(idx)
-        frame = frames[idx]
-        ## gt_image is an rgb image no depth
-        _, gt_image, _, _, _ = dataset[idx]
-
+        cam = cams[i]  # NOTE chen: Make sure that the order of tstamps and cams is the same and corresponding!
+        _, gt_image, gt_depth, _, _ = dataset[idx]
         gt_image = gt_image.squeeze(0)
+        if has_gt_depth:
+            gt_depth = gt_depth.squeeze(0)
 
-        rendering = render(frame, gaussians, pipe, background)["render"]
-        image = torch.clamp(rendering, 0.0, 1.0)
+        render_dict = render(cam, gaussians, render_pipeline_cfg, background)
+        image_est, depth_est = render_dict["render"], render_dict["depth"]
+        image_est = torch.clamp(image_est, 0.0, 1.0)
 
-        gt = (gt_image.cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
-        pred = (image.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
-        gt = cv2.cvtColor(gt, cv2.COLOR_BGR2RGB)
-        pred = cv2.cvtColor(pred, cv2.COLOR_BGR2RGB)
-        img_pred.append(pred)
-        img_gt.append(gt)
+        ## Conversion
+        gt_img_np = (gt_image.cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
+        est_img_np = (image_est.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
+        gt_img_np = cv2.cvtColor(gt_img_np, cv2.COLOR_BGR2RGB)  # Convert to RGB since we load images with cv2
+        est_img_np = cv2.cvtColor(est_img_np, cv2.COLOR_BGR2RGB)
+        img_pred.append(est_img_np)
+        img_gt.append(gt_img_np)
+        # If we have groundtruth depth
+        if has_gt_depth:
+            depth_est, gt_depth = depth_est.detach().cpu(), gt_depth.cpu()
+            depth_pred.append(depth_est)
+            depth_gt.append(gt_depth)
 
-        mask = gt_image > 0
+        ### Plot a comparison for inspection
+        if save_renders:
+            if has_gt_depth:
+                fig = create_comparison_figure(gt_img_np, est_img_np, gt_depth.numpy(), depth_est.numpy())
+            else:
+                fig = create_comparison_figure(gt_img_np, est_img_np)
+            plt.savefig(os.path.join(plot_dir, "rendered_vs_gt_" + str(idx) + ".png"))
+            plt.close(fig)
 
-        psnr_score = psnr((image[mask]).unsqueeze(0).to("cuda"), (gt_image[mask]).unsqueeze(0).to("cuda"))
-        ssim_score = ssim((image).unsqueeze(0).to("cuda"), (gt_image).unsqueeze(0).to("cuda"))
-        lpips_score = cal_lpips((image).unsqueeze(0).to("cuda"), (gt_image).unsqueeze(0).to("cuda"))
-
+        ### Image similarity metrics
+        valid_img = gt_image > 0
+        psnr_score = psnr(
+            (image_est[valid_img]).unsqueeze(0).to("cuda"), (gt_image[valid_img]).unsqueeze(0).to("cuda")
+        )
+        ssim_score = ssim((image_est).unsqueeze(0).to("cuda"), (gt_image).unsqueeze(0).to("cuda"))
+        lpips_score = cal_lpips((image_est).unsqueeze(0).to("cuda"), (gt_image).unsqueeze(0).to("cuda"))
+        # Gather scores
         psnr_array.append(psnr_score.item())
         ssim_array.append(ssim_score.item())
         lpips_array.append(lpips_score.item())
+
+        ### Depth Similarity metrics
+        if has_gt_depth:
+            valid_depth = gt_depth > 0
+            if monocular:
+                loss_func = ScaleAndShiftInvariantLoss()
+            else:
+                loss_func = l1_loss
+            depth_loss = loss_func(depth_est, gt_depth, valid_depth)
+            depth_l1.append(depth_loss.item())
 
     output = dict()
     output["mean_psnr"] = float(np.mean(psnr_array))
     output["mean_ssim"] = float(np.mean(ssim_array))
     output["mean_lpips"] = float(np.mean(lpips_array))
 
-    Log(
-        f'mean psnr: {output["mean_psnr"]}, ssim: {output["mean_ssim"]}, lpips: {output["mean_lpips"]}',
-        tag="Eval",
+    # Print this in pretty so we can see it
+    loss_str = "[Eval] mean PSNR: {}, SSIM: {}, LPIPS: {}".format(
+        output["mean_psnr"], output["mean_ssim"], output["mean_lpips"]
     )
+    if has_gt_depth:
+        output["mean_l1"] = float(np.mean(depth_l1))
+        loss_str += ", L1 (depth): {}".format(output["mean_l1"])
+    print(colored(loss_str, "red"))
 
-    psnr_save_dir = os.path.join(save_dir, "psnr", str(iteration))
-    mkdir_p(psnr_save_dir)
-
-    json.dump(
-        output,
-        open(os.path.join(psnr_save_dir, "final_result.json"), "w", encoding="utf-8"),
-        indent=4,
-    )
+    json.dump(output, open(os.path.join(save_dir, "final_result.json"), "w", encoding="utf-8"), indent=4)
     return output
-
-
-def save_gaussians(gaussians, name, iteration, final=False):
-    if name is None:
-        return
-    if final:
-        point_cloud_path = os.path.join(name, "point_cloud/final")
-    else:
-        point_cloud_path = os.path.join(name, "point_cloud/iteration_{}".format(str(iteration)))
-    gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
