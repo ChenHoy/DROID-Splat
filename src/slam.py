@@ -28,11 +28,10 @@ from .gaussian_mapping import GaussianMapper
 
 from .gaussian_splatting.camera_utils import Camera
 from .gaussian_splatting.eval_utils import (
-    eval_ate,
     eval_rendering,
+    do_odometry_evaluation,
     EvaluatePacket,
     get_gt_c2w_from_stream,
-    write_out_kitti_style,
     torch_intersect1d,
 )
 from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
@@ -171,6 +170,7 @@ class SLAM:
 
         os.makedirs(self.output, exist_ok=True)
         if self.save_renders:
+            os.makedirs(f"{self.output}/intermediate_renders/", exist_ok=True)
             os.makedirs(f"{self.output}/intermediate_renders/final", exist_ok=True)
             os.makedirs(f"{self.output}/intermediate_renders/temp", exist_ok=True)
         os.makedirs(f"{self.output}/evaluation", exist_ok=True)
@@ -412,7 +412,6 @@ class SLAM:
         self.all_finished += 1
         self.info("Show stream Done!")
 
-    # TODO refactor below so this is cleaner
     def evaluate(self, stream, gaussian_mapper_last_state: Optional[EvaluatePacket] = None):
 
         eval_path = os.path.join(self.output, "evaluation")
@@ -423,70 +422,23 @@ class SLAM:
         ### Trajectory evaluation ###
         #### ------------------- ####
         # If we dont optimize the scales of our prior, we should also not use scale_adjustment!
-        if self.cfg.mode == "prgbd" and self.video.optimize_scales:
-            monocular = True
-        elif self.cfg.mode == "mono":
+        if (self.cfg.mode == "prgbd" and self.video.optimize_scales) or self.cfg.mode == "mono":
             monocular = True
         else:
             monocular = False
 
-        # When using Gaussian Mapping, we might have already used the trajectory interpolation during refinement
-        if self.cfg.run_mapping and self.cfg.mapping.refinement_iters > 0 and self.cfg.mapping.use_non_keyframes:
-            assert (
-                gaussian_mapper_last_state is not None
-            ), "Missing GaussianMapper state for evaluation even though we ran Mapping!"
-            pose_dict = self.gaussian_mapper.get_camera_trajectory(self.gaussian_mapper.cameras)
-            kf_ids = torch.tensor(list(self.gaussian_mapper.idx_mapping.keys()))
-            kf_tstamps = self.video.timestamp[: self.video.counter.value].int().cpu()
-            # Sanity checks
-            assert (
-                (kf_ids == kf_tstamps).all().item()
-            ), "Gaussian Mapper should contain the same keyframes as in DepthVideo!"
-            assert len(list(pose_dict.keys())) == len(
-                stream
-            ), "After adding non-keyframes, Gaussian Mapper contain all frames of the whole video stream!"
-            tstamps = list(pose_dict.keys())
-
-            ordered_poses = dict(sorted(pose_dict.items()))
-            est_w2c_all = torch.stack(list(ordered_poses.values()))
-            est_c2w_all_lie = SE3.InitFromVec(matrix_to_lie(est_w2c_all)).inv().vec()
-            est_c2w_kf_lie = est_c2w_all_lie[kf_ids]
-            kf_tstamps = kf_tstamps.cpu().int().tolist()
-        else:
-            # NOTE chen: even if we have optimized the poses with the GaussianMapper, we would have fed them back
-            kf_tstamps = self.video.timestamp[: self.video.counter.value].int().cpu().tolist()
-            est_w2c_all, tstamps = self.traj_filler(stream, return_tstamps=True)
-            est_c2w_all_lie = est_w2c_all.inv().vec().cpu()  # 7x1 Lie algebra
-            est_c2w_kf_lie = est_c2w_all_lie[kf_tstamps]
-
-        est_c2w_all_lie, est_c2w_kf_lie = est_c2w_all_lie.cpu().numpy(), est_c2w_kf_lie.cpu().numpy()
-        gt_c2w_all_lie = get_gt_c2w_from_stream(stream).cpu().numpy()
-        gt_c2w_kf_lie = gt_c2w_all_lie[kf_tstamps]
+        est_c2w_all_lie, est_c2w_kf_lie, gt_c2w_all_lie, gt_c2w_kf_lie, kf_tstamps, tstamps = self.get_trajectories(
+            stream, gaussian_mapper_last_state
+        )
 
         # Evo expects floats for timestamps
         kf_tstamps = [float(i) for i in kf_tstamps]
         tstamps = [float(i) for i in tstamps]
-
-        ### Get the numbers for keyframes only
-        kf_eval_path = os.path.join(eval_path, "odometry", "keyframes")
-        kf_result_ate = eval_ate(est_c2w_kf_lie, gt_c2w_kf_lie, kf_tstamps, save_dir=kf_eval_path, monocular=monocular)
-        self.info("(Keyframes only) ATE: {}".format(kf_result_ate))
-        kf_trajectory_df = pd.DataFrame([kf_result_ate])
-        kf_trajectory_df.to_csv(os.path.join(kf_eval_path, "kf_trajectory_results.csv"), index=False)
-        # NOTE chen: you can use this file to directly visualize the trajectory using evo
-        write_out_kitti_style(est_c2w_kf_lie, poses_in="lie", outfile=os.path.join(kf_eval_path, "kf_est_c2w.txt"))
-
-        ### Get the numbers for the whole trajectory
-        all_eval_path = os.path.join(eval_path, "odometry", "all")
-        all_result_ate = eval_ate(
-            est_c2w_all_lie, gt_c2w_all_lie, tstamps, save_dir=all_eval_path, monocular=monocular
+        kf_result_ate, all_result_ate = do_odometry_evaluation(
+            eval_path, est_c2w_kf_lie, gt_c2w_kf_lie, est_c2w_all_lie, gt_c2w_all_lie, tstamps, kf_tstamps, monocular
         )
+        self.info("(Keyframes only) ATE: {}".format(kf_result_ate))
         self.info("(All) ATE: {}".format(all_result_ate))
-        all_trajectory_df = pd.DataFrame([all_result_ate])
-        all_trajectory_df.to_csv(os.path.join(all_eval_path, "all_trajectory_results.csv"), index=False)
-        # NOTE chen: you can use this file to directly visualize the trajectory using evo
-        write_out_kitti_style(est_c2w_all_lie, poses_in="lie", outfile=os.path.join(all_eval_path, "est_c2w.txt"))
-
         # TODO Can we filter the Dataset name out of this to make it prettier?
         # TODO update loop config flag or add another one, because we will likely run a loop closure mechanism on top
         ### Store main results with attributes for ablation/comparison
@@ -512,43 +464,10 @@ class SLAM:
             gaussians = gaussian_mapper_last_state.gaussians
             render_cfg = gaussian_mapper_last_state.pipeline_params
             background = gaussian_mapper_last_state.background
-            if self.cfg.mapping.use_non_keyframes:
-                all_cams = gaussian_mapper_last_state.cameras
-            else:
-                all_cams = []
-                intrinsics = self.video.intrinsics[0]  # We always have the right global intrinsics stored here
-                if self.video.upsample:
-                    intrinsics = intrinsics * self.video.scale_factor
-                for i, view in tqdm(enumerate(est_c2w_all_lie)):
 
-                    # TODO chen: refactor!!!
-                    _, gt_image, gt_depth, _, _ = stream[i]
-                    # c2w -> w2c for initialization
-                    view = SE3.InitFromVec(torch.tensor(view).float().to(device=self.device)).inv().matrix()
-                    fx, fy, cx, cy = intrinsics
-                    height, width = gt_image.shape[-2:]
-                    fovx, fovy = focal2fov(fx, width), focal2fov(fy, height)
-                    projection_matrix = getProjectionMatrix2(
-                        self.gaussian_mapper.z_near, self.gaussian_mapper.z_far, cx, cy, fx, fy, width, height
-                    )
-                    projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
-                    new_cam = Camera(
-                        i,
-                        gt_image.contiguous(),
-                        gt_depth,
-                        gt_depth,
-                        view,
-                        projection_matrix,
-                        (fx, fy, cx, cy),
-                        (fovx, fovy),
-                        (height, width),
-                        device=self.device,
-                    )
-                    all_cams.append(new_cam)
-
-            # TODO why do we need to send an evaluation package here in the first place?
-            # Cant we just synchronize everything that this evaluation() call waits until all other processes finish
-            # we can now just read out the final state of self.gaussian_mapper?!
+            # Get the whole trajectory as Camera objects, so we can render them
+            all_cams = self.get_all_cams_for_rendering(stream, est_c2w_all_lie, gaussian_mapper_last_state)
+            # Renderer needs timestamps as int for indexing
             kf_tstamps, tstamps = [int(i) for i in kf_tstamps], [int(i) for i in tstamps]
             kf_cams = [all_cams[i] for i in kf_tstamps]
 
@@ -587,7 +506,82 @@ class SLAM:
             render_df = pd.DataFrame(rendering_results)
             render_df.to_csv(os.path.join(render_eval_path, "evaluation_results.csv"), index=False)
 
-        ipdb.set_trace()
+    def get_trajectories(self, stream, gaussian_mapper_last_state: Optional[EvaluatePacket] = None):
+        """Get the poses both for the whole video sequence and only the keyframes for evaluation.
+        Poses are in format [B, 7, 1] as lie elements.
+        """
+        # When using Gaussian Mapping, we might have already used the trajectory interpolation during refinement
+        if self.cfg.run_mapping and self.cfg.mapping.refinement_iters > 0 and self.cfg.mapping.use_non_keyframes:
+            assert (
+                gaussian_mapper_last_state is not None
+            ), "Missing GaussianMapper state for evaluation even though we ran Mapping!"
+            pose_dict = self.gaussian_mapper.get_camera_trajectory(self.gaussian_mapper.cameras)
+            kf_ids = torch.tensor(list(self.gaussian_mapper.idx_mapping.keys()))
+            kf_tstamps = self.video.timestamp[: self.video.counter.value].int().cpu()
+            # Sanity checks
+            assert (
+                (kf_ids == kf_tstamps).all().item()
+            ), "Gaussian Mapper should contain the same keyframes as in DepthVideo!"
+            assert len(list(pose_dict.keys())) == len(
+                stream
+            ), "After adding non-keyframes, Gaussian Mapper contain all frames of the whole video stream!"
+            tstamps = list(pose_dict.keys())
+
+            ordered_poses = dict(sorted(pose_dict.items()))
+            est_w2c_all = torch.stack(list(ordered_poses.values()))
+            est_c2w_all_lie = SE3.InitFromVec(matrix_to_lie(est_w2c_all)).inv().vec()
+            est_c2w_kf_lie = est_c2w_all_lie[kf_ids]
+            kf_tstamps = kf_tstamps.cpu().int().tolist()
+        else:
+            # NOTE chen: even if we have optimized the poses with the GaussianMapper, we would have fed them back
+            kf_tstamps = self.video.timestamp[: self.video.counter.value].int().cpu().tolist()
+            est_w2c_all, tstamps = self.traj_filler(stream, return_tstamps=True)
+            est_c2w_all_lie = est_w2c_all.inv().vec().cpu()  # 7x1 Lie algebra
+            est_c2w_kf_lie = est_c2w_all_lie[kf_tstamps]
+
+        est_c2w_all_lie, est_c2w_kf_lie = est_c2w_all_lie.cpu().numpy(), est_c2w_kf_lie.cpu().numpy()
+        gt_c2w_all_lie = get_gt_c2w_from_stream(stream).cpu().numpy()
+        gt_c2w_kf_lie = gt_c2w_all_lie[kf_tstamps]
+        return est_c2w_all_lie, est_c2w_kf_lie, gt_c2w_all_lie, gt_c2w_kf_lie, kf_tstamps, tstamps
+
+    def get_all_cams_for_rendering(
+        self, stream, est_c2w_all_lie, gaussian_mapper_last_state: Optional[EvaluatePacket] = None
+    ):
+
+        if self.cfg.mapping.use_non_keyframes:
+            all_cams = gaussian_mapper_last_state.cameras
+        else:
+            all_cams = []
+            intrinsics = self.video.intrinsics[0]  # We always have the right global intrinsics stored here
+            if self.video.upsample:
+                intrinsics = intrinsics * self.video.scale_factor
+
+            for i, view in tqdm(enumerate(est_c2w_all_lie)):
+
+                _, gt_image, gt_depth, _, _ = stream[i]
+                # c2w -> w2c for initialization
+                view = SE3.InitFromVec(torch.tensor(view).float().to(device=self.device)).inv().matrix()
+                fx, fy, cx, cy = intrinsics
+                height, width = gt_image.shape[-2:]
+                fovx, fovy = focal2fov(fx, width), focal2fov(fy, height)
+                projection_matrix = getProjectionMatrix2(
+                    self.gaussian_mapper.z_near, self.gaussian_mapper.z_far, cx, cy, fx, fy, width, height
+                )
+                projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
+                new_cam = Camera(
+                    i,
+                    gt_image.contiguous(),
+                    gt_depth,
+                    gt_depth,
+                    view,
+                    projection_matrix,
+                    (fx, fy, cx, cy),
+                    (fovx, fovy),
+                    (height, width),
+                    device=self.device,
+                )
+                all_cams.append(new_cam)
+        return all_cams
 
     def save_state(self):
         self.info("Saving checkpoints...")

@@ -14,10 +14,7 @@ import numpy as np
 import cv2
 
 from .gaussian_splatting.gui import gui_utils
-<<<<<<< HEAD
 from .gaussian_splatting.eval_utils import EvaluatePacket
-=======
->>>>>>> 5811cba2aebbe1b78e8dee00a63f36705fd07be8
 from .gaussian_splatting.gaussian_renderer import render
 from .gaussian_splatting.scene.gaussian_model import GaussianModel
 from .gaussian_splatting.camera_utils import Camera
