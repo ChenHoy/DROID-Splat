@@ -519,7 +519,6 @@ class SLAM:
             kf_ids = torch.tensor(list(self.gaussian_mapper.idx_mapping.keys()))
             kf_tstamps = self.video.timestamp[: self.video.counter.value].int().cpu()
             # Sanity checks
-            ipdb.set_trace()
             assert (
                 (kf_ids == kf_tstamps).all().item()
             ), "Gaussian Mapper should contain the same keyframes as in DepthVideo!"
