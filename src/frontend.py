@@ -5,6 +5,7 @@ import ipdb
 from time import gmtime, strftime, time
 
 import torch
+from lietorch import SE3
 
 from .factor_graph import FactorGraph
 from .motion_filter import MotionFilter
@@ -210,8 +211,13 @@ class Frontend:
                 torch.cuda.empty_cache()
                 gc.collect()
 
-        # set pose & disp for next iteration
-        self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
+        ### Set pose & disp for next iteration
+        # Naive strategy for initializing next pose as previous pose in DROID-SLAM
+        # self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
+        # Better: use constant speed assumption and extrapolate
+        dP = SE3(self.video.poses[self.t1 - 1]) * SE3(self.video.poses[self.t1 - 2]).inv()  # Get relative pose
+        self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
+
         self.video.disps[self.t1] = self.video.disps[self.t1 - 1].mean()
 
         ### update visualization
