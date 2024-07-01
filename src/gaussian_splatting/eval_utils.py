@@ -1,10 +1,12 @@
 import json
 from termcolor import colored
+from tqdm import tqdm
 import ipdb
 from typing import List, Dict, Optional
 import os
 
 import numpy as np
+import pandas as pd
 import cv2
 import matplotlib.pyplot as plt
 
@@ -21,7 +23,6 @@ from evo.tools.plot import PlotMode, prepare_axis, traj, traj_colormap
 from matplotlib import pyplot as plt
 
 from evo.tools.settings import SETTINGS
-from evo.tools import plot
 from matplotlib import pyplot as plt
 
 from .gaussian_renderer import render
@@ -32,7 +33,6 @@ from ..losses.image import ssim  # TODO chen: refactor these by simply importing
 from ..losses.misc import l1_loss
 from ..losses.depth import ScaleAndShiftInvariantLoss
 from ..utils import psnr, mkdir_p, clone_obj
-import shutil
 
 
 class EvaluatePacket:
@@ -317,6 +317,35 @@ def torch_intersect1d(t1: torch.Tensor, t2: torch.Tensor):
     return intersection, t1_exclusive, t2_exclusive
 
 
+def do_odometry_evaluation(
+    eval_path: str,
+    est_c2w_kf_lie: np.ndarray,
+    gt_c2w_kf_lie: np.ndarray,
+    est_c2w_all_lie: np.ndarray,
+    gt_c2w_all_lie: np.ndarray,
+    tstamps: List[int],
+    kf_tstamps: List[int],
+    monocular: bool,
+):
+    """Perform evaluation both on keyframe trajectory and the whole trajectory."""
+    ### Get the numbers for keyframes only
+    kf_eval_path = os.path.join(eval_path, "odometry", "keyframes")
+    kf_result_ate = eval_ate(est_c2w_kf_lie, gt_c2w_kf_lie, kf_tstamps, save_dir=kf_eval_path, monocular=monocular)
+    kf_trajectory_df = pd.DataFrame([kf_result_ate])
+    kf_trajectory_df.to_csv(os.path.join(kf_eval_path, "kf_trajectory_results.csv"), index=False)
+    # NOTE chen: you can use this file to directly visualize the trajectory using evo
+    write_out_kitti_style(est_c2w_kf_lie, poses_in="lie", outfile=os.path.join(kf_eval_path, "kf_est_c2w.txt"))
+
+    ### Get the numbers for the whole trajectory
+    all_eval_path = os.path.join(eval_path, "odometry", "all")
+    all_result_ate = eval_ate(est_c2w_all_lie, gt_c2w_all_lie, tstamps, save_dir=all_eval_path, monocular=monocular)
+    all_trajectory_df = pd.DataFrame([all_result_ate])
+    all_trajectory_df.to_csv(os.path.join(all_eval_path, "all_trajectory_results.csv"), index=False)
+    # NOTE chen: you can use this file to directly visualize the trajectory using evo
+    write_out_kitti_style(est_c2w_all_lie, poses_in="lie", outfile=os.path.join(all_eval_path, "est_c2w.txt"))
+    return kf_result_ate, all_result_ate
+
+
 def eval_rendering(
     cams: List[Camera],
     tstamps: List[int],
@@ -349,7 +378,7 @@ def eval_rendering(
     mkdir_p(save_dir)
     mkdir_p(plot_dir)
 
-    for i, idx in enumerate(tstamps):
+    for i, idx in tqdm(enumerate(tstamps)):
 
         saved_frame_idx.append(idx)
         cam = cams[i]  # NOTE chen: Make sure that the order of tstamps and cams is the same and corresponding!

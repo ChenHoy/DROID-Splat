@@ -188,6 +188,7 @@ class GaussianMapper(object):
             # HOTFIX Sanity check for when we dont have any good depth
             if (depth > 0).sum() == 0:
                 depth = None
+
             cam = self.camera_from_frame(
                 idx, color, w2c, intrinsics, depth_init=depth, depth=depth_prior, mask=stat_mask
             )
@@ -479,11 +480,11 @@ class GaussianMapper(object):
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
         loss += self.loss_params.beta * len(frames) * isotropic_loss.mean()
 
-        
         # NOTE chen: this can happen we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
 
-        loss.backward()
+        scaled_loss = loss * np.sqrt(len(frames)) / 2 # Scale the loss with the number of frames
+        scaled_loss.backward()
 
         with torch.no_grad():
             # Dont let Gaussians grow too much
@@ -493,8 +494,8 @@ class GaussianMapper(object):
             )
 
 
-            # if densify:
-            #     self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+            if densify:
+                self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
             if self.last_idx > self.n_last_frames and (iter + 1) % self.kf_mng_params.prune_densify_every == 0:
                 self.gaussians.densify_and_prune(  # General pruning based on opacity and size + densification
@@ -525,9 +526,7 @@ class GaussianMapper(object):
                     update_pose(view)
 
 
-
-
-        return loss.item()
+        return loss.item() 
 
     def covisibility_pruning(self):
         """Covisibility based pruning"""
@@ -677,20 +676,20 @@ class GaussianMapper(object):
         print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Final mapping loss: {self.loss_list[-1]}", "cyan"))
         self.info(f"{len(self.iteration_info)} iterations, {len(self.cameras)/len(self.iteration_info)} cams/it")
 
-        # TODO uncomment after we are done debugging
-        ## export the cameras and gaussians to the terminate process
-        # if self.evaluate:
-        #     mapping_queue.put(
-        #         EvaluatePacket(
-        #             pipeline_params=clone_obj(self.pipeline_params),
-        #             cameras=self.cameras[:],
-        #             gaussians=clone_obj(self.gaussians),
-        #             background=clone_obj(self.background),
-        #         )
-        #     )
-        # else:
-        #     mapping_queue.put("None")
-        # received_item.wait()  # Wait until the Packet got delivered
+        #TODO uncomment after we are done debugging
+        # export the cameras and gaussians to the terminate process
+        if self.evaluate:
+            mapping_queue.put(
+                EvaluatePacket(
+                    pipeline_params=clone_obj(self.pipeline_params),
+                    cameras=self.cameras[:],
+                    gaussians=clone_obj(self.gaussians),
+                    background=clone_obj(self.background),
+                )
+            )
+        else:
+            mapping_queue.put("None")
+        received_item.wait()  # Wait until the Packet got delivered
 
     def add_new_gaussians(self, cameras: List[Camera]) -> Camera | None:
         """Initialize new Gaussians based on the provided views (images, poses (, depth))"""
@@ -842,6 +841,7 @@ class GaussianMapper(object):
             return False
 
         elif the_end and self.last_idx + self.delay >= self.cur_idx:
+            self.cur_idx = self.video.counter.value
             self._update(delay_to_tracking=False)  # Run another call to catch the last batch of keyframes
             self._last_call(mapping_queue=mapping_queue, received_item=received_item)
             return True

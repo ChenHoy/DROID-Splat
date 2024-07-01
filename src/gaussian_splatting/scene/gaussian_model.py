@@ -678,18 +678,6 @@ class GaussianModel:
         #print(f"Low opacity: {low_opacity.sum()/cam.image_height/cam.image_width}")
         features = self.create_pcd_from_image(cam, mask = low_opacity, downsample_factor=1)
 
-        # Show point cloudi in open3d
-        # pcd = o3d.geometry.PointCloud()
-        # pcd.points = o3d.utility.Vector3dVector(fused_point_cloud.cpu().numpy())
-        # #pcd.colors = o3d.utility.Vector3dVector(features[:, :3, 0].cpu().numpy())
-        # pcd.colors = o3d.utility.Vector3dVector(torch.tensor([[1,0,0]],device=self.device).repeat(fused_point_cloud.shape[0],1).cpu().numpy())
-
-        # pcd2 = o3d.geometry.PointCloud()
-        # pcd2.points = o3d.utility.Vector3dVector(self.get_xyz.cpu().numpy())
-        # pcd2.colors = o3d.utility.Vector3dVector(torch.zeros_like(self.get_xyz,device=self.device).cpu().numpy())
-
-        # o3d.visualization.draw_geometries([pcd,pcd2])
-
         if features is not None:
             fused_point_cloud, features, scales, rots, opacities = features
             #print("Opacity densification added", fused_point_cloud.shape[0])

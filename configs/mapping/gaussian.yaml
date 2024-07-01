@@ -1,12 +1,12 @@
 warmup: 10 # Wait until tracking gets to this frame
 delay: 2 # Delay between tracking and mapping
-use_non_keyframes: False # Use non-keyframes during map refinement
+use_non_keyframes: True # Use non-keyframes during map refinement
 max_frames_refinement: 70 # Maximum number of frames to optimize during refinement
-use_prior_for_supervision: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
+use_prior_for_supervision: False # Use the prior for supervision. If not, then use the current filtered map from SLAM
 
 # NOTE chen: please use MORE ITERATIONS than prune_densify_every! 
 # it is important to optimize newly introduced Gaussians due to densification!!!
-mapping_iters: 50 # Optimization iterations for selected views
+mapping_iters: 30 # Optimization iterations for selected views
 refinement_iters: 50 # Final Optimization iterations for all views
 # These 2 flags filter out noisy points before Rendering Optimization
 filter_multiview: True # Only initialize Gaussians that are consistent in multiple views
@@ -15,6 +15,9 @@ filter_uncertainty: False # Only use very certain points for intializing Gaussia
 # use these two flags to snychronize the updated map and poses back into the SLAM system
 feedback_mapping: True
 optimize_poses: True
+
+batch_mode: True # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
+save_renders: False # Store some rendered images for debugging
 
 # Strategy for adding / pruning Gaussians
 keyframes:
@@ -89,8 +92,7 @@ input:
   point_size: 0.02
   type: 'replica'
 
-batch_mode: True # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
-save_renders: False # Store some rendered images for debugging
+
 # Default vanilla Gaussian Splatting parameters
 use_spherical_harmonics: False 
 pipeline_params:
