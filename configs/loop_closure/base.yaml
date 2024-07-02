@@ -1,0 +1,4 @@
+min_temporal_distance: 10 # Keyframes should be at least this far apart for a valid loop closure candidate
+max_orientation_difference: 20.0 # Rotation difference in degrees (avg over rpy axis) of the estimated keyframe poses
+# This is used for e.g. motion between frames or feature distance
+threshold: 10.0 # Threshold for frame distance, i.e. candidate pairs should have distance < threshold

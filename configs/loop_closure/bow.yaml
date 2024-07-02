@@ -1,0 +1,9 @@
+defaults:
+  - /loop_closure/base@_here_
+
+method: bow
+vocabulary: "ext/PyDBoW3/modules/dbow3/orbvoc.dbow3" 
+
+# NOTE even images that look very similar will not have a similarity score > 0.1. Meanwhile the same image will get 1.0
+threshold: 0.05 # Score threshold for visual similarity from Bag of Words (dBow3)
+k_nearest: 5 # Only look at the topk nearest neighbors in the database to speed up the search
