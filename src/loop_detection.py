@@ -1,11 +1,13 @@
 from typing import Optional, Tuple, List, Dict
 from termcolor import colored
+import re
 import time
 from pathlib import Path
 import ipdb
 from omegaconf import DictConfig
 
 import torch
+import torchvision.transforms as tv
 from torch.multiprocessing import Value
 
 import cv2
@@ -16,7 +18,8 @@ from .geom import projective_ops as pops
 from .depth_video import DepthVideo
 from .modules.corr import CorrBlock
 
-import pydbow3 as bow
+import faiss
+import faiss.contrib.torch_utils
 
 
 def show_nan(tensor: torch.Tensor) -> None:
@@ -73,24 +76,54 @@ class LoopDetector:
         # mean, std for image normalization
         self.MEAN = torch.tensor([0.485, 0.456, 0.406], device=device)[:, None, None]
         self.STDV = torch.tensor([0.229, 0.224, 0.225], device=device)[:, None, None]
+        self.normalize = tv.Normalize(mean=self.MEAN, std=self.STDV)
 
-        # Only consider edges, where the flow magnitude is smaller than this threshold
-        # i.e. the frames look visually similar
+        self.thresh = self.cfg.threshold
+
+        ### Motion based similarity detectors
         if self.method == "raft":
-            self.thresh = self.cfg.threshold
-            self.net, self.padder = self.load_raft(self.cfg.weights)
+            self.net, self.padder = self.load_raft(self.cfg.weights)  # Use actual RAFT optical flow network
         elif self.method == "internal":
-            self.thresh = self.cfg.threshold
-            self.net = net
-        # Use a proper visual similarity method without motion computation
-        else:
+            self.net = net  # Use the internal droid update network
+
+        ### Use a proper visual similarity method without motion computation
+        elif self.method == "bow":
+            raise Exception(
+                "Bag of words is deprecated! Use a more modern place recognition technique that is compatible with PyTorch and multi-threading"
+            )
+
+            import pydbow3 as bow
+
             self.db = self.load_dbow(voc_path=self.cfg.vocabulary)
             self.orb = cv2.ORB_create()
-            self.thresh = self.cfg.threshold
-            # TODO how does the database storage work, can we reliably just keep everything in self.db?
             # Store orb features for each keyframe
-            # TODO maybe delete this afterwards
+            self.already_in_db, self.dbow_scores = [], []  # TODO maybe delete this afterwards
+
+        elif self.method == "eigen":
+            # Get the model
+            self.net = self.load_eigen()
+            ### Get the database
+            res = faiss.StandardGpuResources()
+            # Flat index, i.e. we dont build up a large index over time (this would not amortize <10 000 queries)
+            index_flat = faiss.IndexFlatL2(self.cfg.fc_output_dim)  # Measure L2 distance between features
+            # see https://gist.github.com/mdouze/c7653aaa8c3549b28bad75bd67543d34 for how to setup max. cosine similarity
+
+            if "cuda" in self.device:
+                device_id = int(re.findall(r"\d+", self.device)[0])
+            else:
+                device_id = 0
+            t_start = time.time()
+            self.db = faiss.index_cpu_to_gpu(res, device_id, index_flat)  # Put on GPU 0
+            t_end = time.time()
+            self.info(f"Initializing FAISS database on GPU took {t_end - t_start}s !")
             self.already_in_db, self.dbow_scores = [], []
+        else:
+            raise Exception(
+                colored(
+                    "Invalid loop detection method! Choose either 'raft', 'internal', 'bow', 'eigen' or 'patchnetvlad',",
+                    "red",
+                )
+            )
 
         # Frames/Nodes need to be at least n frames apart temporally
         self.min_temp_dist = self.cfg.min_temporal_distance
@@ -104,6 +137,7 @@ class LoopDetector:
         print(colored("[Loop Detection]: " + msg, "cyan"))
 
     def load_raft(self, checkpoint: str) -> None:
+        """Load a proper optical flow network like RAFT"""
         from easydict import EasyDict as edict
         import sys
 
@@ -111,6 +145,7 @@ class LoopDetector:
         from raft import RAFT
         from raft.utils.utils import InputPadder
 
+        self.info(f"Loading RAFT model {self.cfg.weights}")
         model = torch.nn.DataParallel(RAFT(edict(self.cfg.model_cfg)))
         checkpoint = torch.load(checkpoint, map_location=self.device)
         model.load_state_dict(checkpoint, strict=True)
@@ -120,10 +155,16 @@ class LoopDetector:
         padder = InputPadder(self.video.images.shape)
         return model, padder
 
+    ####
+    # DBow3 database based on ORB features
+    ####
+
     def load_dbow(self, voc_path: str = "DBoW3/orbvoc.dbow3") -> None:
         """Load a preexisting DBow3 vocabulary and database to use for loop detection."""
+        import pydbow3 as bow
+
         voc = bow.Vocabulary()
-        self.info(f"[Loop detector] Loading vocabulary from {voc_path}")
+        self.info(f"Loading vocabulary from {voc_path}")
         voc.load(voc_path)
         db = bow.Database()
         db.setVocabulary(voc)
@@ -132,7 +173,9 @@ class LoopDetector:
 
     def extract_orb_features(self, img: torch.Tensor) -> torch.Tensor:
         """Compute ORB features with opencv, this requires going back and forth between numpy and torch"""
-        img = np.float32(img.cpu().numpy() * 255)
+        img = np.float32(img.cpu().numpy())
+        if img.max() <= 1.0:
+            img = 255 * img
         gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         kp, des = self.orb.detectAndCompute(np.uint8(gray_img), None)
         # NOTE you can visualize the keypoints with:
@@ -163,11 +206,29 @@ class LoopDetector:
         results = self.db.query(query_features, k_neighbors)
         matches = {result.Id: result.Score for result in results}
         if len(matches) > 0:
-            self.dbow_scores.append(min(matches.values()))
+            self.dbow_scores.append(max(matches.values()))
             return matches
         else:
             self.dbow_scores.append(-1)
             return None
+
+    def load_eigen(self):
+        """Load the EigenPlaces model, see https://github.com/gmberton/EigenPlaces from ICCV23.
+        This is a modern neural network for place recogntion.
+        """
+
+        model = torch.hub.load(
+            "gmberton/eigenplaces", "get_trained_model", backbone=self.cfg.model, fc_output_dim=self.cfg.fc_output_dim
+        )
+        self.info(f"Loaded EigenPlaces model {self.cfg.model}!")
+        return model.eval().to(self.device)
+
+    def get_eigen_features(self, idx: int) -> torch.Tensor:
+        """Get features for a specific frame index"""
+        image = self.video.images[idx]
+        image = self.normalize(image.unsqueeze(0))
+        features = self.net(image)
+        return features
 
     def visualize_place_recognition_matches(
         self, query_idx: torch.Tensor, matches: Dict, show_only: Optional[int] = None
@@ -390,6 +451,92 @@ class LoopDetector:
 
         return dr_deg
 
+    def get_frame_distance(self, ii, jj, return_matches: bool = False):
+        """Compute the visual difference between frames. This can be explicit motion or
+        the distance between deep feature descriptors.
+        """
+        # Get flow from i to all previous frames [0, i-1]
+        if self.method == "raft":
+            delta_i = self.compute_motion_raft(
+                ii,
+                jj,
+                iterations=self.cfg.iterations,
+                max_batch_size=self.cfg.max_batch_size,
+                direction=self.cfg.direction,
+            )
+            valid = self.video.static_masks[ii]  # RAFT works on full resolution
+            df = self.get_motion_distance(delta_i, valid)
+            mask_df = df < self.thresh  # Candidates need to have a low optical flow difference
+
+            # self.visualize_flow_2d(
+            #     delta_i[0].permute(2, 0, 1),
+            #     self.video.images[jj[0]].unsqueeze(0),
+            #     self.video.images[ii[0]].unsqueeze(0),
+            # )
+            assert return_matches is False, "RAFT does not support place recognition!"
+
+        elif self.method == "internal":
+            delta_i = self.compute_motion_batch(ii, jj)
+            valid = self.video.static_masks[ii, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
+            df = self.get_motion_distance(delta_i, valid)
+            mask_df = df < self.thresh  # Candidates need to have a low optical flow difference
+            assert return_matches is False, "Internal DROID does not support place recognition!"
+
+        elif self.method == "bow":
+            i = ii[0]
+            # Compute appearance features and insert the frame into the database
+            # Insert the first frame into the database
+            if i == 1:
+                features = self.get_orb_features(0)
+                self.db.add(features)
+                self.already_in_db.append(0)
+
+            features = self.get_orb_features(i)
+            matches = self.query_dbow(features, k_neighbors=self.cfg.k_nearest)
+            self.db.add(features)
+            self.already_in_db.append(i)
+            # NOTE chen: Query may not return all previous frames, i.e. we need to set infinite distance for all
+            df = -torch.inf * torch.ones(len(self.already_in_db) - 1, device=self.device)
+            if matches is not None:
+                valid_matches = torch.tensor(list(matches.keys()), device=self.device)
+                valid_scores = torch.tensor(list(matches.values()), device=self.device)
+                # Only set finite distance for valid matches
+                df[valid_matches] = valid_scores
+            mask_df = df > self.thresh  # Candidates need to have a high similarity score
+            # self.visualize_place_recognition_matches(i, matches, show_only=self.cfg.k_nearest)
+
+        elif self.method == "eigen":
+
+            i = ii[0]
+            # Compute appearance features and insert the frame into the database
+            # Insert the first frame into the database
+            if i == 1:
+                feature_vec = self.get_eigen_features(0)
+                self.db.add(feature_vec)  # add vectors to the database
+                self.already_in_db.append(0)
+
+            query_feature = self.get_eigen_features(i)
+            # Search k nearest neighbors for query vector
+            distances, matches = self.db.search(query_feature, min(self.db.ntotal, self.cfg.k_nearest))
+            self.db.add(query_feature)  # add vectors to the database
+            self.already_in_db.append(i)
+            # Filter out invalid neighbor ids (will return -1 and 10**38 distance for invalid neighbors)
+            valid = matches >= 0
+            distances, neighbors = distances[valid], matches[valid]
+            matches = {k: v for k, v in zip(neighbors, distances)}
+            df = torch.inf * torch.ones(len(self.already_in_db) - 1, device=self.device)
+            # Only set finite distance for valid matches
+            df[neighbors] = distances
+            mask_df = df < self.thresh  # Candidates need to have a small distance (high similarity score)
+
+        else:
+            raise Exception("Invalid loop detection method! Choose either 'raft', 'internal', 'bow' or 'eigen'.")
+
+        if return_matches:
+            return df, mask_df, matches
+        else:
+            return df, mask_df
+
     @torch.cuda.amp.autocast(enabled=True)
     @torch.no_grad()
     def check(self) -> Tuple[List]:
@@ -407,6 +554,10 @@ class LoopDetector:
 
         HI-SLAM has an addititional orientation check, i.e. the current estimate/pose of the keyframe should be similar
         in orientation to previous keyframes, since drift more or less just changes the position, but not the orientation.
+
+        Because Optical Flow may not be a good measure for loop detection on larger maps (there can still be a lot of motion between frames),
+        we make use of more traditional place recognition techniques. ORB-SLAM uses a visual bag of words approach, based on ORB descriptor distributions.
+        This does not work well on a modern setup, so we use recent deep feature descriptors used in place recognition.
         """
         # NOTE chen: extract value here because it could change during this update in multi-thread setup
         kf_counter = self.video.counter.value
@@ -422,51 +573,7 @@ class LoopDetector:
             ii = torch.tensor(i, device=self.device).repeat(i)  # Repeat index for i-1 times
             jj = torch.arange(i, device=self.device)  # Get indices of all previous frames
 
-            # Get flow from i to all previous frames [0, i-1]
-            if self.method == "raft":
-                delta_i = self.compute_motion_raft(
-                    ii,
-                    jj,
-                    iterations=self.cfg.iterations,
-                    max_batch_size=self.cfg.max_batch_size,
-                    direction=self.cfg.direction,
-                )
-                valid = self.video.static_masks[ii]  # RAFT works on full resolution
-                df = self.get_motion_distance(delta_i, valid)
-                mask_df = df < self.thresh  # Candidates need to have a low optical flow difference
-            elif self.method == "internal":
-                delta_i = self.compute_motion_batch(ii, jj)
-                valid = self.video.static_masks[ii, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
-                df = self.get_motion_distance(delta_i, valid)
-                mask_df = df < self.thresh  # Candidates need to have a low optical flow difference
-            else:
-                # Compute appearance features and insert the frame into the database
-                # Insert the first frame into the database
-                if i == 1:
-                    features = self.get_orb_features(0)
-                    self.db.add(features)
-                    self.already_in_db.append(0)
-
-                features = self.get_orb_features(i)
-                matches = self.query_dbow(features, k_neighbors=self.cfg.k_nearest)
-                self.db.add(features)
-                self.already_in_db.append(i)
-
-                # NOTE chen: Query may not return all previous frames, i.e. we need to set infinite distance for all
-                df = -torch.inf * torch.ones(len(self.already_in_db) - 1, device=self.device)
-                if matches is not None:
-                    valid_matches = torch.tensor(list(matches.keys()), device=self.device)
-                    valid_scores = torch.tensor(list(matches.values()), device=self.device)
-                    # Only set finite distance for valid matches
-                    df[valid_matches] = valid_scores
-                mask_df = df > self.thresh  # Candidates need to have a high similarity score
-
-            # self.visualize_flow_2d(
-            #     delta_i[0].permute(2, 0, 1),
-            #     self.video.images[jj[0]].unsqueeze(0),
-            #     self.video.images[ii[0]].unsqueeze(0),
-            # )
-
+            df, mask_df, matches = self.get_frame_distance(ii, jj, return_matches=True)
             dr = self.get_orientation_distance(ii, jj)  # NOTE this is returned in degrees
             dt = torch.abs(ii - jj)  # Temporal frame distance
 
@@ -481,8 +588,8 @@ class LoopDetector:
             ii, jj = ii[mask_dt & mask_df & mask_dr], jj[mask_dt & mask_df & mask_dr]
 
             if len(ii) > 0:
-                ipdb.set_trace()
-                self.visualize_place_recognition_matches(i, matches, show_only=self.cfg.k_nearest)
+                # self.visualize_place_recognition_matches(i, matches, show_only=self.cfg.k_nearest)
+                # ipdb.set_trace()
                 # Insert bidirectional edges
                 candidates.append((torch.cat((ii, jj)), torch.cat((jj, ii))))
 
