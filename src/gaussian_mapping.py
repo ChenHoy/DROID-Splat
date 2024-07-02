@@ -111,6 +111,7 @@ class GaussianMapper(object):
         # Memoize the mapping of Gaussian indices to video indices
         # NOTE chen: use this for getting keyframes directly
         self.idx_mapping = {}
+        self.count = 0
 
     def info(self, msg: str):
         print(colored("[Gaussian Mapper] " + msg, "magenta"))
@@ -809,9 +810,14 @@ class GaussianMapper(object):
         self.cur_idx = self.video.counter.value + 1
         if self.last_idx + self.delay < self.cur_idx and self.cur_idx > self.warmup:
             self._update()
+            self.count += 1  # Count how many times we ran the Renderer
             return False
 
         elif the_end and self.last_idx + self.delay >= self.cur_idx:
             self._update(delay_to_tracking=False)  # Run another call to catch the last batch of keyframes
+            self.count += 1
             self._last_call(mapping_queue=mapping_queue, received_item=received_item)
             return True
+
+        else:
+            return False

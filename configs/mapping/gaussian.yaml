@@ -1,4 +1,4 @@
-warmup: 10 # Wait until tracking gets to this frame
+warmup: 15 # Wait until tracking gets to this frame
 delay: 2 # Delay between tracking and mapping
 use_non_keyframes: False # Use non-keyframes during map refinement
 max_frames_refinement: 70 # Maximum number of frames to optimize during refinement
@@ -6,8 +6,8 @@ use_prior_for_supervision: True # Use the prior for supervision. If not, then us
 
 # NOTE chen: please use MORE ITERATIONS than prune_densify_every! 
 # it is important to optimize newly introduced Gaussians due to densification!!!
-mapping_iters: 10 # Optimization iterations for selected views
-refinement_iters: 30 # Final Optimization iterations for all views
+mapping_iters: 30 # Optimization iterations for selected views
+refinement_iters: 50 # Final Optimization iterations for all views
 # These 2 flags filter out noisy points before Rendering Optimization
 filter_multiview: True # Only initialize Gaussians that are consistent in multiple views
 filter_uncertainty: False # Only use very certain points for intializing Gaussians
@@ -18,28 +18,28 @@ optimize_poses: True
 
 # Strategy for adding / pruning Gaussians
 keyframes:
-  n_last_frames: 5 # Always optimize the last n frames
+  n_last_frames: 10 # Always optimize the last n frames
   n_rand_frames: 5 # Optimize random global frames on top
   default_batch_size: 5 # Only add 5 frames at once to increase latency when batch_mode is deactivated
 
-  densify_every: 2 # Densify Gaussians every k updates
+  densify_every: 3 # Densify Gaussians every k updates
   prune_every: 1 # Prune Gaussians every k updates
-  prune_densify_every: 5 # How often to prune and densify gaussians during optimization
+  prune_densify_every: 16 # How often to prune and densify gaussians during optimization
   prune_mode: "abs" # "abs" or "new" How to prune: either absolute visibility or covisibility of new frames
   visibility_th: 2 # Gaussians not visible by visibility_th other frames are pruned
-  prune_last: 5 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
+  prune_last: 10 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
   abs_visibility_th: 2 # Remove gaussians that are not seen by at least this many other frames
 
   filter: # Parameter for filtering incoming points from the SLAM system
     mv_count_thresh: 2 # Pixels need to be consistent within bin_thresh distance across these k views
-    bin_thresh: 0.005 # Distance between points, this depends on the scene scale, so be careful!
-    confidence_thresh: 0.05 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
+    bin_thresh: 0.001 # Distance between points, this depends on the scene scale, so be careful!
+    confidence_thresh: 0.025 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
 
   mapping:
     # NOTE when changing the learning rates, you should also change the grad_threshold!
     densify_grad_threshold: 0.0002 # Gradient clipping
     size_threshold: 20 # Max screen size
-    opacity_th: 0.01 # Min opacity
+    opacity_th: 0.1 # Min opacity
     gaussian_extent: 4 # Affects densification, i.e. the larger the more we split gaussians
 
   refinement:
@@ -73,7 +73,7 @@ loss:
 
   rgb_boundary_threshold: 0.01 # Pixel information in an image needs to be at least higher than this 
   ### Loss weights
-  alpha1: 0.8 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha1: 0.6 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.85 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta: 5.0 # Regularizer on scale changes of the Gaussians
   beta2: 0.01 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
