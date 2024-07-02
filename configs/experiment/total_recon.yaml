@@ -4,14 +4,15 @@ defaults:
   - override /tracking: replica
 
 sleep_delay: 1.0
-stride: 2
+stride: 1
 filter_dyn: True
 opt_intr: False
 mode: "mono"
 run_backend: True
 run_visualization: True
-run_mapping: True
-
+run_mapping: False
+show_stream: True
+plot_uncertainty: False
 
 tracking:
   buffer_size: 512
@@ -35,7 +36,7 @@ tracking:
     window: 200 # Limit backend in case we would run OOM
     nms: 0
     # used for loop detection
-    use_loop_closure: True # NOTE True also works well
+    use_loop_closure: False # NOTE True also works well
     loop_window: 250
     loop_thresh: 20.0  
     loop_radius: 4
@@ -44,10 +45,12 @@ tracking:
 mapping:
   feedback_mapping: False
   optimize_poses: False
-  mapping_iters: 50
+  mapping_iters: 5
   batch_mode: True
   keyframes:
     prune_mode: "abs"
-    abs_visibility_th: 3
-    default_batch_size: 5
+    abs_visibility_th: 2
+    default_batch_size: 1
+    mapping:
+      opacity_th: 0.01
 

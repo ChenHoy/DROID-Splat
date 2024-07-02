@@ -31,8 +31,8 @@ run_backend: True # Global optimization
 run_loop_detection: True # Loop closure detection
 run_mapping: False # Rendering 
 ## Visualizations / GUIs
-run_visualization: True
-run_mapping_gui: False 
+run_visualization: False
+run_mapping_gui: True 
 show_stream: False
 
 # Frequencies for synchronizing the different main parts of the pipeline

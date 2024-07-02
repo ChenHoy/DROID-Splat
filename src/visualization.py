@@ -429,7 +429,6 @@ def write_linesets(linesets: Dict, target_folder: str, ext: str = "ply") -> None
 
 def droid_visualization(video, save_root: str = "results", device="cuda:0"):
     """DROID visualization frontend"""
-
     torch.cuda.set_device(device)
     droid_visualization.video = video
     droid_visualization.cameras = {}

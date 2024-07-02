@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 from OpenGL import GL as gl
 
-from ..gaussian_renderer import render
+from ..gaussian_renderer import render, render_dynamic
 from ..utils.graphics_utils import fov2focal, getWorld2View2
 from .gl_render import util, util_gau
 from .gl_render.render_ogl import OpenGLRenderer
@@ -28,6 +28,9 @@ from ..camera_utils import Camera
 
 def sys_print(msg, tag="GUI"):
     print(colored(f"[{tag}] {msg}", "green"))
+
+from ..scene.gaussian_model import GaussianModel
+from ..scene.dynamic_gaussian_model import DynamicGaussianModel
 
 
 class SLAM_GUI:
@@ -369,7 +372,7 @@ class SLAM_GUI:
 
         if gaussian_packet.has_gaussians:
             self.gaussian_cur = gaussian_packet
-            self.output_info.text = "Number of Gaussians: {}".format(self.gaussian_cur.get_xyz.shape[0])
+            self.output_info.text = "Number of Gaussians: {}".format(self.gaussian_cur.get_xyz.shape[-2])
             self.init = True
 
         if gaussian_packet.current_frame is not None:

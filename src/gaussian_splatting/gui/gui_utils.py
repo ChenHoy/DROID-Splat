@@ -8,6 +8,9 @@ import torch
 
 from ..utils.general_utils import build_scaling_rotation, strip_symmetric
 
+from src.gaussian_splatting.scene.dynamic_gaussian_model import DynamicGaussianModel
+
+
 cv_gl = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
 
 
@@ -84,6 +87,7 @@ class GaussianPacket:
         keyframes=None,
         finish=False,
         kf_window=None,
+        gaussian_type="static",
     ):
         self.has_gaussians = False
         if gaussians is not None:
@@ -110,6 +114,9 @@ class GaussianPacket:
         self.finish = finish
         self.kf_window = kf_window
 
+        self.type = gaussian_type
+
+
     def resize_img(self, img, width):
         if img is None:
             return None
@@ -133,6 +140,9 @@ class GaussianPacket:
         actual_covariance = L @ L.transpose(1, 2)
         symm = strip_symmetric(actual_covariance)
         return symm
+    
+    def __len__(self):
+        return self.get_xyz.shape[-2]
 
 
 def get_latest_queue(q):

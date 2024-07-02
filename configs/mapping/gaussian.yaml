@@ -1,8 +1,8 @@
 warmup: 15 # Wait until tracking gets to this frame
 delay: 2 # Delay between tracking and mapping
-use_non_keyframes: False # Use non-keyframes during map refinement
+use_non_keyframes: True # Use non-keyframes during map refinement
 max_frames_refinement: 70 # Maximum number of frames to optimize during refinement
-use_prior_for_supervision: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
+use_prior_for_supervision: False # Use the prior for supervision. If not, then use the current filtered map from SLAM
 
 # NOTE chen: please use MORE ITERATIONS than prune_densify_every! 
 # it is important to optimize newly introduced Gaussians due to densification!!!
@@ -16,16 +16,19 @@ filter_uncertainty: False # Only use very certain points for intializing Gaussia
 feedback_mapping: True
 optimize_poses: True
 
+batch_mode: True # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
+save_renders: False # Store some rendered images for debugging
+
 # Strategy for adding / pruning Gaussians
 keyframes:
   n_last_frames: 10 # Always optimize the last n frames
   n_rand_frames: 5 # Optimize random global frames on top
-  default_batch_size: 5 # Only add 5 frames at once to increase latency when batch_mode is deactivated
+  default_batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
 
   densify_every: 3 # Densify Gaussians every k updates
   prune_every: 1 # Prune Gaussians every k updates
-  prune_densify_every: 16 # How often to prune and densify gaussians during optimization
-  prune_mode: "abs" # "abs" or "new" How to prune: either absolute visibility or covisibility of new frames
+  prune_densify_every: 10 # How often to prune and densify gaussians during optimization
+  prune_mode: "new" # "abs" or "new" How to prune: either absolute visibility or covisibility of new frames
   visibility_th: 2 # Gaussians not visible by visibility_th other frames are pruned
   prune_last: 10 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
   abs_visibility_th: 2 # Remove gaussians that are not seen by at least this many other frames
@@ -39,7 +42,11 @@ keyframes:
     # NOTE when changing the learning rates, you should also change the grad_threshold!
     densify_grad_threshold: 0.0002 # Gradient clipping
     size_threshold: 20 # Max screen size
+<<<<<<< HEAD
     opacity_th: 0.1 # Min opacity
+=======
+    opacity_th: 0.05 # Min opacity
+>>>>>>> 80f9d5748346ffe489f247e330120dafd5a57e75
     gaussian_extent: 4 # Affects densification, i.e. the larger the more we split gaussians
 
   refinement:
@@ -50,8 +57,10 @@ keyframes:
 
 opt_params:
   init_lr: 10.0
-  position_lr_init: 0.0005 # Default MonoGS: 0.00016
-  position_lr_final: 0.00005 # Default MonoGS: 0.000016
+  #position_lr_init: 0.0005 # Default MonoGS: 0.00016
+  #position_lr_final: 0.00005 # Default MonoGS: 0.000016
+  position_lr_init: 0.00016 # Default MonoGS: 0.00016
+  position_lr_final: 0.000016 # Default MonoGS: 0.000016
   position_lr_delay_mult: 0.01
   position_lr_max_steps: 200
   feature_lr: 0.0025
@@ -62,8 +71,8 @@ opt_params:
 
   # LR for pose optimization
   # Caution: DONT USE A TOO HIGH LR HERE! THIS CAN DESTROY THE MAP!
-  cam_rot_delta: 0.0006 # 0.0003
-  cam_trans_delta: 0.0002 # 0.0001
+  cam_rot_delta: 0.0003 # 0.0003
+  cam_trans_delta: 0.0001 # 0.0001
 
 loss:
   # Decide which loss terms to use
@@ -81,14 +90,13 @@ loss:
 # Parameters for transfer SLAM -> Renderer
 input:
   sensor_type: 'depth'
-  pcd_downsample_init: 8 # This is a constant downsampling factor
-  pcd_downsample: 4 # NOTE You normally have up to 20k points per frame
+  pcd_downsample_init: 64 # This is a constant downsampling factor
+  pcd_downsample: 32 # NOTE You normally have up to 20k points per frame
   adaptive_pointsize: False
   point_size: 0.02
   type: 'replica'
 
-batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
-save_renders: False # Store some rendered images for debugging
+
 # Default vanilla Gaussian Splatting parameters
 use_spherical_harmonics: False 
 pipeline_params:

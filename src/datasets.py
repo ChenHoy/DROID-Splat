@@ -192,7 +192,7 @@ class BaseDataset(Dataset):
 
         # crop image edge, there are invalid value on the edge of the color image
         if self.H_edge > 0:
-            7
+            edge = self.H_edge
             color_data = color_data[:, :, edge:-edge, :]
 
         if self.W_edge > 0:
@@ -401,8 +401,6 @@ class DAVIS(BaseDataset):
         self.mask_path = self.input_folder.replace("JPEGImages", "Annotations")
         self.mask_paths = sorted(glob.glob(os.path.join(self.mask_path, self.sequence, "*.png")))
 
-        # Set number of images for loading poses
-        self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
             self.depth_path = self.input_folder.replace(
@@ -419,6 +417,8 @@ class DAVIS(BaseDataset):
 
         self.color_paths = self.color_paths[:: self.stride]
         self.mask_paths = self.mask_paths[:: self.stride]
+        self.n_img = len(self.color_paths)
+
         self.poses = None
 
 
@@ -462,6 +462,7 @@ class TotalRecon(BaseDataset):
 
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
+
 
     def load_poses(self, paths):
         self.poses = []
