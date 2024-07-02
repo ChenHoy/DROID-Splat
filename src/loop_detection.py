@@ -455,6 +455,8 @@ class LoopDetector:
         """Compute the visual difference between frames. This can be explicit motion or
         the distance between deep feature descriptors.
         """
+        s = self.video.scale_factor
+
         # Get flow from i to all previous frames [0, i-1]
         if self.method == "raft":
             delta_i = self.compute_motion_raft(
@@ -565,7 +567,6 @@ class LoopDetector:
         if not self.counter.value < kf_counter or kf_counter < 2:
             return
 
-        s = self.video.scale_factor
         start = time.time()
         candidates = []
         for i in range(max(self.counter.value - 1, 1), self.video.counter.value - 1):
