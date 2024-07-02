@@ -615,7 +615,7 @@ class GaussianMapper(object):
             self.info("\nMapping refinement starting")
             # Only optimize over 20% of the whole video and always make sure that 30% of each batch is keyframes
             self.map_refinement(
-                num_iters=self.refinement_iters, optimize_poses=True, random_frames=0.2, kf_at_least=0.3
+                num_iters=self.refinement_iters, optimize_poses=self.optimize_poses, random_frames=0.2, kf_at_least=0.3
             )
             self.info(f"#Gaussians after Map Refinement: {len(self.gaussians)}")
             self.info("Mapping refinement finished")

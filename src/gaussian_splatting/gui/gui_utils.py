@@ -135,7 +135,6 @@ class GaussianPacket:
         return symm
 
 
-# TODO is this the proper way to do it?
 def get_latest_queue(q):
     message = None
     while True:
