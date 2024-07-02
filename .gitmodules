@@ -38,3 +38,6 @@
 [submodule "ext/PyDBoW3"]
 	path = ext/PyDBoW3
 	url = https://github.com/ChenHoy/PyDBoW3.git
+[submodule "thirdparty/diff-gaussian-rasterization"]
+	path = thirdparty/diff-gaussian-rasterization
+	url = https://github.com/hjr37/diff-gaussian-rasterization.git
