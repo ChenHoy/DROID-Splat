@@ -11,6 +11,7 @@ import numpy as np
 from ..slam import SLAM
 from ..gaussian_splatting.eval_utils import EvaluatePacket
 from ..gaussian_splatting.gaussian_renderer import render
+from ..gaussian_splatting.gui import gui_utils
 from ..test.visu import plot_side_by_side, create_animation, show_img
 from ..utils import clone_obj
 from ..loop_detection import LoopDetector
@@ -23,6 +24,19 @@ class SlamTestbed(SLAM):
 
     def __init__(self, *args, **kwargs):
         super(SlamTestbed, self).__init__(*args, **kwargs)
+
+        self.use_mapping_gui = self.cfg.run_mapping_gui and self.cfg.run_mapping
+        if self.use_mapping_gui:
+            self.q_main2vis = mp.Queue()
+            self.params_gui = gui_utils.ParamsGUI(
+                pipe=self.cfg.mapping.pipeline_params,
+                background=self.gaussian_mapper.background,
+                gaussians=self.gaussian_mapper.gaussians,
+                q_main2vis=self.q_main2vis,
+            )
+            self.gaussian_mapper.q_main2vis = self.q_main2vis
+            self.gaussian_mapper.use_gui = True
+
         if self.cfg.run_loop_closure:
             self.loop_detector = LoopDetector(self.cfg.loop_closure, self.net, self.video, device=self.device)
         else:
@@ -255,26 +269,30 @@ class SlamTestbed(SLAM):
             # If new keyframe got inserted
             if frontend_old_count != self.frontend.optimizer.t1:
                 # Render all new incoming frames
-                if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % render_freq == 0:
-                    self.gaussian_mapper(None, None)
+                # if (
+                #     self.frontend.optimizer.is_initialized
+                #     and self.frontend.optimizer.t1 % render_freq == 0
+                #     and self.gaussian_mapper.warmup < self.frontend.optimizer.count
+                # ):
+                #     self.gaussian_mapper(None, None)
 
                 # Run backend and loop closure detection occasianally
                 if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % backend_freq == 0:
-                    # if self.loop_detector is not None:
-                    #     loop_candidates = self.loop_detector.check()
-                    #     if loop_candidates is not None:
-                    #         loop_ii, loop_jj = loop_candidates
-                    #     else:
-                    #         loop_ii, loop_jj = None, None
-                    #     self.backend(add_ii=loop_ii, add_jj=loop_jj)
-                    # else:
-                    self.backend()
+                    if self.loop_detector is not None:
+                        loop_candidates = self.loop_detector.check()
+                        if loop_candidates is not None:
+                            loop_ii, loop_jj = loop_candidates
+                        else:
+                            loop_ii, loop_jj = None, None
+                        self.backend(add_ii=loop_ii, add_jj=loop_jj)
+                    else:
+                        self.backend()
 
-        # d_1st, d_2nd, d_3rd = self.get_frame_distance_stats()
-        # d_1st = convert_to_tensor(d_1st)
-        # d_2nd, d_3rd = convert_to_tensor(d_2nd), convert_to_tensor(d_3rd)
+        d_1st, d_2nd, d_3rd = self.get_frame_distance_stats()
+        d_1st = convert_to_tensor(d_1st)
+        d_2nd, d_3rd = convert_to_tensor(d_2nd), convert_to_tensor(d_3rd)
 
-        # ipdb.set_trace()
+        ipdb.set_trace()
 
     # FIXME we cannot run mapping_gui with bow loop closure detection
     # reason: loop_detector.db is not thread_safe and pickable
@@ -289,9 +307,8 @@ class SlamTestbed(SLAM):
             processes.append(
                 mp.Process(target=self.visualizing, args=(1, self.cfg.run_visualization), name="Visualizing"),
             )
-        use_mapping_gui = self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate
-        if use_mapping_gui:
-            processes.append(mp.Process(target=self.mapping_gui, args=(2, use_mapping_gui), name="Mapping GUI"))
+        if self.use_mapping_gui:
+            processes.append(mp.Process(target=self.mapping_gui, args=(2, self.use_mapping_gui), name="Mapping GUI"))
         self.num_running_thread[0] += len(processes)
         for p in processes:
             p.start()
@@ -301,28 +318,29 @@ class SlamTestbed(SLAM):
 
         # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200)
         self.run_track_render(stream, backend_freq=backend_freq, render_freq=render_freq)
+        ipdb.set_trace()
 
-        self.backend()
-        self.gaussian_mapper._update(delay_to_tracking=False)
-        self.gaussian_mapper._last_call(None, None)
+        # self.backend()
+        # self.gaussian_mapper._update(delay_to_tracking=False)
+        # self.gaussian_mapper._last_call(None, None)
 
-        # We have done a refinement and used all frames of the video, i.e. we added new cameras of non-keyframes
-        # -> We sort the cams in ascending global timestamp for uid's
-        if self.gaussian_mapper.use_non_keyframes and self.gaussian_mapper.refinement_iters > 0:
-            timestamps = torch.tensor([cam.uid for cam in self.gaussian_mapper.cameras])
-        else:
-            timestamps = torch.tensor(list(self.gaussian_mapper.idx_mapping.keys()))
-        eval_packet = EvaluatePacket(
-            pipeline_params=clone_obj(self.gaussian_mapper.pipeline_params),
-            cameras=self.gaussian_mapper.cameras[:],
-            gaussians=clone_obj(self.gaussian_mapper.gaussians),
-            background=clone_obj(self.gaussian_mapper.background),
-            timestamps=timestamps,
-        )
+        # # We have done a refinement and used all frames of the video, i.e. we added new cameras of non-keyframes
+        # # -> We sort the cams in ascending global timestamp for uid's
+        # if self.gaussian_mapper.use_non_keyframes and self.gaussian_mapper.refinement_iters > 0:
+        #     timestamps = torch.tensor([cam.uid for cam in self.gaussian_mapper.cameras])
+        # else:
+        #     timestamps = torch.tensor(list(self.gaussian_mapper.idx_mapping.keys()))
+        # eval_packet = EvaluatePacket(
+        #     pipeline_params=clone_obj(self.gaussian_mapper.pipeline_params),
+        #     cameras=self.gaussian_mapper.cameras[:],
+        #     gaussians=clone_obj(self.gaussian_mapper.gaussians),
+        #     background=clone_obj(self.gaussian_mapper.background),
+        #     timestamps=timestamps,
+        # )
 
         # ipdb.set_trace()
 
-        self.terminate(processes, stream, eval_packet)
+        self.terminate(processes, stream, None)
 
         # Keep this function going until we manually stop it, so we can inspect everything for how long we want to
         # while True:

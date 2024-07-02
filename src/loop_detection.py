@@ -1,6 +1,7 @@
 from typing import Optional, Tuple, List, Dict
 from termcolor import colored
 import re
+import gc
 import time
 from pathlib import Path
 import ipdb
@@ -30,6 +31,22 @@ def show_nan(tensor: torch.Tensor) -> None:
     plt.imshow(tensor.isnan().squeeze().cpu().numpy())
     plt.axis("off")
     plt.show()
+
+
+def merge_candidates(all_candidates: List[Tuple[torch.Tensor, torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor]:
+    """We communicate the loop candidates as Tuples (ii, jj) into a multiprocessing Queue.
+    Since the loop detector runs extremely fast, the Queue will likely contain multiple sets when
+    its being pulled from. We therefore might have to merge multiple together.
+    """
+    if len(all_candidates) == 1:
+        return all_candidates[0]
+    all_ii, all_jj = [], []
+    for candidates in all_candidates:
+        ii, jj = candidates
+        all_ii.append(ii)
+        all_jj.append(jj)
+    all_ii, all_jj = torch.cat(all_ii), torch.cat(all_jj)
+    return (all_ii, all_jj)
 
 
 class LoopDetector:
@@ -66,6 +83,7 @@ class LoopDetector:
 
         self.counter = Value("i", 0)
         self.video = video
+        self.net = None  # see https://github.com/Lightning-AI/pytorch-lightning/issues/17637
         if self.video.cfg.mode == "stereo":
             raise NotImplementedError("Stereo mode not supported yet for loop closures!")
         imh, imw = self.video.ht, self.video.wd
@@ -100,22 +118,22 @@ class LoopDetector:
             self.already_in_db, self.dbow_scores = [], []  # TODO maybe delete this afterwards
 
         elif self.method == "eigen":
-            # Get the model
-            self.net = self.load_eigen()
             ### Get the database
-            res = faiss.StandardGpuResources()
             # Flat index, i.e. we dont build up a large index over time (this would not amortize <10 000 queries)
             index_flat = faiss.IndexFlatL2(self.cfg.fc_output_dim)  # Measure L2 distance between features
             # see https://gist.github.com/mdouze/c7653aaa8c3549b28bad75bd67543d34 for how to setup max. cosine similarity
-
             if "cuda" in self.device:
                 device_id = int(re.findall(r"\d+", self.device)[0])
             else:
                 device_id = 0
+            # NOTE chen: search on the GPU is pretty fast, but not pickable, see https://github.com/facebookresearch/faiss/issues/1306
+            # -> You cannot use the indices in a multiprocessing setup, therefore use CPU!
             t_start = time.time()
-            self.db = faiss.index_cpu_to_gpu(res, device_id, index_flat)  # Put on GPU 0
+            # self.db = faiss.index_cpu_to_gpu(faiss.StandardGpuResources(), device_id, index_flat)  # Put on GPU 0
+            self.db = index_flat  # Use database on the CPU
             t_end = time.time()
-            self.info(f"Initializing FAISS database on GPU took {t_end - t_start}s !")
+            # self.info(f"Initializing FAISS database on GPU took {t_end - t_start}s !")
+            self.info(f"Initializing FAISS database on CPU took {t_end - t_start}s !")
             self.already_in_db, self.dbow_scores = [], []
         else:
             raise Exception(
@@ -131,7 +149,7 @@ class LoopDetector:
         self.max_orientation_diff = self.cfg.max_orientation_difference
 
         self.loop_candidates = []
-        self.of_distances, self.rot_distances = {}, {}
+        self.f_distances, self.rot_distances = {}, {}
 
     def info(self, msg) -> None:
         print(colored("[Loop Detection]: " + msg, "cyan"))
@@ -216,19 +234,20 @@ class LoopDetector:
         """Load the EigenPlaces model, see https://github.com/gmberton/EigenPlaces from ICCV23.
         This is a modern neural network for place recogntion.
         """
-
         model = torch.hub.load(
             "gmberton/eigenplaces", "get_trained_model", backbone=self.cfg.model, fc_output_dim=self.cfg.fc_output_dim
         )
         self.info(f"Loaded EigenPlaces model {self.cfg.model}!")
-        return model.eval().to(self.device)
+        return model.half().eval().to(self.device)
 
+    @torch.no_grad()
     def get_eigen_features(self, idx: int) -> torch.Tensor:
         """Get features for a specific frame index"""
-        image = self.video.images[idx]
-        image = self.normalize(image.unsqueeze(0))
-        features = self.net(image)
-        return features
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            image = self.video.images[idx]
+            image = self.normalize(image.unsqueeze(0))
+            features = self.net(image)
+        return features.cpu()
 
     def visualize_place_recognition_matches(
         self, query_idx: torch.Tensor, matches: Dict, show_only: Optional[int] = None
@@ -520,6 +539,9 @@ class LoopDetector:
             query_feature = self.get_eigen_features(i)
             # Search k nearest neighbors for query vector
             distances, matches = self.db.search(query_feature, min(self.db.ntotal, self.cfg.k_nearest))
+            # NOTE chen: FAISS can only work on CPU in multi-threaded setup, so pull results back to GPU
+            distances, matches = distances.to(self.device), matches.to(self.device)
+
             self.db.add(query_feature)  # add vectors to the database
             self.already_in_db.append(i)
             # Filter out invalid neighbor ids (will return -1 and 10**38 distance for invalid neighbors)
@@ -565,7 +587,7 @@ class LoopDetector:
         kf_counter = self.video.counter.value
         # We need at least 2 frames in the video to compute motion
         if not self.counter.value < kf_counter or kf_counter < 2:
-            return
+            return None
 
         start = time.time()
         candidates = []
@@ -578,10 +600,9 @@ class LoopDetector:
             dr = self.get_orientation_distance(ii, jj)  # NOTE this is returned in degrees
             dt = torch.abs(ii - jj)  # Temporal frame distance
 
-            # TODO delete this after debugging! -> Determine good thresholds
             # Memoize these, for inspection later
             self.rot_distances[i] = dr
-            self.of_distances[i] = df
+            self.f_distances[i] = df
 
             ### Threshold conditions
             mask_dt = dt > self.min_temp_dist  # Candidates should not be in a temporal neighborhood
@@ -597,20 +618,19 @@ class LoopDetector:
         # Increment to latest frame like video
         self.counter.value = kf_counter
 
+        torch.cuda.empty_cache()
+        gc.collect()
+
         end = time.time()
         elapsed_time = end - start
-        self.info(f"Loop detection took {elapsed_time:.2f}s")
 
         if len(candidates) > 0:
-            all_ii, all_jj = [], []
-            for ii, jj in candidates:
-                all_ii.append(ii)
-                all_jj.append(jj)
-            all_ii, all_jj = torch.cat(all_ii), torch.cat(all_jj)
+            self.info(f"Loop detection took {elapsed_time:.2f}s")
+            all_ii, all_jj = merge_candidates(candidates)
             unique_ii, unique_jj = self.filter_duplicates(all_ii, all_jj)
             self.info(
                 f"Found {len(unique_ii)} loop candidates with edges: ({unique_ii.tolist()}) -> ({unique_jj.tolist()})!"
             )
-            return (unique_ii, unique_jj)
+            return (unique_ii.share_memory_(), unique_jj.share_memory_())
         else:
-            return
+            return None
