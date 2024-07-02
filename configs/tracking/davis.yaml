@@ -19,12 +19,6 @@ frontend:
   radius: 5
   nms: 0
 
-  use_loop_closure: False
-  loop_window: 100
-  loop_thresh: 20.0  # only consider edge with avg flow < 
-  loop_radius: 1
-  loop_nms: 12
-
   
 backend:
   warmup: 12
