@@ -639,7 +639,7 @@ class GaussianMapper(object):
             self.map_refinement(
                 num_iters=self.refinement_iters, optimize_poses=self.optimize_poses, random_frames=0.2, kf_at_least=0.3
             )
-            self.info(f"#Gaussians after Map Refinement: {len(self.gaussians)}")
+            self.info(f"Gaussians after Map Refinement: {len(self.gaussians)}")
             self.info("Mapping refinement finished")
 
             # Free memory after doing refinement
@@ -669,8 +669,7 @@ class GaussianMapper(object):
         print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Final mapping loss: {self.loss_list[-1]}", "cyan"))
         self.info(f"{len(self.iteration_info)} iterations, {len(self.cameras)/len(self.iteration_info)} cams/it")
 
-        # TODO uncomment after we are done debugging
-        # export the cameras and gaussians to the terminate process
+        # Export Cameras and Gaussians to the main Process
         if self.evaluate:
             mapping_queue.put(
                 EvaluatePacket(
@@ -678,6 +677,7 @@ class GaussianMapper(object):
                     cameras=self.cameras[:],
                     gaussians=clone_obj(self.gaussians),
                     background=clone_obj(self.background),
+                    idx_mapping=clone_obj(self.idx_mapping),
                 )
             )
         else:

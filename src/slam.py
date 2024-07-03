@@ -705,8 +705,8 @@ class SLAM:
             assert (
                 gaussian_mapper_last_state is not None
             ), "Missing GaussianMapper state for evaluation even though we ran Mapping!"
-            pose_dict = self.gaussian_mapper.get_camera_trajectory(self.gaussian_mapper.cameras)
-            kf_ids = torch.tensor(list(self.gaussian_mapper.idx_mapping.keys()))
+            pose_dict = self.gaussian_mapper.get_camera_trajectory(gaussian_mapper_last_state.cameras)
+            kf_ids = torch.tensor(list(gaussian_mapper_last_state.idx_mapping.keys()))
             kf_tstamps = self.video.timestamp[: self.video.counter.value].int().cpu()
             # Sanity checks
             assert (

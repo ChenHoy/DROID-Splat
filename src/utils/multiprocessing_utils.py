@@ -19,17 +19,27 @@ class FakeQueue:
 
 
 def clone_obj(obj):
-    if isinstance(obj, tuple):
-        return copy.deepcopy(obj)
+    """Clone all torch.Tensor objects in an object."""
 
-    clone_obj = copy.deepcopy(obj)
-    for attr in clone_obj.__dict__.keys():
+    cloned_obj = copy.deepcopy(obj)
+
+    # Take care of List[torch.Tensor] or Tuple[torch.Tensor]
+    if isinstance(cloned_obj, list) or isinstance(cloned_obj, tuple):
+        for i, el in enumerate(cloned_obj):
+            if isinstance(el, torch.Tensor):
+                cloned_obj[i] = el.detach().clone()
+        return cloned_obj
+
+    # Go detach and clone Dict[str, torch.Tensor]
+    if not hasattr(cloned_obj, "__dict__"):
+        return cloned_obj
+    for attr in cloned_obj.__dict__.keys():
         # check if its a property
-        if hasattr(clone_obj.__class__, attr) and isinstance(getattr(clone_obj.__class__, attr), property):
+        if hasattr(cloned_obj.__class__, attr) and isinstance(getattr(cloned_obj.__class__, attr), property):
             continue
-        if isinstance(getattr(clone_obj, attr), torch.Tensor):
-            setattr(clone_obj, attr, getattr(clone_obj, attr).detach().clone())
-    return clone_obj
+        if isinstance(getattr(cloned_obj, attr), torch.Tensor):
+            setattr(cloned_obj, attr, getattr(cloned_obj, attr).detach().clone())
+    return cloned_obj
 
 
 def get_all_queue(queue: mp.Queue):

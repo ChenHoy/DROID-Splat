@@ -45,6 +45,7 @@ class EvaluatePacket:
         gaussians: GaussianModel = None,
         cameras: List[Camera] = None,
         timestamps: torch.Tensor = None,
+        idx_mapping: Dict = None,
     ):
         self.has_gaussians = False
         if gaussians is not None:
@@ -67,6 +68,7 @@ class EvaluatePacket:
         self.cameras = cameras
         self.timestamps = timestamps
         self.gaussians = gaussians
+        self.idx_mapping = idx_mapping
 
     def __str__(self) -> str:
         print("Im getting something: {} {}".format(self.pipeline_params, len(self.cameras)))
