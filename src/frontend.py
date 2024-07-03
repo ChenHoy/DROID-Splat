@@ -124,7 +124,7 @@ class Frontend:
         # If the distance is too small, remove the last keyframe
         if d.item() < self.keyframe_thresh:
 
-            self.count += 1 # Only increase the count when a new frame comes in
+            self.count += 1  # Only increase the count when a new frame comes in
             self.graph.rm_keyframe(self.t1 - 2)
 
             with self.video.get_lock():
@@ -203,8 +203,17 @@ class Frontend:
 
         # Initialize
         if not self.is_initialized and self.video.counter.value == self.warmup:
+
+            # Deactivate scale optimization during initialization!
+            if self.video.optimize_scales:
+                self.graph.scale_priors = False
+
             self.__initialize()
             self.info("Initialized!")
+
+            # Activate it again, so we optimize the prior scales as well during __update()
+            if self.video.optimize_scales:
+                self.graph.scale_priors = True
 
         # Update
         elif self.is_initialized and self.t1 < self.video.counter.value:

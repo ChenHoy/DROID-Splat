@@ -182,9 +182,9 @@ class SlamTestbed(SLAM):
 
     def run_tracking_then_check(self, stream, backend_freq: int = 50, check_at: int = 400) -> None:
         """Sequential processing of the stream, where we run
-        i) Tracking + Backend
-        and then stop to run ii) Rendering. This is to
-        check how well the Gaussian Optimization does depending on how it is initialized and how long we run it.
+        i) Tracking + Backend and then stop to run
+        ii) Rendering.
+        This is to check how well the Gaussian Optimization does depending on how it is initialized and how long we run it.
         We can visualize how well a single run of our Renderer can fit a well-initialized scene.
         """
         for frame in tqdm(stream):
@@ -217,8 +217,6 @@ class SlamTestbed(SLAM):
             if self.frontend.optimizer.is_initialized and timestamp % backend_freq == 0:
                 self.backend()
 
-    # TODO for some reason, the flow gets saturated at some point, i.e. when some frames have quite the distance between
-    # each other
     def get_frame_distance_stats(self):
         """How are distances from loop detector distributed?"""
         d_1st, d_2nd, d_3rd = {}, {}, {}
@@ -267,37 +265,60 @@ class SlamTestbed(SLAM):
             self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
 
             # If new keyframe got inserted
-        #     if frontend_old_count != self.frontend.optimizer.t1:
-        #         # Render all new incoming frames
-        #         # if (
-        #         #     self.frontend.optimizer.is_initialized
-        #         #     and self.frontend.optimizer.t1 % render_freq == 0
-        #         #     and self.gaussian_mapper.warmup < self.frontend.optimizer.count
-        #         # ):
-        #         #     self.gaussian_mapper(None, None)
+            if frontend_old_count != self.frontend.optimizer.t1:
+                # Render all new incoming frames
+                # if (
+                #     self.frontend.optimizer.is_initialized
+                #     and self.frontend.optimizer.t1 % render_freq == 0
+                #     and self.gaussian_mapper.warmup < self.frontend.optimizer.count
+                # ):
+                #     self.gaussian_mapper(None, None)
 
-        #         # Run backend and loop closure detection occasianally
-        #         if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % backend_freq == 0:
-        #             if self.loop_detector is not None:
-        #                 loop_candidates = self.loop_detector.check()
-        #                 if loop_candidates is not None:
-        #                     loop_ii, loop_jj = loop_candidates
-        #                 else:
-        #                     loop_ii, loop_jj = None, None
-        #                 self.backend(add_ii=loop_ii, add_jj=loop_jj)
-        #             else:
-        #                 self.backend()
+                # Run backend and loop closure detection occasianally
+                if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % backend_freq == 0:
+                    if self.loop_detector is not None:
+                        loop_candidates = self.loop_detector.check()
+                        if loop_candidates is not None:
+                            loop_ii, loop_jj = loop_candidates
+                        else:
+                            loop_ii, loop_jj = None, None
+                        self.backend(add_ii=loop_ii, add_jj=loop_jj)
+                    else:
+                        self.backend()
 
+        # Check distance statistics, so you can select a good threshold depending on the Place Recognition Network
         # d_1st, d_2nd, d_3rd = self.get_frame_distance_stats()
         # d_1st = convert_to_tensor(d_1st)
         # d_2nd, d_3rd = convert_to_tensor(d_2nd), convert_to_tensor(d_3rd)
         # ipdb.set_trace()
 
-    # FIXME we cannot run mapping_gui with bow loop closure detection
-    # reason: loop_detector.db is not thread_safe and pickable
-    # This likely happens because we attach self.video both to loop_detector and the visualization
-    # TODO what happens when we use the gaussian mapping gui, where we pass the whole SLAM system to the gui?
-    # TODO how to isolate loop detector from the threads? Can we just pass the images to it sequentially from the outside?
+    def test_tracking(self, stream, backend_freq: int = 10) -> None:
+        """Test tracking in a sequential manner."""
+        for frame in tqdm(stream):
+            frontend_old_count = self.frontend.optimizer.t1  # How many times did the frontend actually run?
+
+            if self.cfg.with_dyn and stream.has_dyn_masks:
+                timestamp, image, depth, intrinsic, gt_pose, static_mask = frame
+            else:
+                timestamp, image, depth, intrinsic, gt_pose = frame
+                static_mask = None
+
+            # Control when to start and when to stop the SLAM system from outside
+            if timestamp < self.t_start:
+                continue
+            if self.t_stop is not None and timestamp > self.t_stop:
+                break
+
+            # Frontend insert new frames
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
+
+            if (
+                self.frontend.optimizer.is_initialized
+                and self.frontend.optimizer.t1 % backend_freq == 0
+                and self.cfg.run_backend
+            ):
+                self.backend()
+
     def run(self, stream):
         """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
 
@@ -316,31 +337,8 @@ class SlamTestbed(SLAM):
         backend_freq = 20  # Run backend every 5 frontends
 
         # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200)
-        self.run_track_render(stream, backend_freq=backend_freq, render_freq=render_freq)
+        # self.run_track_render(stream, backend_freq=backend_freq, render_freq=render_freq)
+        self.test_tracking(stream, backend_freq=backend_freq)
         ipdb.set_trace()
 
-        # self.backend()
-        # self.gaussian_mapper._update(delay_to_tracking=False)
-        # self.gaussian_mapper._last_call(None, None)
-
-        # # We have done a refinement and used all frames of the video, i.e. we added new cameras of non-keyframes
-        # # -> We sort the cams in ascending global timestamp for uid's
-        # if self.gaussian_mapper.use_non_keyframes and self.gaussian_mapper.refinement_iters > 0:
-        #     timestamps = torch.tensor([cam.uid for cam in self.gaussian_mapper.cameras])
-        # else:
-        #     timestamps = torch.tensor(list(self.gaussian_mapper.idx_mapping.keys()))
-        # eval_packet = EvaluatePacket(
-        #     pipeline_params=clone_obj(self.gaussian_mapper.pipeline_params),
-        #     cameras=self.gaussian_mapper.cameras[:],
-        #     gaussians=clone_obj(self.gaussian_mapper.gaussians),
-        #     background=clone_obj(self.gaussian_mapper.background),
-        #     timestamps=timestamps,
-        # )
-
-        # ipdb.set_trace()
-
         self.terminate(processes, stream, None)
-
-        # Keep this function going until we manually stop it, so we can inspect everything for how long we want to
-        # while True:
-        #     pass

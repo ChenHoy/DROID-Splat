@@ -10,7 +10,7 @@ import droid_backends
 
 from .droid_net import cvx_upsample
 from .geom import projective_ops as pops
-from .geom import matrix_to_lie
+from .geom import matrix_to_lie, align_scale_and_shift
 from .geom.ba import bundle_adjustment
 
 from .gaussian_splatting.camera_utils import Camera
@@ -207,9 +207,8 @@ class DepthVideo:
         Since we dont want do this for the whole map all the time, we only pad a given list of indices.
         """
         padded_indices = []
-        last_frame = (
-            indices.max().item()
-        )  # Dont pad past the sequence, because we might not have visited these frames at all
+        # Dont pad past the sequence, because we might not have visited these frames at all
+        last_frame = indices.max().item()
         for ix in indices:
             padded_indices.append(
                 torch.arange(max(0, ix - radius), min(last_frame, ix + radius + 1), device=indices.device)
@@ -227,6 +226,7 @@ class DepthVideo:
         unc_threshold: float = 0.1,
         use_multiview_consistency: bool = True,
         use_uncertainty: bool = True,
+        return_mask: bool = False,
     ) -> None:
         """Filter the map based on consistency across multiple views and uncertainty.
         Normally this is done based on only a selected few views. We extend the selection with a local neighborhood
@@ -276,6 +276,8 @@ class DepthVideo:
         disps[~mask] = 0.0  # Filter away invalid points
         self.disps_clean[dirty_index] = disps
         self.filtered_id = max(dirty_index.max().item(), self.filtered_id)
+        if return_mask:
+            return mask
 
     def get_mapping_item(self, index, use_gt=False, device="cuda:0"):
         """Get a part of the video to transfer to the Rendering module"""
@@ -334,7 +336,7 @@ class DepthVideo:
         with self.get_lock():
 
             disps = torch.where(valid, 1.0 / depths, depths)
-            disps.clamp_(min=0.001)  # Sanity for optimization
+            disps.clamp_(min=1e-5)  # Sanity for optimization
 
             s = self.scale_factor
             # We work with the original resolution in Rendering
@@ -451,7 +453,8 @@ class DepthVideo:
         """
         # Rescale the external disparities
         self.disps_sens = self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
-        self.disps_sens.clamp_(min=0.001)
+        self.disps_sens_up = self.disps_sens_up * self.scales[:, None, None] + self.shifts[:, None, None]
+        self.disps_sens.clamp_(min=1e-5)
         # Reset the scale and shift parameters to initial state
         self.scales = torch.ones_like(self.scales, device=self.device)
         self.shifts = torch.zeros_like(self.shifts, device=self.device)
@@ -507,7 +510,6 @@ class DepthVideo:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
             # FIXME chen: I dont understand why the backend cannot use the scaled disps_sens directly as well
-            # but GIORIE-SLAM also could not get this to work
             if self.optimize_scales:
                 disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
             else:
@@ -532,17 +534,40 @@ class DepthVideo:
                 motion_only,
                 self.opt_intr,
             )
-            self.disps.clamp_(min=0.001)  # Always make sure that Disparities are non-negative!!!
+            self.disps.clamp_(min=1e-5)  # Always make sure that Disparities are non-negative!!!
             # Reassing intrinsics after optimization
             if self.opt_intr:
                 self.intrinsics[: self.counter.value] = self.intrinsics[intrinsic_common_id]
 
-    # TODO include an initial scale and shift alignment by linear scale optimization like done in GIORIE SLAM
-    # NOTE chen: GIORIE-SLAM uses filter_map to get a clean_map for this initial linear alignment
+    def linear_align_prior(self) -> None:
+        """Do a linear alignmnet between the prior and the current map after initialization.
+        This strategy is used to align the scales and shifts before running Bundle Adjustment.
 
-    # TODO use only low residuals from the initial alignment for JDSA
-    # -> They filter invalid edges in ii by thresholding the error from the linear alignment
-    # you can simply add this index to the bundle adjustment function and concatenate it with non_empty_nodes
+        NOTE chen: This is a very different objective than the optical flow one, i.e. there is no guarantee that this helps to converge to the right monocular scale!
+        This also can lead to changes, that the BA optimization has to correct back again.
+        """
+
+        # Filter the map, but use self.disps for scale_optimization
+        valid_d = self.filter_map(
+            idx=torch.arange(self.counter.value, device=self.device),
+            radius=1,
+            use_multiview_consistency=True,
+            bin_thresh=0.005,
+            min_count=2,
+            return_mask=True,
+        )
+        if self.upsampled:
+            # Map gets filtered at highest resolution, but scale optimization always uses self.disps_sens not self.disps_sens_up
+            s = self.scale_factor
+            valid_d = valid_d[..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
+
+        scale_t, shift_t, error_t = align_scale_and_shift(
+            self.disps_sens[: self.counter.value - 1], self.disps[: self.counter.value - 1], valid_d
+        )
+        scale_t[torch.isnan(scale_t)], shift_t[torch.isnan(shift_t)] = 1.0, 0.0
+        self.scales[: self.counter.value - 1], self.shifts[: self.counter.value - 1] = scale_t, shift_t
+        self.reset_prior()  # Reset the prior and update disps_sens to fit the map
+
     def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 5e-3):
         """Bundle adjustment over structure with a scalable prior.
 
@@ -559,10 +584,13 @@ class DepthVideo:
             # Uncertainties are for [x, y] directions -> Take norm to get single scalar
             self.uncertainty[idx] = torch.norm(uncertainty, dim=1)
 
+            # Precondition
+            self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
+
             # Block coordinate descent optimization
             for i in range(iters):
                 # Sanity check for non-negative disparities
-                self.disps.clamp_(min=0.001), self.disps_sens.clamp_(min=0.001)
+                self.disps.clamp_(min=1e-5), self.disps_sens.clamp_(min=1e-5)
                 # Motion only Bundle Adjustment (MoBA)
                 droid_backends.ba(
                     self.poses,

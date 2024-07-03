@@ -413,14 +413,16 @@ class SLAM:
 
             # If we run an additional loop detector -> Pull in visually similar candidate edges as well
             all_loop_ii, all_loop_jj = None, None
+            loop_ii, loop_jj = None, None
             if self.cfg.run_loop_detection and loop_queue is not None:
                 if not loop_queue.empty():
                     loop_ii, loop_jj = self.get_potential_loop_update(loop_queue)
                     # memoize all loop candidates to always give all candidates to the backend as edges!
                     if loop_ii is not None and loop_jj is not None:
                         all_lc_candidates.append((loop_ii, loop_jj))
-                if len(all_lc_candidates) > 0:
-                    all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
+                all_loop_ii, all_loop_jj = loop_ii, loop_jj
+                # if len(all_lc_candidates) > 0:
+                #     all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
 
             if self.backend.enable_loop:
                 self.backend(local_graph=self.frontend.optimizer.graph, add_ii=all_loop_ii, add_jj=all_loop_jj)
