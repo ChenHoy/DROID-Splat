@@ -1,0 +1,6 @@
+defaults:
+  - /loop_closure/base@_here_
+
+method: internal
+# NOTE this threshold is much lower than proper optical flow, because the network does not provide reliable flow
+threshold: 7.5 # Optical Flow threshold for similar frames (Frames should have motion < threshold)

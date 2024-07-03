@@ -23,13 +23,6 @@ frontend:
   radius: 5 # Always build edges between nearby frames
   nms: 1
 
-  # In case you want to perform the loop closure in the frontend
-  use_loop_closure: False
-  loop_window: 60 # Only detect outside these windows, i.e. loops cannot lie within
-  loop_thresh: 50.0  
-  loop_radius: 3
-  loop_nms: 12 # default GO-SLAM: 12
-
   release_cache: False # Tradeoff: memory vs. speed, This can save up to ~5GB
   
 backend:

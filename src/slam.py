@@ -2,7 +2,7 @@ import os
 import ipdb
 import gc
 from time import sleep
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from tqdm import tqdm
 from copy import deepcopy
 from termcolor import colored
@@ -24,19 +24,14 @@ from .depth_video import DepthVideo
 from .geom import matrix_to_lie
 from .visualization import droid_visualization, depth2rgb, uncertainty2rgb
 from .trajectory_filler import PoseTrajectoryFiller
+from .loop_detection import LoopDetector, merge_candidates
 from .gaussian_mapping import GaussianMapper
 
 from .gaussian_splatting.camera_utils import Camera
-from .gaussian_splatting.eval_utils import (
-    eval_rendering,
-    do_odometry_evaluation,
-    EvaluatePacket,
-    get_gt_c2w_from_stream,
-    torch_intersect1d,
-)
+from .gaussian_splatting import eval_utils
 from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
 from .gaussian_splatting.gui import gui_utils, slam_gui
-from .utils import clone_obj
+from .utils import clone_obj, get_all_queue
 
 
 class SLAM:
@@ -52,7 +47,7 @@ class SLAM:
     We combine these building blocks in a multiprocessing environment.
     """
 
-    def __init__(self, cfg, dataset=None, output_folder: Optional[str] = None):
+    def __init__(self, cfg: DictConfig, dataset=None, output_folder: Optional[str] = None):
         super(SLAM, self).__init__()
 
         self.cfg = cfg
@@ -84,13 +79,14 @@ class SLAM:
         self.all_finished.share_memory_()
         self.tracking_finished = torch.zeros((1)).int()
         self.tracking_finished.share_memory_()
-        self.gaussian_mapping_finished = torch.zeros((1)).int()
-        self.gaussian_mapping_finished.share_memory_()
         self.backend_finished = torch.zeros((1)).int()
         self.backend_finished.share_memory_()
+        self.gaussian_mapping_finished = torch.zeros((1)).int()
+        self.gaussian_mapping_finished.share_memory_()
+        self.loop_detection_finished = torch.zeros((1)).int()
+        self.loop_detection_finished.share_memory_()
         self.visualizing_finished = torch.zeros((1)).int()
         self.visualizing_finished.share_memory_()
-
         self.mapping_visualizing_finished = torch.zeros((1)).int()
         self.mapping_visualizing_finished.share_memory_()
 
@@ -112,8 +108,14 @@ class SLAM:
         self.backend = BackendWrapper(cfg, self)
         self.traj_filler = PoseTrajectoryFiller(self.cfg, net=self.net, video=self.video, device=self.device)
 
+        if cfg.run_loop_detection:
+            self.loop_detector = LoopDetector(self.cfg.loop_closure, self.net, self.video, self.device)
+        else:
+            self.loop_detector = None
+
         self.dataset = dataset
         self.mapping_queue = mp.Queue()
+        self.loop_queue = mp.Queue()
         self.received_mapping = mp.Event()
 
         if cfg.data.dataset in ["kitti", "tartanair", "euroc"]:
@@ -135,16 +137,16 @@ class SLAM:
 
         self.sanity_checks()
 
-    def info(self, msg) -> None:
+    def info(self, msg: str) -> None:
         print(colored("[Main]: " + msg, "green"))
 
-    # TODO chen: what are other corner cases which we would like a user to avoid?
-    def sanity_checks(self):
+    def sanity_checks(self) -> None:
         """Perform sanity checks to see if the system is misconfigured, this is just supposed
         to protect the user when running the system"""
         if self.cfg.mode == "stereo":
             # NOTE chen: I noticed, that this is really not impemented, i.e.
             # we would need to do some changes in motion_filter, depth_video, BA, etc. to even store the right images, fmaps, etc.
+            # NOTE chen: Teed definitely had the idea on dataloader level to return (image_left, image_right) as one sample for images
             raise NotImplementedError(colored("Stereo mode not supported yet!", "red"))
         if self.cfg.mode == "prgbd":
             assert not (self.video.optimize_scales and self.video.opt_intr), colored(
@@ -161,6 +163,17 @@ class SLAM:
                     make sure that you actually refine the map after running tracking!""",
                     "red",
                 )
+        if self.cfg.run_mapping_gui:
+            assert self.cfg.run_mapping, colored(
+                """If you want to use the Mapping GUI, you also need to run the Mapping process!""",
+                "red",
+            )
+        if self.cfg.run_loop_detection:
+            assert self.cfg.run_backend, colored(
+                """We only do loop closure optimization in the backend, which optimizes the global map. 
+                Use the loop detector always together with the backend enabled!""",
+                "red",
+            )
 
     def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
         if output_folder is not None:
@@ -175,7 +188,7 @@ class SLAM:
             os.makedirs(f"{self.output}/intermediate_renders/temp", exist_ok=True)
         os.makedirs(f"{self.output}/evaluation", exist_ok=True)
 
-    def update_cam(self, cfg):
+    def update_cam(self, cfg: DictConfig) -> None:
         """
         Update the camera intrinsics according to the pre-processing config,
         such as resize or edge crop
@@ -213,7 +226,7 @@ class SLAM:
 
         self.net.load_state_dict(state_dict)
 
-    def tracking(self, rank, stream, input_queue: mp.Queue) -> None:
+    def tracking(self, rank: int, stream, input_queue: mp.Queue) -> None:
         """Main driver of framework by looping over the input stream"""
 
         self.info("Frontend tracking thread started!")
@@ -254,7 +267,29 @@ class SLAM:
         self.all_finished += 1
         self.info("Frontend Tracking done!")
 
-    def get_ram_usage(self):
+    def loop_detection(self, rank: int, loop_queue: mp.Queue, run: bool = False) -> None:
+
+        if run:
+            assert self.loop_detector is not None, "Loop Detection is not enabled, but we are running it!"
+            # Initialize network during worker process, since torch.hub models need to, see https://github.com/Lightning-AI/pytorch-lightning/issues/17637
+            if self.loop_detector.method == "eigen" and self.loop_detector.net is None:
+                self.loop_detector.net = self.loop_detector.load_eigen()
+
+        self.info("Loop Detection thread started!")
+        self.all_trigered += 1
+
+        # Run as long as Frontend tracking gives use new frames
+        while self.tracking_finished < 1 and run:
+            candidates = self.loop_detector.check()
+            if candidates is not None:
+                self.loop_detector.info("Sending loop candidates ...")
+                loop_queue.put(candidates)
+
+        self.loop_detection_finished += 1
+        self.all_finished += 1
+        self.info("Loop Detection done!")
+
+    def get_ram_usage(self) -> Tuple[float, float]:
         free_mem, total_mem = torch.cuda.mem_get_info(device=self.device)
         used_mem = 1 - (free_mem / total_mem)
         return used_mem, free_mem
@@ -279,7 +314,21 @@ class SLAM:
             self.backend = BackendWrapper(self.cfg, self)
             self.backend.to(self.device)
 
-    def global_ba(self, rank, run=False):
+    def get_potential_loop_update(self, loop_queue: mp.Queue):
+        try:
+            new_loops = get_all_queue(loop_queue)  # Empty the whole Queue at once
+            new_loops = merge_candidates(new_loops)  # In case we had multiple loop updates
+            self.backend.info("Received loop candidates!")
+            candidates = clone_obj(new_loops)
+            del new_loops
+            loop_ii, loop_jj = candidates
+        except Exception as e:
+            print("Could not get anything from the Queue! :(")
+            print(e)
+            loop_ii, loop_jj = None, None
+        return loop_ii, loop_jj
+
+    def global_ba(self, rank: int, loop_queue: Optional[mp.Queue] = None, run: bool = False) -> None:
         self.info("Backend thread started!")
         self.all_trigered += 1
 
@@ -287,38 +336,68 @@ class SLAM:
 
             # Only run backend if we have enough RAM for it
             self.ram_safeguard_backend(max_ram=self.max_ram_usage)
-            if self.backend is not None:
-                if self.backend.enable_loop:
-                    self.backend(local_graph=self.frontend.optimizer.graph)
-                else:
-                    self.backend()
-                sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
+            if self.backend is None:
+                continue
+
+            # If we run an additional loop detector -> Pull in visually similar candidate edges as well
+            loop_ii, loop_jj = None, None
+            if self.cfg.run_loop_detection and loop_queue is not None:
+                if not loop_queue.empty():
+                    loop_ii, loop_jj = self.get_potential_loop_update(loop_queue)
+
+            if self.backend.enable_loop:
+                self.backend(local_graph=self.frontend.optimizer.graph, add_ii=loop_ii, add_jj=loop_jj)
+            else:
+                self.backend(add_ii=loop_ii, add_jj=loop_jj)
+            sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
         # Run one last time after tracking finished
-        if run and self.backend is not None and self.backend.do_refinement:
+        if run and self.backend.do_refinement:
             with self.video.get_lock():
                 t_end = self.video.counter.value
 
-            msg = "Optimize full map: [{}, {}]!".format(0, t_end)
-            self.backend.info(msg)
-
-            # Use loop closure BA for refinement if enabled
-            if self.backend.enable_loop:
-                _, _ = self.backend.optimizer.loop_ba(t_start=0, t_end=t_end, steps=6)
-                _, _ = self.backend.optimizer.loop_ba(t_start=0, t_end=t_end, steps=6)
+            # Reinstantiate in case backend got deleted
+            self.ram_safeguard_backend(max_ram=self.max_ram_usage)
+            if self.backend is None:
+                self.info(
+                    """Backend Refinement does not fit into memory! Please run the system in a 
+                    different configuration for this to work. (Maybe use lower resolution)"""
+                )
             else:
-                _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
-                _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
+                msg = "Optimize full map: [{}, {}]!".format(0, t_end)
+                self.backend.info(msg)
 
-        del self.backend
-        torch.cuda.empty_cache()
-        gc.collect()
+                # If we run an additional loop detector -> Pull in visually similar candidate edges as well
+                loop_ii, loop_jj = None, None
+                if self.cfg.run_loop_detection and loop_queue is not None:
+                    if not loop_queue.empty():
+                        loop_ii, loop_jj = self.get_potential_loop_update(loop_queue)
+
+                # Use loop closure BA for refinement if enabled
+                if self.backend.enable_loop:
+                    _, _ = self.backend.optimizer.loop_ba(
+                        t_start=0, t_end=t_end, steps=6, add_ii=loop_ii, add_jj=loop_jj
+                    )
+                    _, _ = self.backend.optimizer.loop_ba(
+                        t_start=0, t_end=t_end, steps=6, add_ii=loop_ii, add_jj=loop_jj
+                    )
+                else:
+                    _, _ = self.backend.optimizer.dense_ba(
+                        t_start=0, t_end=t_end, steps=6, add_ii=loop_ii, add_jj=loop_jj
+                    )
+                    _, _ = self.backend.optimizer.dense_ba(
+                        t_start=0, t_end=t_end, steps=6, add_ii=loop_ii, add_jj=loop_jj
+                    )
+
+                del self.backend
+                torch.cuda.empty_cache()
+                gc.collect()
 
         self.backend_finished += 1
         self.all_finished += 1
         self.info("Backend done!")
 
-    def gaussian_mapping(self, rank, run, mapping_queue: mp.Queue, received_mapping: mp.Event):
+    def gaussian_mapping(self, rank: int, run: bool, mapping_queue: mp.Queue, received_mapping: mp.Event) -> None:
         self.info("Gaussian Mapping Triggered!")
         self.all_trigered += 1
 
@@ -338,7 +417,7 @@ class SLAM:
         self.all_finished += 1
         self.info("Gaussian Mapping Done!")
 
-    def visualizing(self, rank, run=True):
+    def visualizing(self, rank: int, run=True) -> None:
         self.info("Visualization thread started!")
         self.all_trigered += 1
         finished = False
@@ -350,7 +429,7 @@ class SLAM:
         self.all_finished += 1
         self.info("Visualization done!")
 
-    def mapping_gui(self, rank, run=True):
+    def mapping_gui(self, rank: int, run=True) -> None:
         self.info("Mapping GUI thread started!")
         self.all_trigered += 1
         finished = False
@@ -412,7 +491,7 @@ class SLAM:
         self.all_finished += 1
         self.info("Show stream Done!")
 
-    def evaluate(self, stream, gaussian_mapper_last_state: Optional[EvaluatePacket] = None):
+    def evaluate(self, stream, gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None) -> None:
 
         eval_path = os.path.join(self.output, "evaluation")
         self.info("Saving evaluation results in {}".format(eval_path))
@@ -434,7 +513,7 @@ class SLAM:
         # Evo expects floats for timestamps
         kf_tstamps = [float(i) for i in kf_tstamps]
         tstamps = [float(i) for i in tstamps]
-        kf_result_ate, all_result_ate = do_odometry_evaluation(
+        kf_result_ate, all_result_ate = eval_utils.do_odometry_evaluation(
             eval_path, est_c2w_kf_lie, gt_c2w_kf_lie, est_c2w_all_lie, gt_c2w_all_lie, tstamps, kf_tstamps, monocular
         )
         self.info("(Keyframes only) ATE: {}".format(kf_result_ate))
@@ -448,6 +527,7 @@ class SLAM:
             "run_mapping": [str(self.cfg.run_mapping), str(self.cfg.run_mapping)],
             "stride": [str(self.cfg.stride), str(self.cfg.stride)],
             "loop_closure": [str(self.backend.enable_loop), str(self.backend.enable_loop)],
+            "loop_detector": [str(self.cfg.run_loop_detection), str(self.cfg.run_loop_detection)],
             "dataset": [stream.input_folder, stream.input_folder],
             "mode": [self.cfg.mode, self.cfg.mode],
             "ape": [kf_result_ate["mean"], all_result_ate["mean"]],
@@ -473,17 +553,17 @@ class SLAM:
 
             ### Evalaute only keyframes, which we overfit to see how good that fit is
             save_dir = os.path.join(render_eval_path, "keyframes")
-            kf_rnd_metrics = eval_rendering(
+            kf_rnd_metrics = eval_utils.eval_rendering(
                 kf_cams, kf_tstamps, gaussians, stream, render_cfg, background, save_dir, True, monocular
             )
 
             ### Evalaute on non-keyframes, which we have never seen during training
             # NOTE this is the proper metric, that people compare in papers
-            _, _, nonkf_tstamps = torch_intersect1d(torch.tensor(kf_tstamps), torch.tensor(tstamps))
+            _, _, nonkf_tstamps = eval_utils.torch_intersect1d(torch.tensor(kf_tstamps), torch.tensor(tstamps))
             nonkf_tstamps = [int(i) for i in nonkf_tstamps]
             nonkf_cams = [all_cams[i] for i in nonkf_tstamps]
             save_dir = os.path.join(render_eval_path, "non-keyframes")
-            nonkf_rnd_metrics = eval_rendering(
+            nonkf_rnd_metrics = eval_utils.eval_rendering(
                 nonkf_cams, nonkf_tstamps, gaussians, stream, render_cfg, background, save_dir, True, monocular
             )
 
@@ -492,6 +572,7 @@ class SLAM:
                 "run_mapping": [str(self.cfg.run_mapping), str(self.cfg.run_mapping)],
                 "stride": [str(self.cfg.stride), str(self.cfg.stride)],
                 "loop_closure": [str(self.backend.enable_loop), str(self.backend.enable_loop)],
+                "loop_detector": [str(self.cfg.run_loop_detection), str(self.cfg.run_loop_detection)],
                 "dataset": [stream.input_folder, stream.input_folder],
                 "mode": [self.cfg.mode, self.cfg.mode],
                 "psnr": [kf_rnd_metrics["mean_psnr"], nonkf_rnd_metrics["mean_psnr"]],
@@ -506,7 +587,7 @@ class SLAM:
             render_df = pd.DataFrame(rendering_results)
             render_df.to_csv(os.path.join(render_eval_path, "evaluation_results.csv"), index=False)
 
-    def get_trajectories(self, stream, gaussian_mapper_last_state: Optional[EvaluatePacket] = None):
+    def get_trajectories(self, stream, gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None):
         """Get the poses both for the whole video sequence and only the keyframes for evaluation.
         Poses are in format [B, 7, 1] as lie elements.
         """
@@ -540,13 +621,16 @@ class SLAM:
             est_c2w_kf_lie = est_c2w_all_lie[kf_tstamps]
 
         est_c2w_all_lie, est_c2w_kf_lie = est_c2w_all_lie.cpu().numpy(), est_c2w_kf_lie.cpu().numpy()
-        gt_c2w_all_lie = get_gt_c2w_from_stream(stream).cpu().numpy()
+        gt_c2w_all_lie = eval_utils.get_gt_c2w_from_stream(stream).cpu().numpy()
         gt_c2w_kf_lie = gt_c2w_all_lie[kf_tstamps]
         return est_c2w_all_lie, est_c2w_kf_lie, gt_c2w_all_lie, gt_c2w_kf_lie, kf_tstamps, tstamps
 
     def get_all_cams_for_rendering(
-        self, stream, est_c2w_all_lie, gaussian_mapper_last_state: Optional[EvaluatePacket] = None
-    ):
+        self,
+        stream,
+        est_c2w_all_lie: np.ndarray,
+        gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None,
+    ) -> List[Camera]:
 
         if self.cfg.mapping.use_non_keyframes:
             all_cams = gaussian_mapper_last_state.cameras
@@ -583,7 +667,7 @@ class SLAM:
                 all_cams.append(new_cam)
         return all_cams
 
-    def save_state(self):
+    def save_state(self) -> None:
         self.info("Saving checkpoints...")
         os.makedirs(os.path.join(self.output, "checkpoints/"), exist_ok=True)
         torch.save(
@@ -594,7 +678,12 @@ class SLAM:
             os.path.join(self.output, "checkpoints/go.ckpt"),
         )
 
-    def terminate(self, processes: List, stream=None, gaussian_mapper_last_state=None):
+    def terminate(
+        self,
+        processes: List[mp.Process],
+        stream=None,
+        gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None,
+    ) -> None:
         """fill poses for non-keyframe images and evaluate"""
         self.info("Initiating termination ...")
 
@@ -610,21 +699,26 @@ class SLAM:
             self.info("Terminated process {}".format(p.name))
         self.info("Terminate: Done!")
 
-    def run(self, stream):
+    def run(self, stream) -> None:
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
             mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Frontend Tracking"),
-            mp.Process(target=self.global_ba, args=(2, self.cfg.run_backend), name="Backend"),
-            mp.Process(target=self.visualizing, args=(3, self.cfg.run_visualization), name="Visualizing"),
+            mp.Process(target=self.global_ba, args=(2, self.loop_queue, self.cfg.run_backend), name="Backend"),
+            mp.Process(
+                target=self.loop_detection,
+                args=(3, self.loop_queue, self.cfg.run_loop_detection),
+                name="Loop Detector",
+            ),
+            mp.Process(target=self.visualizing, args=(4, self.cfg.run_visualization), name="Visualizing"),
             mp.Process(
                 target=self.gaussian_mapping,
-                args=(4, self.cfg.run_mapping, self.mapping_queue, self.received_mapping),
+                args=(5, self.cfg.run_mapping, self.mapping_queue, self.received_mapping),
                 name="Gaussian Mapping",
             ),
             mp.Process(
                 target=self.mapping_gui,
-                args=(5, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
+                args=(6, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
                 name="Mapping GUI",
             ),
         ]

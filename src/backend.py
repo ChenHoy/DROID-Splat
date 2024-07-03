@@ -282,6 +282,7 @@ class Backend:
     # TODO implement sparse Pose Graph Optimization similar to HI-SLAM
     # we dont want to optimize all the local frames, only global links in a loop closure fashion
     # This only optimizes the SIM3 poses, not disparity or intrinsics
+    # -> How would you transform a normal pose graph into segments with relative pose edges?!
     @torch.no_grad()
     def sparse_ba(
         self, t_start: int = 0, t_end: Optional[int] = None, steps: int = 6, iter: int = 4, motion_only: bool = False

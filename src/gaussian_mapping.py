@@ -114,6 +114,7 @@ class GaussianMapper(object):
 
         # Memoize the mapping of Gaussian indices to video indices
         self.idx_mapping = {}
+        self.count = 0
 
     def info(self, msg: str):
         print(colored("[Gaussian Mapper] " + msg, "magenta"))
@@ -644,7 +645,7 @@ class GaussianMapper(object):
             self.info("\nMapping refinement starting")
             # Only optimize over 20% of the whole video and always make sure that 30% of each batch is keyframes
             self.map_refinement(
-                num_iters=self.refinement_iters, optimize_poses=True, random_frames=0.2, kf_at_least=0.3
+                num_iters=self.refinement_iters, optimize_poses=self.optimize_poses, random_frames=0.2, kf_at_least=0.3
             )
             self.info(f"#Gaussians after Map Refinement: {len(self.gaussians)}")
             self.info("Mapping refinement finished")
@@ -838,10 +839,15 @@ class GaussianMapper(object):
         self.cur_idx = self.video.counter.value + 1
         if self.last_idx + self.delay < self.cur_idx and self.cur_idx > self.warmup:
             self._update()
+            self.count += 1  # Count how many times we ran the Renderer
             return False
 
         elif the_end and self.last_idx + self.delay >= self.cur_idx:
             self.cur_idx = self.video.counter.value
             self._update(delay_to_tracking=False)  # Run another call to catch the last batch of keyframes
+            self.count += 1
             self._last_call(mapping_queue=mapping_queue, received_item=received_item)
             return True
+
+        else:
+            return False

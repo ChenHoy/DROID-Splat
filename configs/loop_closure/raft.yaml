@@ -1,0 +1,14 @@
+defaults:
+  - /loop_closure/base@_here_
+
+method: raft
+threshold: 40.0 # Optical Flow threshold for similar frames (Frames should have motion < threshold)
+iterations: 1 # How many iterations we run the Motion Estimation Model
+max_batch_size: 32 # How many image pairs to compute motion in batch mode
+direction: forward
+weights: ext/RAFT/weights/raft-small.pth # (Relative or absolute) [raft-small.pth, raft-sintel.pth]
+model_cfg:
+  small: True
+  mixed_precision: False
+  alternate_corr: False
+  dropout: False

@@ -5,6 +5,7 @@ import ipdb
 from time import gmtime, strftime, time
 
 import torch
+from lietorch import SE3
 
 from .factor_graph import FactorGraph
 from .motion_filter import MotionFilter
@@ -67,16 +68,6 @@ class Frontend:
         self.steps2 = cfg.tracking.frontend.get("steps2", 2)
         self.iters = cfg.tracking.frontend.get("iters", 4)
 
-        # Loop closure parameters
-        # NOTE chen: I dont recommend using loop closures in the frontend because this can
-        # lead to big spikes in memory usage. It is preferable to use this in the backend
-        self.enable_loop = cfg.tracking.frontend.get("use_loop_closure", False)
-        self.loop_window = cfg.tracking.frontend.get("loop_window", 100)
-        self.loop_radius = cfg.tracking.frontend.get("loop_radius", 2)
-        self.loop_nms = cfg.tracking.frontend.get("loop_nms", 1)
-        self.loop_thresh = cfg.tracking.frontend.get("loop_thresh", 20.0)
-
-        self.last_loop_t = -1
         # Local optimization window
         self.t0, self.t1 = 0, 0
 
@@ -90,12 +81,6 @@ class Frontend:
             upsample=self.upsample,
         )
 
-    def loop_info(self, t0: int, t1: int, n_kf: int, n_edges: int) -> None:
-        msg = "Loop BA: [{}, {}]; Current Keyframe is {}, last is {}. Using {} KFs and {} edges!".format(
-            t0, t1, t1, self.last_loop_t, n_kf, n_edges
-        )
-        self.info(msg)
-
     def info(self, msg: str):
         print(colored("[Frontend] " + msg, "yellow"))
 
@@ -103,42 +88,6 @@ class Frontend:
         free_mem, total_mem = torch.cuda.mem_get_info(device=self.device)
         used_mem = 1 - (free_mem / total_mem)
         return used_mem, free_mem
-
-    @torch.no_grad()
-    def loop_closure_update(self, t_start, t_end, steps=6, motion_only=False, lm=1e-4, ep=1e-1):
-        """Perform an update on the graph with loop closure awareness. This uses a higher step size
-        for optimization than the dense bundle adjustment of the backend and rest of frontend.
-
-        NOTE chen: this should be used with caution, if you have a longer video / larger map, then using
-        loop closures in the frontend can lead to sudden high spikes in RAM! It seems much safer
-        to use loop closures in the backend with a fixed optimization window size to not get surprised.
-        """
-        max_factors = 8 * self.loop_window
-        t_start_loop = max(0, t_end - self.loop_window)
-        left_factors = max_factors - len(self.graph.ii)
-
-        n_edges = self.graph.add_loop_aware_proximity_factors(
-            t_start,
-            t_end,
-            t_start_loop,
-            True,
-            self.loop_radius,
-            self.loop_nms,
-            self.beta,
-            self.loop_thresh,
-            max_factors=left_factors,
-        )
-        # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
-        self.graph.update_lowmem(
-            t_start_loop + 1, t_end, steps=steps, max_t=t_end, lm=lm, ep=ep, motion_only=motion_only
-        )
-        self.graph.clear_edges()
-        torch.cuda.empty_cache()
-        # Mark the frames as updated
-        self.video.dirty[t_start:t_end] = True
-        self.video.mapping_dirty[t_start:t_end] = True
-
-        return t_end - t_start_loop, n_edges
 
     def __update(self):
         """add edges, perform update"""
@@ -188,20 +137,14 @@ class Frontend:
         # Optimize again
         else:
             cur_t = self.video.counter.value
-            if self.enable_loop and cur_t > self.frontend_window:
-                ### 2nd update
-                n_kf, n_edges = self.loop_closure_update(t_start=0, t_end=cur_t, steps=self.steps2, motion_only=False)
-                self.loop_info(0, cur_t, n_kf, n_edges)
-                self.last_loop_t = cur_t
-            else:
-                t0 = max(1, self.graph.ii.min().item() + 1)
-                t1 = max(self.graph.ii.max().item(), self.graph.jj.max().item()) + 1
-                msg = "Running frontend over [{}, {}] with {} factors.".format(t0, t1, self.graph.ii.numel())
-                self.info(msg)
+            t0 = max(1, self.graph.ii.min().item() + 1)
+            t1 = max(self.graph.ii.max().item(), self.graph.jj.max().item()) + 1
+            msg = "Running frontend over [{}, {}] with {} factors.".format(t0, t1, self.graph.ii.numel())
+            self.info(msg)
 
-                ### 2nd update
-                for itr in range(self.steps2):
-                    self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True)
+            ### 2nd update
+            for itr in range(self.steps2):
+                self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True)
 
         # Manually free memory here as this builds up over time
         if self.release_cache:
@@ -210,8 +153,13 @@ class Frontend:
                 torch.cuda.empty_cache()
                 gc.collect()
 
-        # set pose & disp for next iteration
-        self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
+        ### Set pose & disp for next iteration
+        # Naive strategy for initializing next pose as previous pose in DROID-SLAM
+        # self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
+        # Better: use constant speed assumption and extrapolate
+        dP = SE3(self.video.poses[self.t1 - 1]) * SE3(self.video.poses[self.t1 - 2]).inv()  # Get relative pose
+        self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
+
         self.video.disps[self.t1] = self.video.disps[self.t1 - 1].mean()
 
         ### update visualization

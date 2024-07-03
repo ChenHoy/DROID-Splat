@@ -145,7 +145,6 @@ class GaussianPacket:
         return self.get_xyz.shape[-2]
 
 
-# TODO is this the proper way to do it?
 def get_latest_queue(q):
     message = None
     while True:
