@@ -25,6 +25,9 @@ def clone_obj(obj):
 
     # Take care of List[torch.Tensor] or Tuple[torch.Tensor]
     if isinstance(cloned_obj, list) or isinstance(cloned_obj, tuple):
+        # Convert to list so we can iterate over it
+        if isinstance(cloned_obj, tuple):
+            cloned_obj = list(cloned_obj)
         for i, el in enumerate(cloned_obj):
             if isinstance(el, torch.Tensor):
                 cloned_obj[i] = el.detach().clone()

@@ -232,14 +232,9 @@ class SLAM:
         self.cx = self.cx - w_edge
         self.cy = self.cy - h_edge
 
-    # TODO chen: do we really still need this?
-    def load_bound(self, cfg: DictConfig) -> None:
-        self.bound = torch.from_numpy(np.array(cfg.data.bound)).float()
-
     def load_pretrained(self, pretrained: str) -> None:
         self.info(f"Load pretrained checkpoint from {pretrained}!")
 
-        # TODO why do we have to use the [:2] here?!
         state_dict = OrderedDict([(k.replace("module.", ""), v) for (k, v) in torch.load(pretrained).items()])
         state_dict["update.weight.2.weight"] = state_dict["update.weight.2.weight"][:2]
         state_dict["update.weight.2.bias"] = state_dict["update.weight.2.bias"][:2]
@@ -309,7 +304,6 @@ class SLAM:
             # Check if we actually inserted a new frame and optimized
             if self.frontend.count > old_count:
                 # Synchronize other parallel threads
-                # FIXME right now I think this does not work correctly, where we should run backend after 25 calls for warmup, but it actually runs 1. after 25+freq calls
                 if self.frontend.count % self.backend_freq == 0 and self.frontend.count > (self.backend_warmup + 1):
                     semaBackend.release()  # Signal Backend that it can run again
                 if self.frontend.count % self.mapping_freq == 0 and self.frontend.count > (self.mapping_warmup + 1):
@@ -328,7 +322,7 @@ class SLAM:
         # Release the Semaphores to avoid deadlock
         # HACK Increase the counter just by a lot, so it will never go to 0 again
         for i in range(1000):
-            semaBackend.release() 
+            semaBackend.release()
             semaMapping.release()
 
     def loop_detection(self, rank: int, loop_queue: mp.Queue, run: bool = False) -> None:
@@ -358,8 +352,7 @@ class SLAM:
         used_mem = 1 - (free_mem / total_mem)
         return used_mem, free_mem
 
-    # FIXME we should store the backend.count and make it possible, so that we can restart with the same count again
-    def ram_safeguard_backend(self, max_ram: float = 0.9, min_ram: float = 0.5) -> None:
+    def ram_safeguard_backend(self, max_ram: float = 0.9, min_ram: float = 0.5, count_to_set: int = 0) -> None:
         """There are some scenes, where we might get into trouble with memory.
         In order to keep the system going, we simply dont use the backend until we can afford it again.
         """
@@ -367,16 +360,19 @@ class SLAM:
         if used_mem > max_ram and self.backend is not None:
             print(colored(f"[Main]: Warning: Deleting Backend due to high memory usage [{used_mem} %]!", "red"))
             print(colored(f"[Main]: Warning: Warning: Got only {free_mem/ 1024 ** 3} GB left!", "red"))
+            old_count = self.backend.count
             del self.backend
             self.backend = None
             gc.collect()
             torch.cuda.empty_cache()
+            return old_count
 
         # NOTE chen: if we deleted the backend due to memory issues we likely have not a lot of capacity left for backend
         # only use backend again once we have some slack -> 50% free RAM (12GB in use)
         if self.backend is None and used_mem <= min_ram:
             self.info("Reinstantiating Backend ...")
             self.backend = BackendWrapper(self.cfg, self)
+            self.backend.count = count_to_set  # Reset with memoized count
             self.backend.to(self.device)
 
     def get_potential_loop_update(self, loop_queue: mp.Queue):
@@ -399,6 +395,9 @@ class SLAM:
         self.info("Backend thread started!")
         self.all_trigered += 1
 
+        memoized_backend_count = 0
+        all_lc_candidates = []
+
         while self.tracking_finished < 1 and run:
             if self.backend_can_start < 1:
                 continue
@@ -406,25 +405,30 @@ class SLAM:
             semaBackend.acquire()  # Aquire the semaphore (If the counter == 0, then this thread will be blocked)
 
             # Only run backend if we have enough RAM for it
-            self.ram_safeguard_backend(max_ram=self.max_ram_usage)
+            memoized_backend_count = self.ram_safeguard_backend(
+                max_ram=self.max_ram_usage, count_to_set=memoized_backend_count
+            )
             if self.backend is None:
                 continue
 
             # If we run an additional loop detector -> Pull in visually similar candidate edges as well
-            # FIXME memoize all loop candidates to always give all candidates to the backend as edges!
-            # else we will forget previous candidates and optimize over them only once
-            loop_ii, loop_jj = None, None
+            all_loop_ii, all_loop_jj = None, None
             if self.cfg.run_loop_detection and loop_queue is not None:
                 if not loop_queue.empty():
                     loop_ii, loop_jj = self.get_potential_loop_update(loop_queue)
+                    # memoize all loop candidates to always give all candidates to the backend as edges!
+                    if loop_ii is not None and loop_jj is not None:
+                        all_lc_candidates.append((loop_ii, loop_jj))
+                if len(all_lc_candidates) > 0:
+                    all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
 
             if self.backend.enable_loop:
-                self.backend(local_graph=self.frontend.optimizer.graph, add_ii=loop_ii, add_jj=loop_jj)
+                self.backend(local_graph=self.frontend.optimizer.graph, add_ii=all_loop_ii, add_jj=all_loop_jj)
             else:
-                self.backend(add_ii=loop_ii, add_jj=loop_jj)
+                self.backend(add_ii=all_loop_ii, add_jj=all_loop_jj)
             sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
-        if self.backend is not None:
+        if self.backend is not None and run:
             self.info(f"Ran Backend {self.backend.count} times before refinement!")
 
         # Run one last time after tracking finished
@@ -433,7 +437,7 @@ class SLAM:
                 t_end = self.video.counter.value
 
             # Reinstantiate in case backend got deleted
-            self.ram_safeguard_backend(max_ram=self.max_ram_usage)
+            self.ram_safeguard_backend(max_ram=self.max_ram_usage, count_to_set=memoized_backend_count)
             if self.backend is None:
                 self.info(
                     """Backend Refinement does not fit into memory! Please run the system in a 
@@ -444,25 +448,30 @@ class SLAM:
                 self.backend.info(msg)
 
                 # If we run an additional loop detector -> Pull in visually similar candidate edges as well
-                loop_ii, loop_jj = None, None
+                all_loop_ii, all_loop_jj = None, None
                 if self.cfg.run_loop_detection and loop_queue is not None:
                     if not loop_queue.empty():
                         loop_ii, loop_jj = self.get_potential_loop_update(loop_queue)
+                        # memoize all loop candidates to always give all candidates to the backend as edges!
+                        if loop_ii is not None and loop_jj is not None:
+                            all_lc_candidates.append((loop_ii, loop_jj))
+                    if len(all_lc_candidates) > 0:
+                        all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
 
                 # Use loop closure BA for refinement if enabled
                 if self.backend.enable_loop:
                     _, _ = self.backend.optimizer.loop_ba(
-                        t_start=0, t_end=t_end, steps=6, add_ii=loop_ii, add_jj=loop_jj
+                        t_start=0, t_end=t_end, steps=6, add_ii=all_loop_ii, add_jj=all_loop_jj
                     )
                     _, _ = self.backend.optimizer.loop_ba(
-                        t_start=0, t_end=t_end, steps=6, add_ii=loop_ii, add_jj=loop_jj
+                        t_start=0, t_end=t_end, steps=6, add_ii=all_loop_ii, add_jj=all_loop_jj
                     )
                 else:
                     _, _ = self.backend.optimizer.dense_ba(
-                        t_start=0, t_end=t_end, steps=6, add_ii=loop_ii, add_jj=loop_jj
+                        t_start=0, t_end=t_end, steps=6, add_ii=all_loop_ii, add_jj=all_loop_jj
                     )
                     _, _ = self.backend.optimizer.dense_ba(
-                        t_start=0, t_end=t_end, steps=6, add_ii=loop_ii, add_jj=loop_jj
+                        t_start=0, t_end=t_end, steps=6, add_ii=all_loop_ii, add_jj=all_loop_jj
                     )
 
                 del self.backend
@@ -503,7 +512,9 @@ class SLAM:
 
             # Notify leading Tracking thread, that we finished the current Render optimization
             # -> This avoids both Frontend and Renderer to run at the same time and conflict on depth_video
-            if self.tracking_finished < 1: # Notify Tracking thread only when it is still alive, else we get a deadlock
+            if (
+                self.tracking_finished < 1
+            ):  # Notify Tracking thread only when it is still alive, else we get a deadlock
                 with communication_lock:
                     self.mapping_done += 1
                     condTracking.notify()
@@ -511,7 +522,8 @@ class SLAM:
             sleep(self.sleep_time)  # Let system cool off a little
 
         # Run for one last time after everything finished
-        self.info(f"Ran Gaussian Mapper {self.gaussian_mapper.count} times before Refinement!")
+        if self.gaussian_mapper is not None and run:
+            self.info(f"Ran Gaussian Mapper {self.gaussian_mapper.count} times before Refinement!")
         finished = False
         while not finished and run:
             finished = self.gaussian_mapper(mapping_queue, received_mapping, True)
