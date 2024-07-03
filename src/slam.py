@@ -39,103 +39,125 @@ class SLAM:
         - Frontend Tracker based on a Motion filter, which successively inserts new frames into a map
             within a local optimization window
         - Backend Bundle Adjustment, which optimizes the map over a global optimization window
+        - Loop Detector, which computes visual similarity between the current keyframe and all past keyframes. If suitable candidates are found,
+            this is send as additional edges to the Backend optimization.
         - Gaussian Mapping, which optimizes the map into multiple 3D Gaussian
             based on a dense rendering objective
         - Visualizers for showing the incoming RGB(D) stream, the current pose graph,
             the 3D point clouds of the map, optimized Gaussians
 
-    We combine these building blocks in a multiprocessing environment.
+    We combine these building blocks in a multiprocessing environment. By setting frequencies you can synchronize these processes, where
+    the Frontend is the leading Process and everything else follows. The final runtime will be determined by
+        i) how many Processes run in parallel
+        ii) Which Process is the slowest and how often it is called
+
+        In general the Frontend should be the fastest Process and act as an upper bound to how fast we can get.
+        You can expect 10 - 25 FPS on normal data with mid resolution.
     """
 
     def __init__(self, cfg: DictConfig, dataset=None, output_folder: Optional[str] = None):
         super(SLAM, self).__init__()
 
         self.cfg = cfg
-        # FIXME chen: include sanity checks to see if the system is correctly configured
-        # example: it is dangerous to optimize the intrinsics and do scale optimization with our block coordinate descent scheme
-
         self.device = cfg.get("device", torch.device("cuda:0"))
         self.mode = cfg.mode
-
-        # evaluation params
         self.do_evaluate = cfg.evaluate
         # Render every 5-th frame during optimization, so we can see the development of our scene representation
         self.save_renders = cfg.get("save_renders", False)
 
         self.create_out_dirs(output_folder)
-        self.update_cam(cfg)
+        self.update_cam(cfg)  # Update output resolution, intrinsics, etc.
 
+        ### Main SLAM neural network
         self.net = DroidNet()
         self.load_pretrained(cfg.tracking.pretrained)
         self.net.to(self.device).eval()
         self.net.share_memory()
 
-        # Manage life time of individual processes
-        self.num_running_thread = torch.zeros((1)).int()
-        self.num_running_thread.share_memory_()
-        self.all_trigered = torch.zeros((1)).int()
-        self.all_trigered.share_memory_()
-        self.all_finished = torch.zeros((1)).int()
-        self.all_finished.share_memory_()
-        self.tracking_finished = torch.zeros((1)).int()
-        self.tracking_finished.share_memory_()
-        self.backend_finished = torch.zeros((1)).int()
-        self.backend_finished.share_memory_()
-        self.gaussian_mapping_finished = torch.zeros((1)).int()
-        self.gaussian_mapping_finished.share_memory_()
-        self.loop_detection_finished = torch.zeros((1)).int()
-        self.loop_detection_finished.share_memory_()
-        self.visualizing_finished = torch.zeros((1)).int()
-        self.visualizing_finished.share_memory_()
-        self.mapping_visualizing_finished = torch.zeros((1)).int()
-        self.mapping_visualizing_finished.share_memory_()
-
         # Insert a dummy delay to snychronize frontend and backend as needed
-        self.sleep_time = cfg.get("sleep_delay", 3)
+        self.sleep_time = cfg.get("sleep_delay", 0.1)
+        # Manage the stream, i.e. we can also run the system only in [t0, t1]
         self.t_start = cfg.get("t_start", 0)
         self.t_stop = cfg.get("t_stop", None)
 
         # Delete backend when hitting this threshold, so we can keep going with just frontend
-        self.max_ram_usage = cfg.get("max_ram_usage", 0.9)
+        self.max_ram_usage = cfg.get("max_ram_usage", 0.8)
         self.plot_uncertainty = cfg.get("plot_uncertainty", False)  # Show the optimization uncertainty maps
 
-        # Stream the images into the main thread
-        self.input_pipe = mp.Queue()
-
-        # store images, depth, poses, intrinsics (shared between process)
-        self.video = DepthVideo(cfg)  # NOTE: we can use this for getting both gt and rendered images
-        self.frontend = FrontendWrapper(cfg, self)
-        self.backend = BackendWrapper(cfg, self)
+        ### Main SLAM components
+        self.dataset = dataset
+        self.video = DepthVideo(cfg)  # store images, depth, poses, intrinsics (shared between process)
         self.traj_filler = PoseTrajectoryFiller(self.cfg, net=self.net, video=self.video, device=self.device)
-
+        self.frontend = FrontendWrapper(cfg, self)
+        if self.cfg.run_backend:
+            self.backend = BackendWrapper(cfg, self)
+            # NOTE self.frontend.window is not an accurate representation over which frames we optimize!
+            # Because we delete edges of high age, we usually dont optimize over the whole window, but cut off past frames very fast
+            # Example: Window might be [0, 25], but we only optimize [15, 25] -> [0, 15] is untouched and could be handled by backend
+            self.backend_warmup = max(self.frontend.window, self.backend.warmup)
+        else:
+            self.backend = None
+            self.backend_warmup = 9999
         if cfg.run_loop_detection:
             self.loop_detector = LoopDetector(self.cfg.loop_closure, self.net, self.video, self.device)
         else:
             self.loop_detector = None
-
-        self.dataset = dataset
-        self.mapping_queue = mp.Queue()
-        self.loop_queue = mp.Queue()
-        self.received_mapping = mp.Event()
-
-        if cfg.data.dataset in ["kitti", "tartanair", "euroc"]:
-            self.max_depth_visu = 50.0  # Cut of value to show a consistent depth stream in outdoor datasets
-        else:
-            self.max_depth_visu = 10.0  # Good value for indoor datasets (maybe make this even lower)
-
         if cfg.run_mapping_gui and cfg.run_mapping and not cfg.evaluate:
             self.q_main2vis = mp.Queue()
             self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs=(self.q_main2vis))
+            self.mapping_warmup = min(self.frontend.window, self.gaussian_mapper.warmup)
             self.params_gui = gui_utils.ParamsGUI(
                 pipe=cfg.mapping.pipeline_params,
                 background=self.gaussian_mapper.background,
                 gaussians=self.gaussian_mapper.gaussians,
                 q_main2vis=self.q_main2vis,
             )
-        else:
+        elif cfg.run_mapping:
             self.gaussian_mapper = GaussianMapper(cfg, self)
+            self.mapping_warmup = min(self.frontend.window, self.gaussian_mapper.warmup)
+        else:
+            self.gaussian_mapper = None
+            self.mapping_warmup = 9999
 
         self.sanity_checks()
+
+        # Visualize the Depth maps in right range
+        if cfg.data.dataset in ["kitti", "tartanair", "euroc"]:
+            self.max_depth_visu = 50.0  # Cut of value to show a consistent depth stream in outdoor datasets
+        else:
+            self.max_depth_visu = 10.0  # Good value for indoor datasets (maybe make this even lower)
+
+        ### Multi-threading stuff
+        # Objects for communicating between processes
+        self.input_pipe = mp.Queue()  # Communicate data from Stream -> main thread
+        self.mapping_queue = mp.Queue()  # Communicate data between Mapping <-> main thread
+        self.received_mapping = mp.Event()  # Ensure we have received the mapping state before moving on
+        self.loop_queue = mp.Queue()  # Communicate loop candidates between Loop Detection -> Backend thread
+
+        # Manage life time of individual processes
+        self.num_running_thread = torch.zeros((1)).int().share_memory_()
+        self.all_trigered = torch.zeros((1)).int().share_memory_()
+        self.backend_can_start = torch.zeros((1)).int().share_memory_()  # When to trigger after warmup
+        self.mapping_can_start = torch.zeros((1)).int().share_memory_()  # When to trigger after warmup
+        self.all_finished = torch.zeros((1)).int().share_memory_()
+        self.tracking_finished = torch.zeros((1)).int().share_memory_()
+        self.backend_finished = torch.zeros((1)).int().share_memory_()
+        self.gaussian_mapping_finished = torch.zeros((1)).int().share_memory_()
+        # NOTE chen: we use this flag to avoid frontend to start a new optimization window while the Renderer is working
+        # Flag to signal that the current optimization is done or not
+        self.mapping_done = torch.zeros((1)).int().share_memory_()
+        self.mapping_done += 1  # Set to 1, so Tracking does not wait for mapping
+        self.loop_detection_finished = torch.zeros((1)).int().share_memory_()
+        self.visualizing_finished = torch.zeros((1)).int().share_memory_()
+        self.mapping_visualizing_finished = torch.zeros((1)).int().share_memory_()
+
+        # Synchronization objects
+        self.backend_freq = self.cfg.get("backend_every", 10)  # Run the backend every k frontend calls
+        self.mapping_freq = self.cfg.get("mapping_every", 5)  # Run the Renderer/Mapper every k frontend calls
+        self.semaBackend = mp.Semaphore(1)  # Semaphore allows to keep concurrency
+        self.semaMapping = mp.Semaphore(1)  # Semaphore allows to keep concurrency
+        self.communication_lock = mp.Lock()
+        self.condTracking = mp.Condition(lock=self.communication_lock)  # Conditional for fine-grained synchronization
 
     def info(self, msg: str) -> None:
         print(colored("[Main]: " + msg, "green"))
@@ -226,7 +248,16 @@ class SLAM:
 
         self.net.load_state_dict(state_dict)
 
-    def tracking(self, rank: int, stream, input_queue: mp.Queue) -> None:
+    def tracking(
+        self,
+        rank: int,
+        communication_lock: mp.Lock,
+        stream,
+        condTracking: mp.Condition,
+        semaBackend: mp.Semaphore,
+        semaMapping: mp.Semaphore,
+        input_queue: mp.Queue,
+    ) -> None:
         """Main driver of framework by looping over the input stream"""
 
         self.info("Frontend tracking thread started!")
@@ -236,7 +267,10 @@ class SLAM:
         while self.all_trigered < self.num_running_thread:
             pass
 
+        # Main Loop which drives the whole system
         for frame in tqdm(stream):
+
+            old_count = self.frontend.count  # Memoize current state
 
             if self.cfg.with_dyn and stream.has_dyn_masks:
                 timestamp, image, depth, intrinsic, gt_pose, static_mask = frame
@@ -252,13 +286,37 @@ class SLAM:
             if self.t_stop is not None and timestamp > self.t_stop:
                 break
 
+            # Transmit the incoming stream to another visualization thread
             if self.cfg.show_stream:
-                # Transmit the incoming stream to another visualization thread
                 input_queue.put(image)
                 input_queue.put(depth)
 
+            # If the Renderer / Mapping is currently optimizing, wait until that it is finished
+            if self.frontend.count > self.mapping_warmup:
+                with communication_lock:
+                    condTracking.wait_for(lambda: self.mapping_done > 0)
+
             self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
 
+            # Check to notify other threads that they can start
+            if self.cfg.run_backend and self.frontend.count > self.backend_warmup and self.backend_can_start < 1:
+                self.backend.info("Backend warmup over!")
+                self.backend_can_start += 1
+            if self.cfg.run_mapping and self.frontend.count > self.mapping_warmup and self.mapping_can_start < 1:
+                self.gaussian_mapper.info("Mapper warmup over!")
+                self.mapping_can_start += 1
+
+            # Check if we actually inserted a new frame and optimized
+            if self.frontend.count > old_count:
+                # Synchronize other parallel threads
+                # FIXME right now I think this does not work correctly, where we should run backend after 25 calls for warmup, but it actually runs 1. after 25+freq calls
+                if self.frontend.count % self.backend_freq == 0 and self.frontend.count > (self.backend_warmup + 1):
+                    semaBackend.release()  # Signal Backend that it can run again
+                if self.frontend.count % self.mapping_freq == 0 and self.frontend.count > (self.mapping_warmup + 1):
+                    semaMapping.release()  # Signal Mapping that it can run again
+                    self.mapping_done -= 1  # Reset flag for next Mapping call
+
+        self.info(f"Ran Frontend {self.frontend.count} times!")
         del self.frontend
         torch.cuda.empty_cache()
         gc.collect()
@@ -266,6 +324,10 @@ class SLAM:
         self.tracking_finished += 1
         self.all_finished += 1
         self.info("Frontend Tracking done!")
+
+        # Release the Semaphores to avoid deadlock
+        semaBackend.release()
+        semaMapping.release()
 
     def loop_detection(self, rank: int, loop_queue: mp.Queue, run: bool = False) -> None:
 
@@ -294,6 +356,7 @@ class SLAM:
         used_mem = 1 - (free_mem / total_mem)
         return used_mem, free_mem
 
+    # FIXME we should store the backend.count and make it possible, so that we can restart with the same count again
     def ram_safeguard_backend(self, max_ram: float = 0.9, min_ram: float = 0.5) -> None:
         """There are some scenes, where we might get into trouble with memory.
         In order to keep the system going, we simply dont use the backend until we can afford it again.
@@ -323,16 +386,22 @@ class SLAM:
             del new_loops
             loop_ii, loop_jj = candidates
         except Exception as e:
-            print("Could not get anything from the Queue! :(")
-            print(e)
+            self.info("Could not get anything from the Queue! :(")
+            print(colored(e, "red"))
             loop_ii, loop_jj = None, None
         return loop_ii, loop_jj
 
-    def global_ba(self, rank: int, loop_queue: Optional[mp.Queue] = None, run: bool = False) -> None:
+    def global_ba(
+        self, rank: int, semaBackend: mp.Semaphore, loop_queue: Optional[mp.Queue] = None, run: bool = False
+    ) -> None:
         self.info("Backend thread started!")
         self.all_trigered += 1
 
         while self.tracking_finished < 1 and run:
+            if self.backend_can_start < 1:
+                continue
+
+            semaBackend.acquire()  # Aquire the semaphore (If the counter == 0, then this thread will be blocked)
 
             # Only run backend if we have enough RAM for it
             self.ram_safeguard_backend(max_ram=self.max_ram_usage)
@@ -340,6 +409,8 @@ class SLAM:
                 continue
 
             # If we run an additional loop detector -> Pull in visually similar candidate edges as well
+            # FIXME memoize all loop candidates to always give all candidates to the backend as edges!
+            # else we will forget previous candidates and optimize over them only once
             loop_ii, loop_jj = None, None
             if self.cfg.run_loop_detection and loop_queue is not None:
                 if not loop_queue.empty():
@@ -350,6 +421,9 @@ class SLAM:
             else:
                 self.backend(add_ii=loop_ii, add_jj=loop_jj)
             sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
+
+        if self.backend is not None:
+            self.info(f"Ran Backend {self.backend.count} times before refinement!")
 
         # Run one last time after tracking finished
         if run and self.backend.do_refinement:
@@ -393,17 +467,45 @@ class SLAM:
                 torch.cuda.empty_cache()
                 gc.collect()
 
+        elif self.backend is not None:
+            del self.backend
+            torch.cuda.empty_cache()
+            gc.collect()
+
         self.backend_finished += 1
         self.all_finished += 1
         self.info("Backend done!")
 
-    def gaussian_mapping(self, rank: int, run: bool, mapping_queue: mp.Queue, received_mapping: mp.Event) -> None:
+    def gaussian_mapping(
+        self,
+        rank: int,
+        communication_lock: mp.Lock,
+        condTracking: mp.Condition,
+        semaMapping: mp.Semaphore,
+        mapping_queue: mp.Queue,
+        received_mapping: mp.Event,
+        run: bool,
+    ) -> None:
         self.info("Gaussian Mapping Triggered!")
         self.all_trigered += 1
 
         while (self.tracking_finished + self.backend_finished) < 2 and run:
+
+            # Wait for warmup phase to finish
+            if self.mapping_can_start < 1:
+                continue
+
+            semaMapping.acquire()  # Aquire the semaphore (If the counter == 0, then this thread will be blocked)
+
             self.gaussian_mapper(mapping_queue, received_mapping)
-            # sleep(self.sleep_time / 2)
+
+            # Notify leading Tracking thread, that we finished the current Render optimization
+            # -> This avoids both Frontend and Renderer to run at the same time and conflict on depth_video
+            with communication_lock:
+                self.mapping_done += 1
+                condTracking.notify()
+
+            sleep(self.sleep_time)  # Let system cool off a little
 
         # Run for one last time after everything finished
         finished = False
@@ -411,6 +513,7 @@ class SLAM:
             finished = self.gaussian_mapper(mapping_queue, received_mapping, True)
 
         self.gaussian_mapping_finished += 1
+        # Let the user still interact with the GUI
         while self.mapping_visualizing_finished < 1:
             pass
 
@@ -526,7 +629,10 @@ class SLAM:
             "run_backend": [str(self.cfg.run_backend), str(self.cfg.run_backend)],
             "run_mapping": [str(self.cfg.run_mapping), str(self.cfg.run_mapping)],
             "stride": [str(self.cfg.stride), str(self.cfg.stride)],
-            "loop_closure": [str(self.backend.enable_loop), str(self.backend.enable_loop)],
+            "loop_closure": [
+                str(self.cfg.tracking.backend.use_loop_closure),
+                str(self.cfg.tracking.backend.use_loop_closure),
+            ],
             "loop_detector": [str(self.cfg.run_loop_detection), str(self.cfg.run_loop_detection)],
             "dataset": [stream.input_folder, stream.input_folder],
             "mode": [self.cfg.mode, self.cfg.mode],
@@ -571,7 +677,10 @@ class SLAM:
                 "run_backend": [str(self.cfg.run_backend), str(self.cfg.run_backend)],
                 "run_mapping": [str(self.cfg.run_mapping), str(self.cfg.run_mapping)],
                 "stride": [str(self.cfg.stride), str(self.cfg.stride)],
-                "loop_closure": [str(self.backend.enable_loop), str(self.backend.enable_loop)],
+                "loop_closure": [
+                    str(self.cfg.tracking.backend.use_loop_closure),
+                    str(self.cfg.tracking.backend.use_loop_closure),
+                ],
                 "loop_detector": [str(self.cfg.run_loop_detection), str(self.cfg.run_loop_detection)],
                 "dataset": [stream.input_folder, stream.input_folder],
                 "mode": [self.cfg.mode, self.cfg.mode],
@@ -703,8 +812,24 @@ class SLAM:
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
-            mp.Process(target=self.tracking, args=(1, stream, self.input_pipe), name="Frontend Tracking"),
-            mp.Process(target=self.global_ba, args=(2, self.loop_queue, self.cfg.run_backend), name="Backend"),
+            mp.Process(
+                target=self.tracking,
+                args=(
+                    1,
+                    self.communication_lock,
+                    stream,
+                    self.condTracking,
+                    self.semaBackend,
+                    self.semaMapping,
+                    self.input_pipe,
+                ),
+                name="Frontend Tracking",
+            ),
+            mp.Process(
+                target=self.global_ba,
+                args=(2, self.semaBackend, self.loop_queue, self.cfg.run_backend),
+                name="Backend",
+            ),
             mp.Process(
                 target=self.loop_detection,
                 args=(3, self.loop_queue, self.cfg.run_loop_detection),
@@ -713,7 +838,15 @@ class SLAM:
             mp.Process(target=self.visualizing, args=(4, self.cfg.run_visualization), name="Visualizing"),
             mp.Process(
                 target=self.gaussian_mapping,
-                args=(5, self.cfg.run_mapping, self.mapping_queue, self.received_mapping),
+                args=(
+                    5,
+                    self.communication_lock,
+                    self.condTracking,
+                    self.semaMapping,
+                    self.mapping_queue,
+                    self.received_mapping,
+                    self.cfg.run_mapping,
+                ),
                 name="Gaussian Mapping",
             ),
             mp.Process(

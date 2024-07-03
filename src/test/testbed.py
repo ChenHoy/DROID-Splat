@@ -37,7 +37,7 @@ class SlamTestbed(SLAM):
             self.gaussian_mapper.q_main2vis = self.q_main2vis
             self.gaussian_mapper.use_gui = True
 
-        if self.cfg.run_loop_closure:
+        if self.cfg.run_loop_detection:
             self.loop_detector = LoopDetector(self.cfg.loop_closure, self.net, self.video, device=self.device)
         else:
             self.loop_detector = None
@@ -267,32 +267,31 @@ class SlamTestbed(SLAM):
             self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
 
             # If new keyframe got inserted
-            if frontend_old_count != self.frontend.optimizer.t1:
-                # Render all new incoming frames
-                # if (
-                #     self.frontend.optimizer.is_initialized
-                #     and self.frontend.optimizer.t1 % render_freq == 0
-                #     and self.gaussian_mapper.warmup < self.frontend.optimizer.count
-                # ):
-                #     self.gaussian_mapper(None, None)
+        #     if frontend_old_count != self.frontend.optimizer.t1:
+        #         # Render all new incoming frames
+        #         # if (
+        #         #     self.frontend.optimizer.is_initialized
+        #         #     and self.frontend.optimizer.t1 % render_freq == 0
+        #         #     and self.gaussian_mapper.warmup < self.frontend.optimizer.count
+        #         # ):
+        #         #     self.gaussian_mapper(None, None)
 
-                # Run backend and loop closure detection occasianally
-                if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % backend_freq == 0:
-                    if self.loop_detector is not None:
-                        loop_candidates = self.loop_detector.check()
-                        if loop_candidates is not None:
-                            loop_ii, loop_jj = loop_candidates
-                        else:
-                            loop_ii, loop_jj = None, None
-                        self.backend(add_ii=loop_ii, add_jj=loop_jj)
-                    else:
-                        self.backend()
+        #         # Run backend and loop closure detection occasianally
+        #         if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % backend_freq == 0:
+        #             if self.loop_detector is not None:
+        #                 loop_candidates = self.loop_detector.check()
+        #                 if loop_candidates is not None:
+        #                     loop_ii, loop_jj = loop_candidates
+        #                 else:
+        #                     loop_ii, loop_jj = None, None
+        #                 self.backend(add_ii=loop_ii, add_jj=loop_jj)
+        #             else:
+        #                 self.backend()
 
-        d_1st, d_2nd, d_3rd = self.get_frame_distance_stats()
-        d_1st = convert_to_tensor(d_1st)
-        d_2nd, d_3rd = convert_to_tensor(d_2nd), convert_to_tensor(d_3rd)
-
-        ipdb.set_trace()
+        # d_1st, d_2nd, d_3rd = self.get_frame_distance_stats()
+        # d_1st = convert_to_tensor(d_1st)
+        # d_2nd, d_3rd = convert_to_tensor(d_2nd), convert_to_tensor(d_3rd)
+        # ipdb.set_trace()
 
     # FIXME we cannot run mapping_gui with bow loop closure detection
     # reason: loop_detector.db is not thread_safe and pickable

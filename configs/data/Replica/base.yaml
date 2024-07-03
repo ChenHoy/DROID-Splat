@@ -6,6 +6,8 @@ png_depth_scale: 6553.5 #for depth image in png format
 cam:
   H: 680
   W: 1200
+  # H_out: 320
+  # W_out: 560
   H_out: 320
   W_out: 640
   H_edge: 0

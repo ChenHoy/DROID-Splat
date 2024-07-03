@@ -26,7 +26,7 @@ class BackendWrapper(torch.nn.Module):
         # When to start optimizing globally
         self.frontend_window = cfg.tracking.frontend.window
         # Dont consider the state of frontend, but start optimizing after warmup frames
-        self.warmup = cfg.tracking.backend.get("warmup", None)
+        self.warmup = max(cfg.tracking.backend.get("warmup", 20), cfg.tracking.warmup)
         # Do a final refinement over all keyframes if wanted
         self.do_refinement = cfg.tracking.backend.get("do_refinement", False)
 
@@ -36,8 +36,8 @@ class BackendWrapper(torch.nn.Module):
         self.steps = cfg.tracking.backend.get("steps", 4)
         self.iters = cfg.tracking.backend.get("iters", 2)
         self.last_t = -1
-        self.ba_counter = -1
 
+        self.count = 0
         self.optimizer = Backend(self.net, self.video, self.cfg)
 
     def info(self, msg: str) -> None:
@@ -54,15 +54,6 @@ class BackendWrapper(torch.nn.Module):
         with self.video.get_lock():
             cur_t = self.video.counter.value
 
-        # Only optimize outside of Frontend
-        # if cur_t < self.frontend_window and self.warmup is None:
-        if cur_t < self.frontend_window:
-            return
-        # Ignore frontend and only consider the set warmup
-        if self.warmup is not None:
-            if cur_t < self.warmup:
-                return
-
         # Safeguard: Run over the whole map only if its within hardware bounds
         if cur_t > self.max_window:
             t_start = cur_t - self.max_window
@@ -73,29 +64,17 @@ class BackendWrapper(torch.nn.Module):
 
         if self.enable_loop:
             _, n_edges = self.optimizer.loop_ba(
-                t_start=t_start,
-                t_end=t_end,
-                steps=self.steps,
-                iters=self.iters,
-                motion_only=False,
-                local_graph=local_graph,
-                add_ii=add_ii,
-                add_jj=add_jj,
+                t_start, t_end, self.steps, self.iters, False, local_graph=local_graph, add_ii=add_ii, add_jj=add_jj
             )
             msg = "Loop BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
         else:
             _, n_edges = self.optimizer.dense_ba(
-                t_start=t_start,
-                t_end=t_end,
-                steps=self.steps,
-                iters=self.iters,
-                motion_only=False,
-                add_ii=add_ii,
-                add_jj=add_jj,
+                t_start, t_end, self.steps, self.iters, motion_only=False, add_ii=add_ii, add_jj=add_jj
             )
             msg = "Full BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
         self.info(msg)
         self.last_t = cur_t
+        self.count += 1
 
 
 class Backend:
@@ -113,9 +92,10 @@ class Backend:
 
         self.upsample = cfg.tracking.get("upsample", False)
         self.beta = cfg.tracking.get("beta", 0.7)  # Balance rotation and translation for distance computation
-        self.backend_thresh = cfg.tracking.backend.get("thresh", 20.0)
-        self.backend_radius = cfg.tracking.backend.get("radius", 2)
-        self.backend_nms = cfg.tracking.backend.get("nms", 0)
+        self.thresh = cfg.tracking.backend.get("thresh", 20.0)
+        self.radius = cfg.tracking.backend.get("radius", 2)
+        self.max_factor = cfg.tracking.backend.get("max_factor_mult", 16)
+        self.nms = cfg.tracking.backend.get("nms", 0)
 
         # Loop parameters for loop closure detection
         self.last_loop_t = -1
@@ -123,14 +103,15 @@ class Backend:
         self.loop_radius = cfg.tracking.backend.get("loop_radius", 3)
         self.loop_nms = cfg.tracking.backend.get("loop_nms", 2)
         self.loop_thresh = cfg.tracking.backend.get("loop_thresh", 30.0)
+        self.loop_max_factor = cfg.tracking.backend.get("loop_max_factor_mult", 16)
 
     @torch.no_grad()
     def dense_ba(
         self,
         t_start: int = 0,
         t_end: Optional[int] = None,
-        steps: int = 4,
-        iters: int = 4,
+        steps: int = 8,
+        iters: int = 2,
         motion_only: bool = False,
         add_ii: Optional[torch.Tensor] = None,
         add_jj: Optional[torch.Tensor] = None,
@@ -144,19 +125,12 @@ class Backend:
         # NOTE chen: This is one of the most important numbers for loop closures!
         # If you have a large map, then keep this number really high or else the drift could mess up the map
         # NOTE chen: Using only the frontend keeps sometimes a better global scale than mixing frontend + backend if loop closures are missed!
-        # max_factors = (int(self.video.stereo) + (self.backend_radius + 2) * 2) * n # From GO-SLAM
-        max_factors = 16 * n  # From DROID-SLAM
+        # (16 for DROID-SLAM), ((int(self.video.stereo) + (self.radius + 2) * 2) for GO-SLAM)
+        max_factors = self.max_factor * n
 
-        graph = FactorGraph(
-            self.video,
-            self.update_op,
-            device=self.device,
-            corr_impl="alt",
-            max_factors=max_factors,
-            upsample=self.upsample,
-        )
+        graph = FactorGraph(self.video, self.update_op, self.device, "alt", max_factors, self.upsample)
         n_edges = graph.add_proximity_factors(
-            rad=self.backend_radius, nms=self.backend_nms, beta=self.beta, thresh=self.backend_thresh, remove=False
+            rad=self.radius, nms=self.nms, beta=self.beta, thresh=self.thresh, remove=False
         )
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)
@@ -196,7 +170,7 @@ class Backend:
 
         # NOTE chen: Make sure you have a large enough loop window set in cfg!
         # on larger maps you want to at least have a window of ~100 so we get enough factors
-        max_factors = 16 * self.loop_window  # From DROID-SLAM
+        max_factors = self.loop_max_factor * self.loop_window  # (16 for DROID-SLAM , 8 for GO-SLAM)
         n = t_end - t_start
         t_start_loop = max(0, t_end - self.loop_window)
 
@@ -215,15 +189,18 @@ class Backend:
                 if val is not None:
                     setattr(graph, key, deepcopy(val))
 
+        # TODO chen: does this really always use remove=True in GO-SLAM?
+        # NOTE this removes past edges since remove=True per default
         n_edges = graph.add_loop_aware_proximity_factors(
             t_start,
             t_end,
-            t_start_loop=t_start_loop,
-            radius=self.backend_radius,
-            nms=self.backend_nms,
-            beta=self.beta,
-            thresh=self.backend_thresh,
-            max_factors=max_factors,
+            t_start_loop,
+            self.loop_radius,
+            self.loop_nms,
+            self.beta,
+            self.loop_thresh,
+            max_factors,
+            loop=True,
         )
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)
@@ -243,42 +220,6 @@ class Backend:
 
         return n, n_edges
 
-    @torch.no_grad()
-    def global_scale_optimization(
-        self, t_start, t_end, steps=4, lm=1e-4, ep=1e-1, radius: int = 200, nms: int = 2, thresh: float = 10.0
-    ):
-        """Optimize the scene globally with the pure Python code for scale optimization. This optimizes poses and structure
-        in a block-coordinate descent way."""
-        assert self.graph.scale_priors == True, "You need to set scale_priors to True when using this function!"
-        assert self.video.optimize_scales == True, "You need to set scale_priors to True when using this function!"
-
-        if t_end is None:
-            t_end = self.video.counter.value
-        n = t_end - t_start
-        max_factors = 16 * t_end  # From DROID-SLAM
-
-        graph = FactorGraph(
-            self.video,
-            self.update_op,
-            device=self.device,
-            corr_impl="volume",
-            max_factors=max_factors,
-            upsample=self.upsample,
-        )
-        n_edges = graph.add_proximity_factors(rad=radius, nms=nms, beta=self.beta, thresh=thresh, remove=False)
-        self.info(f"Performing full scale prior optimization over map with: {n_edges} edges!")
-        graph.prior_update_lowmem(t0=t_start, t1=t_end, steps=steps, lm=lm, ep=ep)
-        self.info("Done!")
-
-        # Empty cache immediately and release memory
-        graph.clear_edges()
-        del graph
-        torch.cuda.empty_cache()
-        gc.collect()
-
-        with self.video.get_lock():
-            self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
-
     # TODO implement sparse Pose Graph Optimization similar to HI-SLAM
     # we dont want to optimize all the local frames, only global links in a loop closure fashion
     # This only optimizes the SIM3 poses, not disparity or intrinsics
@@ -295,7 +236,7 @@ class Backend:
         if t_end is None:
             t_end = self.video.counter.value
         n = t_end - t_start
-        max_factors = (int(self.video.stereo) + (self.backend_radius + 2) * 2) * n
+        max_factors = (int(self.video.stereo) + (self.radius + 2) * 2) * n
 
         graph = FactorGraph(
             self.video,

@@ -238,7 +238,17 @@ class FactorGraph:
 
         self.add_factors(ii[keep], jj[keep])
 
-    def add_proximity_factors(self, t0=0, t1=0, rad=2, nms=2, beta=0.25, thresh=16.0, remove=False, max_t=None):
+    def add_proximity_factors(
+        self,
+        t0=0,
+        t1=0,
+        rad=2,
+        nms=2,
+        beta=0.25,
+        thresh=16.0,
+        remove=False,
+        max_t=None,
+    ):
         """add edges to the factor graph based on distance"""
 
         t = max_t if max_t is not None else self.video.counter.value
@@ -319,17 +329,17 @@ class FactorGraph:
         t_start: int = 0,
         t_end: int = 0,
         t_start_loop: Optional[int] = None,
-        loop: bool = False,
         radius: int = 2,
         nms: int = 2,
         beta: float = 0.25,
         thresh: float = 16.0,
-        remove: bool = True,
         max_factors: int = 200,  # This is variable in loop closure vs. normal
+        remove: bool = True,
+        loop: bool = False,
     ):
         """
         Add more connections in graph for high-similarity / low motion distance frames in
-        hopes of automatically closing loops.
+        hopes of automatically closing loops, see GO-SLAM paper.
 
         NOTE the loop aware proximity factors have diff properties:
         i) they help with loop closures slightly by adding more factors

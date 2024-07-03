@@ -42,11 +42,7 @@ keyframes:
     # NOTE when changing the learning rates, you should also change the grad_threshold!
     densify_grad_threshold: 0.0002 # Gradient clipping
     size_threshold: 20 # Max screen size
-<<<<<<< HEAD
     opacity_th: 0.1 # Min opacity
-=======
-    opacity_th: 0.05 # Min opacity
->>>>>>> 80f9d5748346ffe489f247e330120dafd5a57e75
     gaussian_extent: 4 # Affects densification, i.e. the larger the more we split gaussians
 
   refinement:

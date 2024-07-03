@@ -27,12 +27,12 @@ opt_intr: False # Optimizes additional intrinsic parameters
 sleep_delay: 0.01 # Sleep timer to cool off the system sometimtes
 
 run_frontend: True # This should always be True!
-run_backend: True # Global optimization
-run_loop_detection: True # Loop closure detection
-run_mapping: False # Rendering 
+run_backend: False # Global optimization
+run_loop_detection: False # Loop closure detection
+run_mapping: True # Rendering 
 ## Visualizations / GUIs
 run_visualization: False
-run_mapping_gui: True 
+run_mapping_gui: False
 show_stream: False
 
 # Frequencies for synchronizing the different main parts of the pipeline

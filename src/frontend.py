@@ -24,19 +24,20 @@ class FrontendWrapper(torch.nn.Module):
         self.video = slam.video
 
         # filter incoming frames so that there is enough motion
-        self.frontend_window = cfg.tracking.frontend.window
+        self.window = cfg.tracking.frontend.window
         filter_thresh = cfg.tracking.motion_filter.thresh
         self.motion_filter = MotionFilter(self.net, self.video, thresh=filter_thresh, device=self.device)
         self.optimizer = Frontend(self.net, self.video, self.cfg)
 
+        self.count = 0
+
     @torch.no_grad()
     def forward(self, timestamp, image, depth, intrinsic, gt_pose=None, static_mask=None):
-        """Add new keyframes according to apparent motion and run a local bundle adjustment optimization"""
-
-        ### check there is enough motion
+        """Add new keyframes according to apparent motion and run a local bundle adjustment optimization.
+        If there is not enough motion between the new frame and the last inserted keyframe, we dont do anything."""
         self.motion_filter.track(timestamp, image, depth, intrinsic, gt_pose=gt_pose, static_mask=static_mask)
-        # local bundle adjustment
-        self.optimizer()
+        self.optimizer()  # Local Bundle Adjustment
+        self.count = self.optimizer.count  # Synchronize counts of wrapper and actual Frontend
 
 
 class Frontend:
@@ -57,12 +58,12 @@ class Frontend:
         self.upsample = cfg.tracking.get("upsample", True)
 
         self.beta = cfg.tracking.get("beta", 0.3)
-        self.frontend_max_factors = cfg.tracking.frontend.get("max_factors", 100)
-        self.frontend_nms = cfg.tracking.frontend.get("nms", 2)
+        self.max_factors = cfg.tracking.frontend.get("max_factors", 100)
+        self.nms = cfg.tracking.frontend.get("nms", 2)
         self.keyframe_thresh = cfg.tracking.frontend.get("keyframe_thresh", 4.0)
-        self.frontend_window = cfg.tracking.frontend.get("window", 25)
-        self.frontend_thresh = cfg.tracking.frontend.get("thresh", 16.0)
-        self.frontend_radius = cfg.tracking.frontend.get("radius", 2)
+        self.window = cfg.tracking.frontend.get("window", 25)
+        self.thresh = cfg.tracking.frontend.get("thresh", 16.0)
+        self.radius = cfg.tracking.frontend.get("radius", 2)
 
         self.steps1 = cfg.tracking.frontend.get("steps1", 4)
         self.steps2 = cfg.tracking.frontend.get("steps2", 2)
@@ -77,7 +78,7 @@ class Frontend:
             net.update,
             device=cfg.device,
             corr_impl="volume",
-            max_factors=self.frontend_max_factors,
+            max_factors=self.max_factors,
             upsample=self.upsample,
         )
 
@@ -92,7 +93,6 @@ class Frontend:
     def __update(self):
         """add edges, perform update"""
 
-        self.count += 1
         self.t1 += 1
 
         # Remove old factors if we already computed a correlation volume
@@ -102,13 +102,7 @@ class Frontend:
         # build edges between [t1-5, video.counter] and [t1-window, video.counter]
         # Add new factors within proximity
         self.graph.add_proximity_factors(
-            self.t1 - 5,
-            max(self.t1 - self.frontend_window, 0),
-            rad=self.frontend_radius,
-            nms=self.frontend_nms,
-            thresh=self.frontend_thresh,
-            beta=self.beta,
-            remove=True,
+            self.t1 - 5, max(self.t1 - self.window, 0), self.radius, self.nms, self.beta, self.thresh, remove=True
         )
 
         # Condition video.disps based on external sensor data if given before optimizing
@@ -129,6 +123,8 @@ class Frontend:
 
         # If the distance is too small, remove the last keyframe
         if d.item() < self.keyframe_thresh:
+
+            self.count += 1 # Only increase the count when a new frame comes in
             self.graph.rm_keyframe(self.t1 - 2)
 
             with self.video.get_lock():
@@ -181,7 +177,7 @@ class Frontend:
             self.graph.update(t0=1, t1=None, use_inactive=True)
 
         # build edges between [t0, video.counter] and [t1, video.counter]
-        self.graph.add_proximity_factors(t0=0, t1=0, rad=2, nms=2, thresh=self.frontend_thresh, remove=False)
+        self.graph.add_proximity_factors(t0=0, t1=0, rad=2, nms=2, thresh=self.thresh, remove=False)
 
         ### Second optimization
         for itr in range(8):

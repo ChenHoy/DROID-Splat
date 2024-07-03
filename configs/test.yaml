@@ -29,7 +29,7 @@ sleep_delay: 5.0 # Time delay to synchronize frontend and backend (default: 2.0)
 run_frontend: True # This should always be True!
 run_backend: True # Global optimization
 run_mapping: False # Rendering 
-run_loop_detection: True # Loop closure detection
+run_loop_detection: False # Loop closure detection
 # Visualizations / GUIs
 run_visualization: False
 run_mapping_gui: False 

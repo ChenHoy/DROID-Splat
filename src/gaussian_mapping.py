@@ -15,7 +15,6 @@ import cv2
 import matplotlib.pyplot as plt
 
 
-
 from .gaussian_splatting.gui import gui_utils
 from .gaussian_splatting.eval_utils import EvaluatePacket
 from .gaussian_splatting.gaussian_renderer import render
@@ -55,15 +54,16 @@ class GaussianMapper(object):
         self.evaluate = cfg.evaluate
         self.output = slam.output
         self.delay = cfg.mapping.delay  # Delay between tracking and mapping
+        self.warmup = max(cfg.mapping.warmup, cfg.tracking.warmup)
+        self.batch_mode = cfg.mapping.batch_mode  # Take a batch of all unupdated frames at once
+        self.feedback_map = cfg.mapping.feedback_mapping
+
         self.refinement_iters = cfg.mapping.refinement_iters
         self.use_non_keyframes = cfg.mapping.use_non_keyframes
         self.mapping_iters = cfg.mapping.mapping_iters
         self.save_renders = cfg.mapping.save_renders
-        self.warmup = max(cfg.mapping.warmup, cfg.tracking.warmup)
-        self.batch_mode = cfg.mapping.batch_mode  # Take a batch of all unupdated frames at once
         self.optimize_poses = cfg.mapping.optimize_poses
         self.opt_params = cfg.mapping.opt_params
-        self.feedback_map = cfg.mapping.feedback_mapping
         self.pipeline_params = cfg.mapping.pipeline_params
         self.kf_mng_params = cfg.mapping.keyframes
         # Always take n last frames from current index and optimize additional random frames globally
@@ -302,7 +302,6 @@ class GaussianMapper(object):
     ) -> None:
         """Refine the map with color only optimization. Instead of going over last frames, we always select random frames from the whole map."""
 
-
         if self.use_gui:
             self.q_main2vis.put_nowait(
                 gui_utils.GaussianPacket(
@@ -311,7 +310,7 @@ class GaussianMapper(object):
                 )
             )
 
-# Optimize over a random subset of all frames
+        # Optimize over a random subset of all frames
         if random_frames is not None:
             n_frames = int(len(self.cameras) * random_frames)
             self.info(
@@ -374,8 +373,6 @@ class GaussianMapper(object):
                         keyframes=frames,
                     )
                 )
-            
-
 
     def get_mapping_update(self, frames: List[Camera]) -> Dict:
         """Get the index, poses and depths of the frames that were already optimized. We can use this to then feedback
@@ -454,7 +451,6 @@ class GaussianMapper(object):
             image, radii, depth = render_pkg["render"], render_pkg["radii"], render_pkg["depth"]
             opacity, n_touched = render_pkg["opacity"], render_pkg["n_touched"]
 
-
             if self.supervise_with_prior and self.mode == "prgbd":
                 scale_invariant = True
             else:
@@ -474,7 +470,7 @@ class GaussianMapper(object):
                 scale_invariant=scale_invariant,
             )
 
-            #low_opacity.append((view, opacity))
+            # low_opacity.append((view, opacity))
 
         # Regularize scale changes of the Gaussians
         scaling = self.gaussians.get_scaling
@@ -484,7 +480,7 @@ class GaussianMapper(object):
         # NOTE chen: this can happen we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
 
-        scaled_loss = loss * np.sqrt(len(frames)) / 2 # Scale the loss with the number of frames
+        scaled_loss = loss * np.sqrt(len(frames)) / 2  # Scale the loss with the number of frames
         scaled_loss.backward()
 
         with torch.no_grad():
@@ -493,7 +489,6 @@ class GaussianMapper(object):
                 self.gaussians.max_radii2D[visibility_filter],
                 radii[visibility_filter],
             )
-
 
             if densify:
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
@@ -505,19 +500,17 @@ class GaussianMapper(object):
                     kf_mng_params.gaussian_extent,
                     kf_mng_params.size_threshold,
                 )
-                
+
                 if densify:
                     ng_before = len(self.gaussians)
                     for view, opacity in low_opacity:
                         self.gaussians.densify_w_opacity(opacity, view)
                     self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity")
 
-
             self.gaussians.optimizer.step()
             self.gaussians.optimizer.zero_grad()
             self.gaussians.update_learning_rate(iter)
 
-            
             if optimize_poses:
                 pose_optimizer.step()
                 self.maybe_clean_pose_update(frames)
@@ -526,8 +519,7 @@ class GaussianMapper(object):
                 for view in frames:
                     update_pose(view)
 
-
-        return loss.item() 
+        return loss.item()
 
     def covisibility_pruning(self):
         """Covisibility based pruning"""
@@ -677,7 +669,7 @@ class GaussianMapper(object):
         print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Final mapping loss: {self.loss_list[-1]}", "cyan"))
         self.info(f"{len(self.iteration_info)} iterations, {len(self.cameras)/len(self.iteration_info)} cams/it")
 
-        #TODO uncomment after we are done debugging
+        # TODO uncomment after we are done debugging
         # export the cameras and gaussians to the terminate process
         if self.evaluate:
             mapping_queue.put(
@@ -708,7 +700,7 @@ class GaussianMapper(object):
                 self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=False)
                 # self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on view {cam.uid}")
 
-        return cam    
+        return cam
 
     def _update(self, delay_to_tracking=True):
         """Update our rendered map by:
