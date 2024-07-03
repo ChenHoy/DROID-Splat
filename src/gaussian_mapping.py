@@ -505,7 +505,9 @@ class GaussianMapper(object):
                     ng_before = len(self.gaussians)
                     for view, opacity in low_opacity:
                         self.gaussians.densify_w_opacity(opacity, view)
-                    self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity")
+                    # Only print when we added some new Gaussians
+                    if (len(self.gaussians) - ng_before) > 0:
+                        self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity")
 
             self.gaussians.optimizer.step()
             self.gaussians.optimizer.zero_grad()

@@ -326,8 +326,10 @@ class SLAM:
         self.info("Frontend Tracking done!")
 
         # Release the Semaphores to avoid deadlock
-        semaBackend.release()
-        semaMapping.release()
+        # HACK Increase the counter just by a lot, so it will never go to 0 again
+        for i in range(1000):
+            semaBackend.release() 
+            semaMapping.release()
 
     def loop_detection(self, rank: int, loop_queue: mp.Queue, run: bool = False) -> None:
 
@@ -501,13 +503,15 @@ class SLAM:
 
             # Notify leading Tracking thread, that we finished the current Render optimization
             # -> This avoids both Frontend and Renderer to run at the same time and conflict on depth_video
-            with communication_lock:
-                self.mapping_done += 1
-                condTracking.notify()
+            if self.tracking_finished < 1: # Notify Tracking thread only when it is still alive, else we get a deadlock
+                with communication_lock:
+                    self.mapping_done += 1
+                    condTracking.notify()
 
             sleep(self.sleep_time)  # Let system cool off a little
 
         # Run for one last time after everything finished
+        self.info(f"Ran Gaussian Mapper {self.gaussian_mapper.count} times before Refinement!")
         finished = False
         while not finished and run:
             finished = self.gaussian_mapper(mapping_queue, received_mapping, True)
