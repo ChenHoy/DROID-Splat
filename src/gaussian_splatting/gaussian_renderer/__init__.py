@@ -182,6 +182,7 @@ def render(
         "n_touched": n_touched,
     }
 
+
 def render_cg(
     viewpoint_camera,
     pc: GaussianModel,
@@ -225,7 +226,7 @@ def render_cg(
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
         debug=False,
-        perspec_matrix = viewpoint_camera.projection_matrix.t(),
+        perspec_matrix=viewpoint_camera.projection_matrix.t(),
         track_off=False,
         map_off=False,
     )
@@ -293,8 +294,7 @@ def render_cg(
             cov3D_precomp=cov3D_precomp,
             viewmatrix=viewpoint_camera.world_view_transform,
             gt_depth=viewpoint_camera.depth,
-            #gt_depth=torch.tensor([], device=device),
-
+            # gt_depth=torch.tensor([], device=device),
         )
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
