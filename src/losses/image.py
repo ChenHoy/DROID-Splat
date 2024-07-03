@@ -22,8 +22,6 @@ def color_loss(
         mask = torch.ones_like(image_est, device=image_est.device)
 
     l1_rgb = l1_loss(image_est, image_gt, mask)
-
-
     if with_ssim:
         if use_ms_ssim:
             ssim_loss = ms_ssim(
@@ -39,7 +37,6 @@ def color_loss(
             )
         # NOTE this is configured like is done in most monocular depth estimation supervision pipelines
         rgb_loss = 0.5 * alpha2 * (1 - ssim_loss) + (1 - alpha2) * l1_rgb
-        
     else:
         rgb_loss = l1_rgb
     return rgb_loss
