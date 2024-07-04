@@ -709,7 +709,7 @@ class GaussianMapper(object):
         i) Pull a filtered update from the sparser SLAM map
         ii) Add new Gaussians based on new views
         iii) Run a bunch of optimization steps to update Gaussians and camera poses
-        iv) Prune the render map based on visibility
+        iv) Prune the re
 
         Finally we send the point cloud version of this rendered map back to the SLAM system.
         """

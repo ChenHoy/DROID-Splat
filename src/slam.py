@@ -4,6 +4,7 @@ import gc
 from time import sleep
 from typing import List, Optional, Tuple
 from tqdm import tqdm
+import logging
 from copy import deepcopy
 from termcolor import colored
 from collections import OrderedDict
@@ -32,6 +33,9 @@ from .gaussian_splatting import eval_utils
 from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
 from .gaussian_splatting.gui import gui_utils, slam_gui
 from .utils import clone_obj, get_all_queue
+
+# A logger for this file
+log = logging.getLogger(__name__)
 
 
 class SLAM:
@@ -159,8 +163,11 @@ class SLAM:
         self.communication_lock = mp.Lock()
         self.condTracking = mp.Condition(lock=self.communication_lock)  # Conditional for fine-grained synchronization
 
-    def info(self, msg: str) -> None:
-        print(colored("[Main]: " + msg, "green"))
+    def info(self, msg: str, logger=None) -> None:
+        if logger is not None:
+            logger.info(colored("[Main]: " + msg, "green"))
+        else:
+            print(colored("[Main]: " + msg, "green"))
 
     def sanity_checks(self) -> None:
         """Perform sanity checks to see if the system is misconfigured, this is just supposed
@@ -421,8 +428,8 @@ class SLAM:
                     if loop_ii is not None and loop_jj is not None:
                         all_lc_candidates.append((loop_ii, loop_jj))
                 all_loop_ii, all_loop_jj = loop_ii, loop_jj
-                # if len(all_lc_candidates) > 0:
-                #     all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
+                if len(all_lc_candidates) > 0:
+                    all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
 
             if self.backend.enable_loop:
                 self.backend(local_graph=self.frontend.optimizer.graph, add_ii=all_loop_ii, add_jj=all_loop_jj)
@@ -615,8 +622,8 @@ class SLAM:
     def evaluate(self, stream, gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None) -> None:
 
         eval_path = os.path.join(self.output, "evaluation")
-        self.info("Saving evaluation results in {}".format(eval_path))
-        self.info("#" * 20 + f" Results for {stream.input_folder} ...")
+        self.info("Saving evaluation results in {}".format(eval_path), logger=log)
+        self.info("#" * 20 + f" Results for {stream.input_folder} ...", logger=log)
 
         #### ------------------- ####
         ### Trajectory evaluation ###
@@ -637,8 +644,8 @@ class SLAM:
         kf_result_ate, all_result_ate = eval_utils.do_odometry_evaluation(
             eval_path, est_c2w_kf_lie, gt_c2w_kf_lie, est_c2w_all_lie, gt_c2w_all_lie, tstamps, kf_tstamps, monocular
         )
-        self.info("(Keyframes only) ATE: {}".format(kf_result_ate))
-        self.info("(All) ATE: {}".format(all_result_ate))
+        self.info("(Keyframes only) ATE: {}".format(kf_result_ate), logger=log)
+        self.info("(All) ATE: {}".format(all_result_ate), logger=log)
         # TODO Can we filter the Dataset name out of this to make it prettier?
         # TODO update loop config flag or add another one, because we will likely run a loop closure mechanism on top
         ### Store main results with attributes for ablation/comparison
@@ -812,19 +819,19 @@ class SLAM:
         gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None,
     ) -> None:
         """fill poses for non-keyframe images and evaluate"""
-        self.info("Initiating termination ...")
+        self.info("Initiating termination ...", logger=log)
 
         # self.save_state()  ## this is not reached
         if self.do_evaluate:
-            self.info("Doing evaluation!")
+            self.info("Doing evaluation!", logger=log)
             self.evaluate(stream, gaussian_mapper_last_state=gaussian_mapper_last_state)
-            self.info("Evaluation complete")
+            self.info("Evaluation complete", logger=log)
 
         for i, p in enumerate(processes):
             p.terminate()
             p.join()
             self.info("Terminated process {}".format(p.name))
-        self.info("Terminate: Done!")
+        self.info("Terminate: Done!", logger=log)
 
     def run(self, stream) -> None:
         processes = [
@@ -884,7 +891,7 @@ class SLAM:
                 pass
             # Receive the final update, so we can do something with it ...
             a = self.mapping_queue.get()
-            self.info("Received final mapping update!")
+            self.info("Received final mapping update!", logger=log)
             if a == "None":
                 a = deepcopy(a)
                 gaussian_mapper_last_state = None
