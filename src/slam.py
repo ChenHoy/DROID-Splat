@@ -441,7 +441,7 @@ class SLAM:
             self.info(f"Ran Backend {self.backend.count} times before refinement!")
 
         # Run one last time after tracking finished
-        if run and self.backend.do_refinement:
+        if run and self.backend is not None and self.backend.do_refinement:
             with self.video.get_lock():
                 t_end = self.video.counter.value
 

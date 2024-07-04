@@ -94,7 +94,7 @@ class GaussianMapper(object):
         bg_color = [1, 1, 1]  # White background
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        self.z_near = 0.001
+        self.z_near = 0.0001
         self.z_far = 10000.0
 
         if gui_qs is not None:
@@ -356,11 +356,21 @@ class GaussianMapper(object):
                 loss = 0
                 for chunk in chunks:
                     loss += self.mapping_step(
-                        iter, chunk, self.kf_mng_params.refinement, densify=False, optimize_poses=optimize_poses
+                        iter,
+                        chunk,
+                        self.kf_mng_params.refinement,
+                        densify=False,
+                        prune_densify=False,
+                        optimize_poses=optimize_poses,
                     )
             else:
                 loss = self.mapping_step(
-                    iter, frames, self.kf_mng_params.refinement, densify=False, optimize_poses=optimize_poses
+                    iter,
+                    frames,
+                    self.kf_mng_params.refinement,
+                    densify=False,
+                    prune_densify=False,
+                    optimize_poses=optimize_poses,
                 )
 
             print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss / len(frames)}", "cyan"))
@@ -422,7 +432,13 @@ class GaussianMapper(object):
                 view.cam_trans_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
 
     def mapping_step(
-        self, iter: int, frames: List[Camera], kf_mng_params: Dict, densify: bool = True, optimize_poses: bool = False
+        self,
+        iter: int,
+        frames: List[Camera],
+        kf_mng_params: Dict,
+        densify: bool = True,
+        prune_densify: bool = True,
+        optimize_poses: bool = False,
     ) -> float:
         """
         Takes the list of selected keyframes to optimize and performs one step of the mapping optimization.
@@ -480,7 +496,9 @@ class GaussianMapper(object):
         # NOTE chen: this can happen we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
 
-        scaled_loss = loss * np.sqrt(len(frames)) / 2  # Scale the loss with the number of frames
+        scaled_loss = (
+            loss * np.sqrt(len(frames)) / 2
+        )  # Scale the loss with the number of frames so we adjust the learning rate dependent on batch size
         scaled_loss.backward()
 
         with torch.no_grad():
@@ -493,7 +511,11 @@ class GaussianMapper(object):
             if densify:
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-            if self.last_idx > self.n_last_frames and (iter + 1) % self.kf_mng_params.prune_densify_every == 0:
+            if (
+                self.last_idx > self.n_last_frames
+                and (iter + 1) % self.kf_mng_params.prune_densify_every == 0
+                and prune_densify
+            ):
                 self.gaussians.densify_and_prune(  # General pruning based on opacity and size + densification
                     kf_mng_params.densify_grad_threshold,
                     kf_mng_params.opacity_th,
