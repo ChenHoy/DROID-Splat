@@ -267,12 +267,12 @@ class SlamTestbed(SLAM):
             # If new keyframe got inserted
             if frontend_old_count != self.frontend.optimizer.t1:
                 # Render all new incoming frames
-                # if (
-                #     self.frontend.optimizer.is_initialized
-                #     and self.frontend.optimizer.t1 % render_freq == 0
-                #     and self.gaussian_mapper.warmup < self.frontend.optimizer.count
-                # ):
-                #     self.gaussian_mapper(None, None)
+                if (
+                    self.frontend.optimizer.is_initialized
+                    and self.frontend.optimizer.t1 % render_freq == 0
+                    and self.gaussian_mapper.warmup < self.frontend.optimizer.count
+                ):
+                    self.gaussian_mapper(None, None)
 
                 # Run backend and loop closure detection occasianally
                 if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % backend_freq == 0:
@@ -319,6 +319,38 @@ class SlamTestbed(SLAM):
             ):
                 self.backend()
 
+    def test_rendering(self, stream, render_freq: int = 10) -> None:
+        """Test Rendering in a sequential manner."""
+        i = 0
+        for frame in tqdm(stream):
+            frontend_old_count = self.frontend.optimizer.t1  # How many times did the frontend actually run?
+
+            if self.cfg.with_dyn and stream.has_dyn_masks:
+                timestamp, image, depth, intrinsic, gt_pose, static_mask = frame
+            else:
+                timestamp, image, depth, intrinsic, gt_pose = frame
+                static_mask = None
+
+            # Control when to start and when to stop the SLAM system from outside
+            if timestamp < self.t_start:
+                continue
+            if self.t_stop is not None and timestamp > self.t_stop:
+                break
+
+            # Frontend insert new frames
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
+            if (
+                self.frontend.optimizer.is_initialized
+                and self.frontend.optimizer.t1 % render_freq == 0
+                and self.cfg.run_mapping
+                and i > self.gaussian_mapper.warmup
+            ):
+                self.gaussian_mapper(None, None)
+            i += 1
+
+        self.gaussian_mapper(None, None, True)
+        ipdb.set_trace()
+
     def run(self, stream):
         """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
 
@@ -333,12 +365,13 @@ class SlamTestbed(SLAM):
         for p in processes:
             p.start()
 
-        render_freq = 5  # Run rendering every k frontends
+        render_freq = 3  # Run rendering every k frontends
         backend_freq = 20  # Run backend every 5 frontends
 
         # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200)
         # self.run_track_render(stream, backend_freq=backend_freq, render_freq=render_freq)
-        self.test_tracking(stream, backend_freq=backend_freq)
+        # self.test_tracking(stream, backend_freq=backend_freq)
+        self.test_rendering(stream, render_freq=render_freq)
         ipdb.set_trace()
 
         self.terminate(processes, stream, None)

@@ -14,7 +14,6 @@ import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 
-
 from .gaussian_splatting.gui import gui_utils
 from .gaussian_splatting.eval_utils import EvaluatePacket
 from .gaussian_splatting.gaussian_renderer import render
@@ -56,13 +55,23 @@ class GaussianMapper(object):
         self.delay = cfg.mapping.delay  # Delay between tracking and mapping
         self.warmup = max(cfg.mapping.warmup, cfg.tracking.warmup)
         self.batch_mode = cfg.mapping.batch_mode  # Take a batch of all unupdated frames at once
-        self.feedback_map = cfg.mapping.feedback_mapping
+        # Feedback the map to the Tracker if wanted
+        self.feedback_disps = cfg.mapping.feedback_disps
+        if self.feedback_disps:
+            self.info("Feeding back scene geometry from Renderer -> Tracker!")
+        self.optimize_poses = cfg.mapping.optimize_poses
+        self.feedback_poses = cfg.mapping.feedback_poses
+        if self.feedback_poses:
+            self.info("Feeding back local pose graph from Renderer -> Tracker!")
+        if self.feedback_poses and not self.optimize_poses:
+            self.info("Warning. You are feeding back poses from Mapper to Tracker without optimizing them!")
+        self.feedback_only_last_window = cfg.mapping.feedback_only_last_window
+        self.feedback_warmup = cfg.mapping.feedback_warmup
 
         self.refinement_iters = cfg.mapping.refinement_iters
         self.use_non_keyframes = cfg.mapping.use_non_keyframes
         self.mapping_iters = cfg.mapping.mapping_iters
         self.save_renders = cfg.mapping.save_renders
-        self.optimize_poses = cfg.mapping.optimize_poses
         self.opt_params = cfg.mapping.opt_params
         self.pipeline_params = cfg.mapping.pipeline_params
         self.kf_mng_params = cfg.mapping.keyframes
@@ -223,6 +232,18 @@ class GaussianMapper(object):
     # When we e.g. do a loop closure, we need to realign the Gaussians of the closed loop segments
     # Since we dont do PGO, we could only recenter Gaussians based on the changed poses and associated unique_kfIDs
     # (-> Compute the distance in world coordinates between the two poses and move the Gaussians accordingly)
+    # NOTE chen: This assumes, that we get a useful update from the SLAM system!
+    # FIXME: we still need to correct loop closures or else we need to rely on expensive re-optimization!
+    # TODO solution reanchor the means of the Gaussians to new iproj depth maps
+    # Problem: it would not make sense to update the whole map by solving a global registration problem
+    # other frameworks resolve this because they have a PoseGraphOptimization between local segments
+    # a loop closure is then defined between segments, i.e. we can use the resolving transformations directly on all segments
+    # TODO solution would be to store both the video buffer map and the Gaussians in a shared datastructure for spatial grouping
+    # -> ultra naive, simply record where we had the biggest changes locally after a global optimization
+    # to do this simply memoize the poses before running bundle adjustment and afterwards and then we know which Gaussians from a certain frame need to be relocated
+    # TODO are gaussians really anchored?
+    # -> naive: use hash map for different temporal segments since they will likely be close to each other, we can memoize during a loop closure which segments are connected
+    # -> advanced: use an octree like datastructure to spatially divide frames into group/segments.
     def frame_updater(self, delay=0):
         """Gets the list of frames and updates the depth and pose based on the video.
 
@@ -384,34 +405,155 @@ class GaussianMapper(object):
                     )
                 )
 
-    def get_mapping_update(self, frames: List[Camera]) -> Dict:
+    def get_mapping_update(
+        self,
+        frames: List[Camera],
+        was_pruned: bool=False,
+        feedback_poses: bool = True,
+        feedback_disps: bool = False,
+        opacity_threshold: float = 0.2,
+        ignore_frames: List[int] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        min_coverage: float = 0.7,
+    ) -> Dict:
         """Get the index, poses and depths of the frames that were already optimized. We can use this to then feedback
-        the outputs of the Gaussian Rendering optimization back into the video.map."""
+        the outputs of the Gaussian Rendering optimization back into the video.map.
+
+        We should only feedback 'good' depths since Rendering can also introduce many outliers, noise or
+        just does not converge correctly immediately. The Tracker operates with dense depth frames, so we need to be careful to not feedback too sparse depths.
+        For this purpose, we limit the 'step size' of our renderer by ensuring that the rendered depth does not deviate from the original too much. If the
+        current Renderer map does not cover enough of the scene in the specific view, we skip the frame.
+
+        Since the map is usually not very good in the beginning, we never feedback the first few keyframes.
+        """
+        index, poses, depths = [], [], []
+        # Sanity check
+        if not feedback_disps and not feedback_poses:
+            return {"index": index, "poses": poses, "depths": depths}
 
         # Render frames to extract depth
-        index, poses, depths = [], [], []
         for view in frames:
-            # FIXME why do we get an invalid non-invertible matrix for some views?!
+            # Ignore boundary frames, especially in the beginning when we build the map
+            # (the first few frames are usually not good for feedback as they are not optimized yet or heavily incomplete)
+            if self.idx_mapping[view.uid] in ignore_frames:
+                continue
             render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
+
+            # We computed covisibility and can therefore count how many Gaussians were observed in how many frames
+            if was_pruned:
+                in_frame = self.gaussians.unique_kfIDs == view.uid
+                n_observed = self.gaussians.n_obs[in_frame]
+                # Bad frames usually dont have many covisible Gaussians attached to them
+                if (n_observed <= 1).sum() / n_observed.numel() > 0.3:
+                    self.info(f"Skipping view {view.uid} during Feedback as it has too few covisible Gaussians ...")
+                    continue
+
             # NOTE chen: this can be None when self.gaussians is 0. This could happen in some cases
             if render_pkg is None:
-                self.info(f"Skipping view {view.uid} as no gaussians are present ...")
-                if self.optimize_poses:
-                    poses.append(None)
-                depths.append(None)
-                index.append(None)
+                self.info(f"Skipping view {view.uid} as no Gaussians are present in it ...")
+                continue
+
+            index_in_video = self.idx_mapping[view.uid]
+            depth = render_pkg["depth"].detach()
+            # Filter away pixels with very low opacity as these are usually unreliable
+            valid_o = render_pkg["opacity"].detach() > opacity_threshold
+            depth[~valid_o] = 0.0
+
+            # Analyze the video depths before filtering as a reference
+            if self.video.upsample:
+                disps_ref = self.video.disps_up[index_in_video]
             else:
-                index.append(self.idx_mapping[view.uid])
-                if self.optimize_poses:
-                    transform = torch.eye(4, device=self.device)
-                    transform[:3, :3], transform[:3, 3] = view.R, view.T
-                    poses.append(transform)
-                depths.append(clone_obj(render_pkg["depth"].detach()))
+                disps_ref = self.video.disps[index_in_video]
+            valid_ref = disps_ref > 0
+            depth_ref = torch.where(valid_ref, 1.0 / disps_ref, disps_ref)
+
+            # Limit step size by punishing large deviations from the original video depth
+            if not self.video.upsample:
+                s = self.video.scale_factor
+                depth_down = depth[:, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
+                diff_to_video = torch.abs(depth_down - depth_ref) / depth_ref  # Abs rel.
+                depth_wo_outliers = torch.where(diff_to_video < 0.15, depth_down, 0.0)  # Filter away outliers
+            else:
+                diff_to_video = torch.abs(depth - depth_ref) / depth_ref  # Abs rel.
+                depth_wo_outliers = torch.where(diff_to_video < 0.15, depth, 0.0)  # Filter away outliers
+            coverage_gs_wo = (depth_wo_outliers > 0).sum() / (depth_wo_outliers > 0).numel()
+
+            #### Visualizations for debugging ####
+            # disps_clean = self.video.disps_clean[index_in_video]
+            # valid_clean = disps_clean > 0
+            # depth_clean = torch.where(valid_clean, 1.0 / disps_clean, disps_clean)
+            # max_depth = min(max(depth_clean.max(), depth_up.max(), depth.max()), 4.0)
+            # self.plot_depth(
+            #     depth.squeeze(), title=f"Depth after Gaussian Optimization, view {view.uid}", max_depth=max_depth
+            # )
+            # self.plot_depth(
+            #     depth_clean.squeeze(),
+            #     title=f"Depth (filtered) before Gaussian Optimization, view {view.uid}",
+            #     max_depth=max_depth,
+            # )
+            # self.plot_depth(
+            #     depth_wo_outliers.squeeze(),
+            #     title=f"Depth without outliers after Gaussian Optimization, view {view.uid}",
+            #     max_depth=max_depth,
+            # )
+            # self.plot_depth(
+            #     depth_up.squeeze(),
+            #     title=f"Dense Depth before Gaussian Optimization, view {view.uid}",
+            #     max_depth=max_depth,
+            # )
+            # self.plot_error(depth, depth_up, title=f"Difference to Dense Depth, view {view.uid}")
+            ####
+
+            # Disparity in video is dense -> Dont feedback too sparse frames
+            if coverage_gs_wo > min_coverage:
+                index.append(index_in_video)
+                transform = torch.eye(4, device=self.device)
+                transform[:3, :3], transform[:3, 3] = view.R, view.T
+                poses.append(transform)
+                depths.append(clone_obj(depth))
 
             torch.cuda.empty_cache()
             gc.collect()
 
+        if not feedback_disps:
+            depths = []
+        if not feedback_poses:
+            poses = []
+
         return {"index": index, "poses": poses, "depths": depths}
+
+    def plot_error(
+        self, pred: torch.Tensor, ref: torch.Tensor, cmap: str = "viridis", title: Optional[str] = None
+    ) -> None:
+        import matplotlib.pyplot as plt
+
+        abs_rel = torch.abs(pred - ref) / ref
+        plt.imshow(abs_rel.squeeze().cpu().numpy(), cmap=cmap, vmax=0.5)
+        if title is not None:
+            plt.title(title)
+        plt.axis("off")
+        plt.show()
+
+    def plot_depth(self, depth: torch.Tensor, title: Optional[str] = None, max_depth: Optional[float] = None) -> None:
+        import matplotlib.pyplot as plt
+        from .visualization import depth2rgb
+
+        plt.imshow(depth2rgb(depth, max_depth=max_depth).squeeze())
+        plt.axis("off")
+        if title is not None:
+            plt.title(title)
+        plt.show()
+
+    def plot_video_disp(self, idx: int, use_clean: bool = False, max_depth: Optional[float] = None) -> None:
+        if use_clean:
+            disp = self.video.disps_clean[idx]
+        else:
+            if self.video.upsampled:
+                disp = self.video.disps_up[idx]
+            else:
+                disp = self.video.disps[idx]
+        valid = disp > 0
+        depth = torch.where(valid, 1.0 / disp, disp)
+        self.plot_depth(depth, title=f"Video Depth Map: {idx}", max_depth=max_depth)
 
     def get_camera_trajectory(self, frames: List[Camera]) -> Dict:
         """Get the camera trajectory of the frames in world coordinates."""
@@ -471,7 +613,7 @@ class GaussianMapper(object):
                 scale_invariant = True
             else:
                 scale_invariant = False
-            loss += mapping_rgbd_loss(
+            current_loss = mapping_rgbd_loss(
                 image,
                 depth,
                 view,
@@ -487,18 +629,22 @@ class GaussianMapper(object):
             )
 
             # low_opacity.append((view, opacity))
+            loss += current_loss
 
+        loss = loss / len(frames)
         # Regularize scale changes of the Gaussians
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-        loss += self.loss_params.beta * len(frames) * isotropic_loss.mean()
+        loss += self.loss_params.beta * isotropic_loss.mean()
 
         # NOTE chen: this can happen we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
 
-        scaled_loss = (
-            loss * np.sqrt(len(frames)) / 2
-        )  # Scale the loss with the number of frames so we adjust the learning rate dependent on batch size
+        # Scale the loss with the number of frames so we adjust the learning rate dependent on batch size
+        # NOTE chen: this is only a valid strategy for standard optimizers
+        # if the optimizer has a regularization term (e.g. weight decay), then this changes the trade-off between objective and regularizor!
+        # NOTE chen: MonoGS scales their loss with len(frames), while we scale it with sqrt(len(frames))
+        scaled_loss = loss * np.sqrt(len(frames))
         scaled_loss.backward()
 
         with torch.no_grad():
@@ -511,18 +657,15 @@ class GaussianMapper(object):
             if densify:
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-            if (
-                self.last_idx > self.n_last_frames
-                and (iter + 1) % self.kf_mng_params.prune_densify_every == 0
-                and prune_densify
-            ):
-                self.gaussians.densify_and_prune(  # General pruning based on opacity and size + densification
-                    kf_mng_params.densify_grad_threshold,
-                    kf_mng_params.opacity_th,
-                    kf_mng_params.gaussian_extent,
-                    kf_mng_params.size_threshold,
-                )
-
+            if self.last_idx > self.n_last_frames and (iter + 1) % self.kf_mng_params.prune_densify_every == 0:
+                if prune_densify:
+                    # General pruning based on opacity and size + densification
+                    self.gaussians.densify_and_prune(
+                        kf_mng_params.densify_grad_threshold,
+                        kf_mng_params.opacity_th,
+                        kf_mng_params.gaussian_extent,
+                        kf_mng_params.size_threshold,
+                    )
                 if densify:
                     ng_before = len(self.gaussians)
                     for view, opacity in low_opacity:
@@ -545,51 +688,50 @@ class GaussianMapper(object):
 
         return loss.item()
 
-    def covisibility_pruning(self):
-        """Covisibility based pruning"""
+    def covisibility_pruning(self, prune: str = "new", dont_prune_last: int = 1, visibility_thresh: int = 2):
+        """Covisibility based pruning.
 
-        new_frames = (self.cameras + self.new_cameras)[-self.n_last_frames :]
+        If prune is set to "last", we only prune the last n frames. Else we check for all frames if Gaussians are visible in at least k frames.
+        A Gaussian is visible if it touched at least a single pixel in a view.
+        """
+        # TODO do these a sanity check in __init__ so we dont get this print just once
+        # Sanity checks, so this is not misused
+        if dont_prune_last >= len(self.new_cameras):
+            self.info(
+                f"Warning. You selected to not prune the last {dont_prune_last} frames, but this is bigger than the optimization window! Please reconfigure ..."
+            )
+        if dont_prune_last > len(self.cameras + self.new_cameras):
+            return
+        occ_aware_visibility = {}
 
-        self.occ_aware_visibility = {}
-        for view in new_frames:
+        frames = sorted(self.cameras + self.new_cameras, key=lambda x: x.uid)
+        # Make a covisibility check only for the last n frames
+        if prune == "new":
+            # Dont prune the Last/last-1 frame, since we then would add and prune Gaussians immediately -> super wasteful
+            if dont_prune_last > 0:
+                frames = frames[-self.n_last_frames : -dont_prune_last]
+            else:
+                frames = frames[-self.n_last_frames :]
+
+        self.gaussians.n_obs.fill_(0)  # Reset observation count
+        for view in frames:
             render_pkg = render(view, self.gaussians, self.pipeline_params, self.background)
-            self.occ_aware_visibility[view.uid] = (render_pkg["n_touched"] > 0).long()
+            visibility = (render_pkg["n_touched"] > 0).long()
+            occ_aware_visibility[view.uid] = visibility
+            # Count when at least one pixel was touched by the Gaussian
+            self.gaussians.n_obs += visibility.cpu()  # Increase observation count
 
-        new_idx = [view.uid for view in new_frames]
-        sorted_frames = sorted(new_idx, reverse=True)
+        to_prune = self.gaussians.n_obs < visibility_thresh
+        if prune == "new":
+            ids = [view.uid for view in frames]
+            sorted_frames = sorted(ids, reverse=True)
+            # Only prune Gaussians added on the last k frames
+            prune_last = self.gaussians.unique_kfIDs >= sorted_frames[self.kf_mng_params.prune_last - 1]
+            to_prune = torch.logical_and(to_prune, prune_last)
 
-        self.gaussians.n_obs.fill_(0)
-        for _, visibility in self.occ_aware_visibility.items():
-            self.gaussians.n_obs += visibility.cpu()
-
-        # Gaussians added on the last prune_last frames
-        mask = self.gaussians.unique_kfIDs >= sorted_frames[self.kf_mng_params.prune_last - 1]
-        to_prune = torch.logical_and(self.gaussians.n_obs <= self.kf_mng_params.visibility_th, mask)
         if to_prune.sum() > 0:
-            self.gaussians.prune_points(to_prune.cuda())
-            # for idx in new_idx:
-            #     self.occ_aware_visibility[idx] = self.occ_aware_visibility[idx][~to_prune]
-        self.info(f"Covisibility pruning removed {to_prune.sum()} gaussians")
-
-    def abs_visibility_prune(self, threshold: int = 2):
-        """
-        Absolute covisibility based pruning. Removes all gaussians
-        that are not seen in at least abs_visibility_th views.
-        """
-
-        self.occ_aware_visibility = {}
-        for view in self.cameras + self.new_cameras:
-            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
-            self.occ_aware_visibility[view.uid] = (render_pkg["n_touched"] > 0).long()
-
-        self.gaussians.n_obs.fill_(0)
-        for _, visibility in self.occ_aware_visibility.items():
-            self.gaussians.n_obs += visibility.cpu()
-
-        mask = self.gaussians.n_obs < threshold
-        if mask.sum() > 0:
-            self.gaussians.prune_points(mask.cuda())
-        self.info(f"Absolute visibility pruning removed {mask.sum()} gaussians")
+            self.gaussians.prune_points(to_prune.to(self.device))
+        self.info(f"({prune}) Covisibility pruning removed {to_prune.sum()} gaussians")
 
     def select_keyframes(self):
         """Select the last n1 frames and n2 other random frames from all."""
@@ -673,8 +815,11 @@ class GaussianMapper(object):
         self.info(f"Feeding back into video.map ...")
         # Filter out the non-keyframes which are not stored in the video.object
         only_kf = [cam for cam in self.cameras if cam.uid in self.idx_mapping]
-        to_set = self.get_mapping_update(only_kf)
-        self.video.set_mapping_item(**to_set)
+        # Only feedback the poses, since we will not work with the video again
+        if self.feedback_poses or self.feedback_disps:
+            to_set = self.get_mapping_update(only_kf, feedback_disps=False)
+            # There is no need to feed back the
+            self.video.set_mapping_item(**to_set)
 
         self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
         self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
@@ -718,7 +863,7 @@ class GaussianMapper(object):
             if not self.initialized:
                 self.initialized = True
                 self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=True)
-                self.info(f"Initialized with {len(self.gaussians)} gaussians")
+                self.info(f"Initialized with {len(self.gaussians)} gaussians for view {cam.uid}")
             else:
                 ng_before = len(self.gaussians)
                 self.gaussians.extend_from_pcd_seq(cam, cam.uid, init=False)
@@ -726,14 +871,13 @@ class GaussianMapper(object):
 
         return cam
 
-    def _update(self, delay_to_tracking=True):
+    def _update(self, delay_to_tracking=True, iters: int = 10):
         """Update our rendered map by:
         i) Pull a filtered update from the sparser SLAM map
         ii) Add new Gaussians based on new views
         iii) Run a bunch of optimization steps to update Gaussians and camera poses
-        iv) Prune the re
-
-        Finally we send the point cloud version of this rendered map back to the SLAM system.
+        iv) Prune the resulting Gaussians based on visibility and size
+        v) Maybe send back a filtered update to the SLAM system
         """
         self.info("Currently has: {} gaussians".format(len(self.gaussians)))
 
@@ -759,18 +903,6 @@ class GaussianMapper(object):
             self.info(f"Added {len(self.new_cameras)} new cameras: {[cam.uid for cam in self.new_cameras]}")
 
         ### Update the frames based on Tracker and add new Gaussians
-        # NOTE chen: This assumes, that we get a useful update from the SLAM system!
-        # FIXME: we still need to correct loop closures or else we need to rely on expensive re-optimization!
-        # TODO solution reanchor the means of the Gaussians to new iproj depth maps
-        # Problem: it would not make sense to update the whole map by solving a global registration problem
-        # other frameworks resolve this because they have a PoseGraphOptimization between local segments
-        # a loop closure is then defined between segments, i.e. we can use the resolving transformations directly on all segments
-        # TODO solution would be to store both the video buffer map and the Gaussians in a shared datastructure for spatial grouping
-        # -> ultra naive, simply record where we had the biggest changes locally after a global optimization
-        # to do this simply memoize the poses before running bundle adjustment and afterwards and then we know which Gaussians from a certain frame need to be relocated
-        # TODO are gaussians really anchored?
-        # -> naive: use hash map for different temporal segments since they will likely be close to each other, we can memoize during a loop closure which segments are connected
-        # -> advanced: use an octree like datastructure to spatially divide frames into group/segments.
         self.frame_updater(delay=delay)  # Update all changed cameras with new information from SLAM system
         last_new_cam = self.add_new_gaussians(self.new_cameras)
         # We might have 0 Gaussians in some cases, so no need to run optimizer
@@ -780,32 +912,51 @@ class GaussianMapper(object):
 
         ### Optimize gaussians
         do_densify = len(self.iteration_info) % self.kf_mng_params.densify_every == 0
-        for iter in tqdm(
-            range(self.mapping_iters), desc=colored("Gaussian Optimization", "magenta"), colour="magenta"
-        ):
+        for iter in tqdm(range(iters), desc=colored("Gaussian Optimization", "magenta"), colour="magenta"):
             frames = self.select_keyframes()[0] + self.new_cameras
             if len(frames) == 0:
                 self.loss_list.append(0.0)
                 continue
 
             loss = self.mapping_step(
-                iter, frames, self.kf_mng_params.mapping, densify=do_densify, optimize_poses=self.optimize_poses
+                iter,
+                frames,
+                self.kf_mng_params.mapping,
+                prune_densify=True,  # Prune and densify with vanilla 3DGS strategy
+                densify=do_densify,  # Densify based on low opacity regions
+                optimize_poses=self.optimize_poses,
             )
-            self.loss_list.append(loss / len(frames))
+            self.loss_list.append(loss / np.sqrt(len(frames)))
         # Keep track of how well the Rendering is doing
         print(colored("\n[Gaussian Mapper] ", "magenta"), colored(f"Loss: {self.loss_list[-1]}", "cyan"))
 
         ### Prune unreliable Gaussians
+        # TODO in an optimal version, we can keep the rendered frames from pruning, if no Gaussians were pruned
+        # we could then reuse these during get_mapping_update to avoid a rerender ...
+        # Covisibility prunes Gaussians, that dont splat on pixels in at least k frames
         if len(self.iteration_info) % self.kf_mng_params.prune_every == 0:
-            if self.kf_mng_params.prune_mode == "abs":
-                # Absolute visibility pruning for all gaussians
-                self.abs_visibility_prune(self.kf_mng_params.abs_visibility_th)
-            elif self.kf_mng_params.prune_mode == "new":
-                self.covisibility_pruning()  # Covisibility pruning for recently added gaussians
+            # Prune either for all gaussians or just the last n frames
+            self.covisibility_pruning(
+                prune=self.kf_mng_params.prune_mode,
+                dont_prune_last=0,
+                visibility_thresh=self.kf_mng_params.visibility_th,
+            )
+            was_pruned = True
+        else:
+            was_pruned = False
 
         ### Feedback new state of map to Tracker
-        if self.feedback_map:
-            to_set = self.get_mapping_update(frames)
+        if self.feedback_poses or self.feedback_disps and self.count > self.feedback_warmup:
+            if self.feedback_only_last_window and len(self.new_cameras) > 0:
+                update_cams = sorted(frames, key=lambda x: x.uid)[-self.n_last_frames :]
+            else:
+                update_cams = frames
+            to_set = self.get_mapping_update(
+                update_cams,
+                was_pruned,
+                feedback_poses=self.feedback_poses,
+                feedback_disps=self.feedback_disps,
+            )
             self.info("Feeding back to Tracking ...")
             self.video.set_mapping_item(**to_set)
 
@@ -851,17 +1002,18 @@ class GaussianMapper(object):
 
     def __call__(self, mapping_queue: mp.Queue, received_item: mp.Event, the_end=False):
 
-        # self.cur_idx = int(self.video.filtered_id.item())
         self.cur_idx = self.video.counter.value + 1
         if self.last_idx + self.delay < self.cur_idx and self.cur_idx > self.warmup:
-            self._update()
+            self._update(iters=self.mapping_iters)
             self.count += 1  # Count how many times we ran the Renderer
             return False
 
         elif the_end and self.last_idx + self.delay >= self.cur_idx:
             self.cur_idx = self.video.counter.value
-            self._update(delay_to_tracking=False)  # Run another call to catch the last batch of keyframes
+            # Run another call to catch the last batch of keyframes
+            self._update(iters=self.mapping_iters + 10, delay_to_tracking=False)
             self.count += 1
+
             self._last_call(mapping_queue=mapping_queue, received_item=received_item)
             return True
 
