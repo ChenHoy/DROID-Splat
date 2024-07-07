@@ -411,8 +411,9 @@ class GaussianMapper(object):
                     lr_factor=0.1,  # Force lower learning rate for refinement
                 )
 
-            print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss / len(frames)}", "cyan"))
-            self.loss_list.append(loss / len(frames))
+            # Multiply by 1/lr_factor
+            print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {10*loss}", "cyan"))
+            self.loss_list.append(10 * loss)
 
             if self.use_gui:
                 self.q_main2vis.put_nowait(
@@ -663,9 +664,8 @@ class GaussianMapper(object):
             # low_opacity.append((view, opacity))
             loss += current_loss
 
-        loss = (
-            loss / len(frames) * lr_factor
-        )  # NOTE chen: we allow lr_factor to make it possible to change the learning rate on the fly
+        # NOTE chen: we allow lr_factor to make it possible to change the learning rate on the fly
+        loss = loss / len(frames) * lr_factor
         # Regularize scale changes of the Gaussians
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
@@ -837,7 +837,12 @@ class GaussianMapper(object):
             self.info("\nMapping refinement starting")
             # Only optimize over 20% of the whole video and always make sure that 30% of each batch is keyframes
             self.map_refinement(
-                num_iters=self.refinement_iters, optimize_poses=self.optimize_poses, random_frames=0.2, kf_at_least=0.3
+                num_iters=self.refinement_iters,
+                densify=True,
+                prune_densify=True,
+                optimize_poses=self.optimize_poses,
+                random_frames=0.2,
+                kf_at_least=0.3,
             )
             self.info(f"Gaussians after Map Refinement: {len(self.gaussians)}")
             self.info("Mapping refinement finished")
@@ -850,12 +855,12 @@ class GaussianMapper(object):
         # Filter out the non-keyframes which are not stored in the video.object
         only_kf = [cam for cam in self.cameras if cam.uid in self.idx_mapping]
         # Only feedback the poses, since we will not work with the video again
-        # TODO chen: do we need a case, where we dont optimize poses during the run, but do it on refinement? 
+        # TODO chen: do we need a case, where we dont optimize poses during the run, but do it on refinement?
         if self.feedback_poses or self.feedback_disps:
             # HACK allow large differences to the video, else we will filter away occluded regions which we already corrected rightfully
             to_set = self.get_mapping_update(
                 only_kf,
-                feedback_poses=self.feedback_poses,  
+                feedback_poses=self.feedback_poses,
                 feedback_disps=self.feedback_disps,
                 opacity_threshold=0.0,
                 ignore_frames=[],
