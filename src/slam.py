@@ -22,7 +22,7 @@ from .droid_net import DroidNet
 from .frontend import FrontendWrapper
 from .backend import BackendWrapper
 from .depth_video import DepthVideo
-from .geom import matrix_to_lie
+from .geom import matrix_to_lie, pose_distance
 from .visualization import droid_visualization, depth2rgb, uncertainty2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .loop_detection import LoopDetector, merge_candidates
@@ -203,6 +203,14 @@ class SLAM:
                 Use the loop detector always together with the backend enabled!""",
                 "red",
             )
+
+        if self.cfg.run_backend and self.cfg.run_mapping:
+            assert (
+                self.cfg.mapper_every < self.cfg.backend_every
+            ), """Mapping should generally run more often than backend! 
+            Our current implementation only keeps track of map changes from a 
+            single backend forward pass! If backend ran k times before we update the Mapper, 
+            then we would lose track to reanchor the Gaussians"""
 
     def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
         if output_folder is not None:
@@ -437,6 +445,10 @@ class SLAM:
                 self.backend(add_ii=all_loop_ii, add_jj=all_loop_jj)
             sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
+        sleep(self.sleep_time)  # Let other threads finish their last optimization
+        memoized_backend_count = self.ram_safeguard_backend(
+            max_ram=self.max_ram_usage, count_to_set=memoized_backend_count
+        )  # Try to instantiate again if needed
         if self.backend is not None and run:
             self.info(f"Ran Backend {self.backend.count} times before refinement!")
 
@@ -496,6 +508,16 @@ class SLAM:
         self.all_finished += 1
         self.info("Backend done!")
 
+    def maybe_reanchor_gaussians(self, threshold: float = 0.05) -> None:
+        """Reanchor the Gaussians to follow a big map update. For this purpose we simply track"""
+        unit = self.video.pose_changes.clone()
+        unit[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.device)
+        delta = pose_distance(self.video.pose_changes, unit)
+        to_update = (delta > threshold).nonzero().squeeze()  # Check for frames with large updates
+        if self.gaussian_mapper.warmup < self.frontend.optimizer.count and len(to_update) > 0:
+            self.gaussian_mapper.reanchor_gaussians(to_update, self.video.pose_changes[to_update])
+            self.video.pose_changes[to_update] = unit  # Reset the pose update
+
     def gaussian_mapping(
         self,
         rank: int,
@@ -516,6 +538,9 @@ class SLAM:
                 continue
 
             semaMapping.acquire()  # Aquire the semaphore (If the counter == 0, then this thread will be blocked)
+            # TODO chen: dont compute this every time, but communicate between backend and mapping so we know that backend ran
+            if self.cfg.run_backend:
+                self.maybe_reanchor_gaussians()  # If the backend is also running, we reanchor Gaussians when large map changes occur
 
             self.gaussian_mapper(mapping_queue, received_mapping)
 

@@ -5,10 +5,12 @@ from termcolor import colored
 
 import torch
 import torch.multiprocessing as mp
+import lietorch
 
 import numpy as np
 
 from ..slam import SLAM
+from ..geom import pose_distance
 from ..gaussian_splatting.eval_utils import EvaluatePacket
 from ..gaussian_splatting.gaussian_renderer import render
 from ..gaussian_splatting.gui import gui_utils
@@ -276,15 +278,25 @@ class SlamTestbed(SLAM):
 
                 # Run backend and loop closure detection occasianally
                 if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % backend_freq == 0:
-                    if self.loop_detector is not None:
-                        loop_candidates = self.loop_detector.check()
-                        if loop_candidates is not None:
-                            loop_ii, loop_jj = loop_candidates
-                        else:
-                            loop_ii, loop_jj = None, None
-                        self.backend(add_ii=loop_ii, add_jj=loop_jj)
-                    else:
-                        self.backend()
+                    # if self.loop_detector is not None:
+                    #     loop_candidates = self.loop_detector.check()
+                    #     if loop_candidates is not None:
+                    #         loop_ii, loop_jj = loop_candidates
+                    #     else:
+                    #         loop_ii, loop_jj = None, None
+                    #     self.backend(add_ii=loop_ii, add_jj=loop_jj)
+                    # else:
+                    #     self.backend()
+                    self.backend()
+
+                    ## Reanchor the Gaussians to follow the big map update
+                    threshold = 0.05
+                    unit = self.video.pose_changes.clone()
+                    unit[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.device)
+                    delta = pose_distance(self.video.pose_changes, unit)
+                    to_update = (delta > threshold).nonzero().squeeze()
+                    if self.gaussian_mapper.warmup < self.frontend.optimizer.count and len(to_update) > 0:
+                        self.gaussian_mapper.reanchor_gaussians(to_update, self.video.pose_changes[to_update])
 
         # Check distance statistics, so you can select a good threshold depending on the Place Recognition Network
         # d_1st, d_2nd, d_3rd = self.get_frame_distance_stats()
@@ -365,13 +377,13 @@ class SlamTestbed(SLAM):
         for p in processes:
             p.start()
 
-        render_freq = 3  # Run rendering every k frontends
-        backend_freq = 20  # Run backend every 5 frontends
+        render_freq = 5  # Run rendering every k frontends
+        backend_freq = 10  # Run backend every 5 frontends
 
         # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200)
-        # self.run_track_render(stream, backend_freq=backend_freq, render_freq=render_freq)
         # self.test_tracking(stream, backend_freq=backend_freq)
-        self.test_rendering(stream, render_freq=render_freq)
+        # self.test_rendering(stream, render_freq=render_freq)
+        self.run_track_render(stream, backend_freq=backend_freq, render_freq=render_freq)
         ipdb.set_trace()
 
         self.terminate(processes, stream, None)

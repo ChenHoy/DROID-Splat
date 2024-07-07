@@ -39,6 +39,7 @@ def getWorld2View2(R, t, translate=torch.tensor([0.0, 0.0, 0.0]), scale=1.0):
     Rt[:3, 3] = t
     Rt[3, 3] = 1.0
 
+    # TODO chen: I think we can remove these safeguards as we dont hit these configurations anymore
     try:
         C2W = torch.linalg.inv(Rt)
     except:
@@ -78,6 +79,8 @@ def getProjectionMatrix(znear, zfar, fovX, fovY):
 
 
 def getProjectionMatrix2(znear, zfar, cx, cy, fx, fy, W, H):
+    """Get a frustrum culled Projection matrix like in OpenGL.
+    This sets a limit for near and far planes at [z_near, z_far]"""
     left = ((2 * cx - W) / W - 1.0) * W / 2.0
     right = ((2 * cx - W) / W + 1.0) * W / 2.0
     top = ((2 * cy - H) / H + 1.0) * H / 2.0
