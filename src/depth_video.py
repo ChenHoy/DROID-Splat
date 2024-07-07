@@ -216,6 +216,25 @@ class DepthVideo:
         padded_indices = torch.cat(padded_indices)
         return torch.unique(padded_indices)
 
+    def dummy_filter(self, idx: Optional[torch.Tensor] = None):
+        with self.get_lock():
+            if idx is None:
+                (dirty_index,) = torch.where(self.mapping_dirty.clone())
+                dirty_index = dirty_index
+            else:
+                dirty_index = idx
+
+            if len(dirty_index) == 0:
+                return
+
+            if self.upsampled:
+                disps = torch.index_select(self.disps_up, 0, dirty_index).clone()
+            else:
+                disps = torch.index_select(self.disps, 0, dirty_index).clone()
+
+        self.disps_clean[dirty_index] = disps
+        self.filtered_id = max(dirty_index.max().item(), self.filtered_id)
+
     def filter_map(
         self,
         idx: Optional[torch.Tensor] = None,
@@ -546,18 +565,19 @@ class DepthVideo:
         This strategy is used to align the scales and shifts before running Bundle Adjustment.
 
         NOTE chen: This is a very different objective than the optical flow one, i.e. there is no guarantee that this helps to converge to the right monocular scale!
-        This also can lead to changes, that the BA optimization has to correct back again.
+        This also can lead to changes, that the BA optimization has to correct back again, thus wasting compute.
         """
 
         # Filter the map, but use self.disps for scale_optimization
         valid_d = self.filter_map(
-            idx=torch.arange(self.counter.value, device=self.device),
+            idx=torch.arange(self.counter.value - 1, device=self.device),
             radius=1,
             use_multiview_consistency=True,
             bin_thresh=0.005,
             min_count=2,
             return_mask=True,
         )
+
         if self.upsampled:
             # Map gets filtered at highest resolution, but scale optimization always uses self.disps_sens not self.disps_sens_up
             s = self.scale_factor
