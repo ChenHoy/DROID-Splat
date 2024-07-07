@@ -64,6 +64,10 @@ class DepthVideo:
         self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
         self.poses = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
         self.poses_gt = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
+
+        # Measure the change of poses before and after backend optimization, so we can track large map changes
+        self.pose_changes = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
+
         self.disps = torch.ones(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         self.disps_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
         # Estimated Uncertainty weights for Optimization reduced for each node from factor graph
@@ -86,6 +90,7 @@ class DepthVideo:
         ### Initialize poses to identity transformation
         self.poses[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
         self.poses_gt[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
+        self.pose_changes[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
 
         ### Additional flags for multi-view filter -> Clean map for rendering ###
         if self.cfg.tracking.upsample:

@@ -36,9 +36,6 @@ NOTE this could a be standalone SLAM system itself, but we use it on top of an o
 """
 
 
-# FIXME after large map changes (we can flag potential loop closures and map changes), the Gaussians normally would need to be recenterd, i.e.
-# its not enough to simply change the depth_maps in self.update_frames(), because this still requires further optimization to fit the new depth maps
-# We use a heuristic for this: Simply compute a point cloud for
 class GaussianMapper(object):
     """
     SLAM from Rendering with 3D Gaussian Splatting.
@@ -227,28 +224,11 @@ class GaussianMapper(object):
 
         return torch.optim.Adam(opt_params)
 
-    # FIXME can we do a readjustment in case of strong changes in the map?
-    # normally people anchor frames to a segment of the map, they then connect segments based on PoseGraphOptimization (PGO)
-    # When we e.g. do a loop closure, we need to realign the Gaussians of the closed loop segments
-    # Since we dont do PGO, we could only recenter Gaussians based on the changed poses and associated unique_kfIDs
-    # (-> Compute the distance in world coordinates between the two poses and move the Gaussians accordingly)
-    # NOTE chen: This assumes, that we get a useful update from the SLAM system!
-    # FIXME: we still need to correct loop closures or else we need to rely on expensive re-optimization!
-    # TODO solution reanchor the means of the Gaussians to new iproj depth maps
-    # Problem: it would not make sense to update the whole map by solving a global registration problem
-    # other frameworks resolve this because they have a PoseGraphOptimization between local segments
-    # a loop closure is then defined between segments, i.e. we can use the resolving transformations directly on all segments
-    # TODO solution would be to store both the video buffer map and the Gaussians in a shared datastructure for spatial grouping
-    # -> ultra naive, simply record where we had the biggest changes locally after a global optimization
-    # to do this simply memoize the poses before running bundle adjustment and afterwards and then we know which Gaussians from a certain frame need to be relocated
-    # TODO are gaussians really anchored?
-    # -> naive: use hash map for different temporal segments since they will likely be close to each other, we can memoize during a loop closure which segments are connected
-    # -> advanced: use an octree like datastructure to spatially divide frames into group/segments.
     def frame_updater(self, delay=0):
         """Gets the list of frames and updates the depth and pose based on the video.
 
-        NOTE: this assumes that the tracking on the video is a better estimate than the Gaussians alone. We
-        prioritize optical flow based tracking over soleley Gaussians due to speed and robustness.
+        NOTE: This assumes, that optical flow based tracking overall is more reliable for sparse supervision
+        We only use the Renderer for great scene representation and potential densification / correction
         """
         all_cameras = self.cameras + self.new_cameras
         all_idxs = torch.tensor([cam.uid for cam in all_cameras]).long().to(self.device)
@@ -310,14 +290,47 @@ class GaussianMapper(object):
 
         return new_cams
 
-    # TODO how to still densify and grow? should we adjust this in relation to the current number of Gaussians?
-    # FIXME we somehow have some odd Gaussians in the middle of the scene
-    # these seems to be initialized randomly from the ones before
+    def reanchor_gaussians(self, indices: torch.Tensor | List[int], delta_pose: torch.Tensor):
+        """After a large map change, we need to reanchor the Gaussians. For this purpose we simply measure the 
+        rel. pose change for indidividual frames and check for large updates. We can then simply apply the rel. transform 
+        to the respective Gaussians.
+        """
+        # NOTE chen: we always update before optimization anyways, but just to be sure and to immediately have the right visuals in GUI
+        self.video.filter_map(
+            min_count=self.kf_mng_params.filter.mv_count_thresh,
+            bin_thresh=self.kf_mng_params.filter.bin_thresh,
+            unc_threshold=self.kf_mng_params.filter.confidence_thresh,
+            use_multiview_consistency=self.filter_multiview,
+            use_uncertainty=self.filter_uncertainty,
+        )
+        self.frame_updater(delay=self.delay)  # Update all changed cameras with new information from SLAM system
+
+        updated_cams = []
+        for idx, pose in zip(indices, delta_pose):
+            # We have never mapped this frame before
+            if int(idx)not in self.idx_mapping:
+                continue
+            else:
+                self.gaussians.reanchor(int(idx), pose)
+                # NOTE chen: We append to our camera list in consecutive order, i.e. this should normally be sorted!
+                # this is not a given though! be cautious, e.g. during refinement the list changes due to insertion of non-keyframes
+                cam = self.cameras[int(idx)]
+                updated_cams.append(cam) # add the kf from self.cameras[idx] to updated cameras for GUI 
+
+        if self.use_gui:
+            self.q_main2vis.put_nowait(
+                gui_utils.GaussianPacket(
+                    gaussians=clone_obj(self.gaussians),
+                    keyframes=updated_cams,
+                )
+            )
+
     def map_refinement(
         self,
         num_iters: int = 100,
         optimize_poses: bool = False,
-        prune: bool = False,
+        densify: bool = False,
+        prune_densify: bool = False,
         random_frames: Optional[float] = None,
         kf_at_least: Optional[float] = None,
     ) -> None:
@@ -380,8 +393,8 @@ class GaussianMapper(object):
                         iter,
                         chunk,
                         self.kf_mng_params.refinement,
-                        densify=False,
-                        prune_densify=False,
+                        densify=densify,
+                        prune_densify=prune_densify,
                         optimize_poses=optimize_poses,
                     )
             else:
@@ -389,8 +402,8 @@ class GaussianMapper(object):
                     iter,
                     frames,
                     self.kf_mng_params.refinement,
-                    densify=False,
-                    prune_densify=False,
+                    densify=densify,
+                    prune_densify=prune_densify,
                     optimize_poses=optimize_poses,
                 )
 
@@ -408,7 +421,7 @@ class GaussianMapper(object):
     def get_mapping_update(
         self,
         frames: List[Camera],
-        was_pruned: bool=False,
+        was_pruned: bool = False,
         feedback_poses: bool = True,
         feedback_disps: bool = False,
         opacity_threshold: float = 0.2,
@@ -443,7 +456,7 @@ class GaussianMapper(object):
                 in_frame = self.gaussians.unique_kfIDs == view.uid
                 n_observed = self.gaussians.n_obs[in_frame]
                 # Bad frames usually dont have many covisible Gaussians attached to them
-                if (n_observed <= 1).sum() / n_observed.numel() > 0.3:
+                if (n_observed < 1).sum() / n_observed.numel() > 0.2:
                     self.info(f"Skipping view {view.uid} during Feedback as it has too few covisible Gaussians ...")
                     continue
 
@@ -476,6 +489,11 @@ class GaussianMapper(object):
                 diff_to_video = torch.abs(depth - depth_ref) / depth_ref  # Abs rel.
                 depth_wo_outliers = torch.where(diff_to_video < 0.15, depth, 0.0)  # Filter away outliers
             coverage_gs_wo = (depth_wo_outliers > 0).sum() / (depth_wo_outliers > 0).numel()
+            coverage_init = (depth_ref > 0).sum() / (depth_ref > 0).numel()
+
+            # Skip if we dont even densify 
+            # if coverage_gs_wo < coverage_init:
+            #     continue
 
             #### Visualizations for debugging ####
             # disps_clean = self.video.disps_clean[index_in_video]
@@ -882,7 +900,7 @@ class GaussianMapper(object):
         self.info("Currently has: {} gaussians".format(len(self.gaussians)))
 
         ### Filter map based on multiview_consistency and uncertainty
-        # NOTE This could be improved by only filtering the new and existing cameras instead of video.mapping_dirty
+        # self.video.dummy_filter() # TEST: what if we dont apply any multiview_filter?
         self.video.filter_map(
             min_count=self.kf_mng_params.filter.mv_count_thresh,
             bin_thresh=self.kf_mng_params.filter.bin_thresh,
@@ -931,13 +949,9 @@ class GaussianMapper(object):
         print(colored("\n[Gaussian Mapper] ", "magenta"), colored(f"Loss: {self.loss_list[-1]}", "cyan"))
 
         ### Prune unreliable Gaussians
-        # TODO in an optimal version, we can keep the rendered frames from pruning, if no Gaussians were pruned
-        # we could then reuse these during get_mapping_update to avoid a rerender ...
-        # Covisibility prunes Gaussians, that dont splat on pixels in at least k frames
         if len(self.iteration_info) % self.kf_mng_params.prune_every == 0:
-            # Prune either for all gaussians or just the last n frames
             self.covisibility_pruning(
-                prune=self.kf_mng_params.prune_mode,
+                prune=self.kf_mng_params.prune_mode,  # Prune either for all gaussians or just the last n frames
                 dont_prune_last=0,
                 visibility_thresh=self.kf_mng_params.visibility_th,
             )
@@ -952,10 +966,7 @@ class GaussianMapper(object):
             else:
                 update_cams = frames
             to_set = self.get_mapping_update(
-                update_cams,
-                was_pruned,
-                feedback_poses=self.feedback_poses,
-                feedback_disps=self.feedback_disps,
+                update_cams, was_pruned, feedback_poses=self.feedback_poses, feedback_disps=self.feedback_disps
             )
             self.info("Feeding back to Tracking ...")
             self.video.set_mapping_item(**to_set)
