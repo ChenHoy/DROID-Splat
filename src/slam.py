@@ -558,6 +558,9 @@ class SLAM:
         # Run for one last time after everything finished
         if self.gaussian_mapper is not None and run:
             self.info(f"Ran Gaussian Mapper {self.gaussian_mapper.count} times before Refinement!")
+
+        # TODO check if the backend is on and already finished, then do another reanchor!
+
         finished = False
         while not finished and run:
             finished = self.gaussian_mapper(mapping_queue, received_mapping, True)

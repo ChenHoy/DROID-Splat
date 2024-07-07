@@ -389,7 +389,7 @@ class DepthVideo:
             if has_poses:
                 w2c = poses.clone().detach().to(self.device)  # [4, 4] homogenous matrix
                 w2c_vec = matrix_to_lie(w2c)  # [7, 1] Lie element
-                self.poses[index] = lietorch.SE3.InitFromVec(w2c_vec).inv().vec()
+                self.poses[index] = lietorch.SE3.InitFromVec(w2c_vec).vec()
 
         self.dirty[index] = True  # Mark frames for visualization
 

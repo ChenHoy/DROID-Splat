@@ -291,8 +291,8 @@ class GaussianMapper(object):
         return new_cams
 
     def reanchor_gaussians(self, indices: torch.Tensor | List[int], delta_pose: torch.Tensor):
-        """After a large map change, we need to reanchor the Gaussians. For this purpose we simply measure the 
-        rel. pose change for indidividual frames and check for large updates. We can then simply apply the rel. transform 
+        """After a large map change, we need to reanchor the Gaussians. For this purpose we simply measure the
+        rel. pose change for indidividual frames and check for large updates. We can then simply apply the rel. transform
         to the respective Gaussians.
         """
         # NOTE chen: we always update before optimization anyways, but just to be sure and to immediately have the right visuals in GUI
@@ -306,16 +306,18 @@ class GaussianMapper(object):
         self.frame_updater(delay=self.delay)  # Update all changed cameras with new information from SLAM system
 
         updated_cams = []
+        # TODO chen: implement this in batch mode
         for idx, pose in zip(indices, delta_pose):
             # We have never mapped this frame before
-            if int(idx)not in self.idx_mapping:
+            if int(idx) not in self.idx_mapping:
                 continue
             else:
+                # Go completely overboard with the reanchoring, so we can see the visuals of a map change
                 self.gaussians.reanchor(int(idx), pose)
                 # NOTE chen: We append to our camera list in consecutive order, i.e. this should normally be sorted!
                 # this is not a given though! be cautious, e.g. during refinement the list changes due to insertion of non-keyframes
                 cam = self.cameras[int(idx)]
-                updated_cams.append(cam) # add the kf from self.cameras[idx] to updated cameras for GUI 
+                updated_cams.append(cam)  # add the kf from self.cameras[idx] to updated cameras for GUI
 
         if self.use_gui:
             self.q_main2vis.put_nowait(
@@ -396,6 +398,7 @@ class GaussianMapper(object):
                         densify=densify,
                         prune_densify=prune_densify,
                         optimize_poses=optimize_poses,
+                        lr_factor=0.1,  # Force lower learning rate for refinement
                     )
             else:
                 loss = self.mapping_step(
@@ -405,6 +408,7 @@ class GaussianMapper(object):
                     densify=densify,
                     prune_densify=prune_densify,
                     optimize_poses=optimize_poses,
+                    lr_factor=0.1,  # Force lower learning rate for refinement
                 )
 
             print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss / len(frames)}", "cyan"))
@@ -427,6 +431,7 @@ class GaussianMapper(object):
         opacity_threshold: float = 0.2,
         ignore_frames: List[int] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
         min_coverage: float = 0.7,
+        max_diff_to_video: float = 0.15,
     ) -> Dict:
         """Get the index, poses and depths of the frames that were already optimized. We can use this to then feedback
         the outputs of the Gaussian Rendering optimization back into the video.map.
@@ -479,19 +484,25 @@ class GaussianMapper(object):
             valid_ref = disps_ref > 0
             depth_ref = torch.where(valid_ref, 1.0 / disps_ref, disps_ref)
 
+            disps_clean = self.video.disps_clean[index_in_video]
+            valid_clean = disps_clean > 0
+            depth_clean = torch.where(valid_clean, 1.0 / disps_clean, disps_clean)
+
             # Limit step size by punishing large deviations from the original video depth
             if not self.video.upsample:
                 s = self.video.scale_factor
                 depth_down = depth[:, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
                 diff_to_video = torch.abs(depth_down - depth_ref) / depth_ref  # Abs rel.
-                depth_wo_outliers = torch.where(diff_to_video < 0.15, depth_down, 0.0)  # Filter away outliers
+                depth_wo_outliers = torch.where(
+                    diff_to_video < max_diff_to_video, depth_down, 0.0
+                )  # Filter away outliers
             else:
                 diff_to_video = torch.abs(depth - depth_ref) / depth_ref  # Abs rel.
-                depth_wo_outliers = torch.where(diff_to_video < 0.15, depth, 0.0)  # Filter away outliers
+                depth_wo_outliers = torch.where(diff_to_video < max_diff_to_video, depth, 0.0)  # Filter away outliers
             coverage_gs_wo = (depth_wo_outliers > 0).sum() / (depth_wo_outliers > 0).numel()
-            coverage_init = (depth_ref > 0).sum() / (depth_ref > 0).numel()
+            coverage_init = (depth_clean > 0).sum() / (depth_clean > 0).numel()
 
-            # Skip if we dont even densify 
+            # Skip if we dont even densify
             # if coverage_gs_wo < coverage_init:
             #     continue
 
@@ -499,7 +510,7 @@ class GaussianMapper(object):
             # disps_clean = self.video.disps_clean[index_in_video]
             # valid_clean = disps_clean > 0
             # depth_clean = torch.where(valid_clean, 1.0 / disps_clean, disps_clean)
-            # max_depth = min(max(depth_clean.max(), depth_up.max(), depth.max()), 4.0)
+            # max_depth = min(max(depth_clean.max(), depth_ref.max(), depth.max()), 4.0)
             # self.plot_depth(
             #     depth.squeeze(), title=f"Depth after Gaussian Optimization, view {view.uid}", max_depth=max_depth
             # )
@@ -508,13 +519,15 @@ class GaussianMapper(object):
             #     title=f"Depth (filtered) before Gaussian Optimization, view {view.uid}",
             #     max_depth=max_depth,
             # )
+
+            # max_depth = min(max(depth_ref.max(), depth.max()), 4.0)
             # self.plot_depth(
             #     depth_wo_outliers.squeeze(),
             #     title=f"Depth without outliers after Gaussian Optimization, view {view.uid}",
             #     max_depth=max_depth,
             # )
             # self.plot_depth(
-            #     depth_up.squeeze(),
+            #     depth_ref.squeeze(),
             #     title=f"Dense Depth before Gaussian Optimization, view {view.uid}",
             #     max_depth=max_depth,
             # )
@@ -599,6 +612,7 @@ class GaussianMapper(object):
         densify: bool = True,
         prune_densify: bool = True,
         optimize_poses: bool = False,
+        lr_factor: float = 1.0,
     ) -> float:
         """
         Takes the list of selected keyframes to optimize and performs one step of the mapping optimization.
@@ -649,7 +663,9 @@ class GaussianMapper(object):
             # low_opacity.append((view, opacity))
             loss += current_loss
 
-        loss = loss / len(frames)
+        loss = (
+            loss / len(frames) * lr_factor
+        )  # NOTE chen: we allow lr_factor to make it possible to change the learning rate on the fly
         # Regularize scale changes of the Gaussians
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
@@ -835,9 +851,19 @@ class GaussianMapper(object):
         only_kf = [cam for cam in self.cameras if cam.uid in self.idx_mapping]
         # Only feedback the poses, since we will not work with the video again
         if self.feedback_poses or self.feedback_disps:
-            to_set = self.get_mapping_update(only_kf, feedback_disps=False)
+            # HACK allow large differences to the video, else we will filter away occluded regions which we already corrected rightfully
+            to_set = self.get_mapping_update(
+                only_kf,
+                feedback_poses=True,  
+                feedback_disps=True,
+                opacity_threshold=0.0,
+                ignore_frames=[],
+                max_diff_to_video=1.0,
+            )
             # There is no need to feed back the
             self.video.set_mapping_item(**to_set)
+            # FIXME refinement either does not work correctly or get_mapping_update has a bug after our idx_mapping changed?
+            ipdb.set_trace()
 
         self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
         self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")

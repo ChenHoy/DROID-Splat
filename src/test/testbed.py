@@ -295,14 +295,43 @@ class SlamTestbed(SLAM):
                     unit[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.device)
                     delta = pose_distance(self.video.pose_changes, unit)
                     to_update = (delta > threshold).nonzero().squeeze()
-                    if self.gaussian_mapper.warmup < self.frontend.optimizer.count and len(to_update) > 0:
+                    if self.gaussian_mapper.warmup < self.frontend.optimizer.count and to_update.ndim > 0:
                         self.gaussian_mapper.reanchor_gaussians(to_update, self.video.pose_changes[to_update])
+
+        self.gaussian_mapper._last_call(None, None)
+        ipdb.set_trace()
+        self.compare_mapping_video(0)
 
         # Check distance statistics, so you can select a good threshold depending on the Place Recognition Network
         # d_1st, d_2nd, d_3rd = self.get_frame_distance_stats()
         # d_1st = convert_to_tensor(d_1st)
         # d_2nd, d_3rd = convert_to_tensor(d_2nd), convert_to_tensor(d_3rd)
         # ipdb.set_trace()
+
+    def compare_mapping_video(self, idx: int = 0) -> None:
+        """Compare render with video"""
+
+        renderer = self.gaussian_mapper
+
+        assert idx < len(renderer.cameras), "View index out of bounds!"
+        cam = renderer.cameras[idx]
+        render_pkg = render(cam, renderer.gaussians, renderer.pipeline_params, renderer.background, device=self.device)
+        image_render, radii, depth_render = render_pkg["render"], render_pkg["radii"], render_pkg["depth"]
+        image_render.clamp_(0, 1.0)  # Clip numerical errors
+
+        idx_in_video = renderer.idx_mapping[idx]
+        disps_ref = self.video.disps_up[idx_in_video]
+        disps_valid = disps_ref > 0
+        depth_ref = torch.where(disps_valid, 1.0 / disps_ref, disps_ref)
+
+        plot_side_by_side(
+            image_render.detach().clone(),
+            cam.original_image.detach().clone(),
+            depth_render.detach().clone(),
+            depth_ref.clone(),
+            title="Render vs. Tracker",
+            return_image=False,
+        )
 
     def test_tracking(self, stream, backend_freq: int = 10) -> None:
         """Test tracking in a sequential manner."""
