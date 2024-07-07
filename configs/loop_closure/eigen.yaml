@@ -10,7 +10,7 @@ method: eigen
 # VGG16 (output dim 512)
 model: ResNet50
 fc_output_dim: 2048
-threshold: 0.5 # Score threshold for feature distance (0.5 is good for l2)
+threshold: 0.6 # Score threshold for feature distance (0.5 is good for l2)
 k_nearest: 10 # Only look at the topk nearest neighbors in the database to speed up the search
 
 

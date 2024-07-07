@@ -2,11 +2,11 @@ warmup: 15 # Wait until tracking gets to this frame
 delay: 2 # Delay between tracking and mapping
 use_non_keyframes: False # Use non-keyframes during map refinement
 max_frames_refinement: 70 # Maximum number of frames to optimize during refinement
-use_prior_for_supervision: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
+use_prior_for_supervision: False # Use the prior for supervision. If not, then use the current filtered map from SLAM
 
 # NOTE chen: please use MORE ITERATIONS than prune_densify_every! 
 # it is important to optimize newly introduced Gaussians due to densification!!!
-mapping_iters: 20 # Optimization iterations for selected views
+mapping_iters: 27 # Optimization iterations for selected views
 refinement_iters: 50 # Final Optimization iterations for all views
 # These 2 flags filter out noisy points before Rendering Optimization
 filter_multiview: True # Only initialize Gaussians that are consistent in multiple views
@@ -14,18 +14,18 @@ filter_uncertainty: False # Only use very certain points for intializing Gaussia
 
 # Backpropagate the Render updates into Tracking system
 feedback_only_last_window: True
-feedback_disps: True
+feedback_disps: False
 feedback_poses: False
 optimize_poses: False
 # NOTE this is actually really important as even with our good initialization, the early Gaussians are not that good!
-feedback_warmup: 10 # Only start feeding back into tracking after we ran the Renderer k times
+feedback_warmup: 6 # Only start feeding back into tracking after we ran the Renderer k times
 
 batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
 save_renders: False # Store some rendered images for debugging
 
 # Strategy for adding / pruning Gaussians
 keyframes:
-  n_last_frames: 15 # Always optimize the last n frames
+  n_last_frames: 10 # Always optimize the last n frames
   n_rand_frames: 5 # Optimize random global frames on top
   default_batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
 
@@ -63,8 +63,8 @@ opt_params:
   # see: https://stackoverflow.com/questions/53033556/how-should-the-learning-rate-change-as-the-batch-size-change
   # -> lr = defaults / sqrt(10)
   # However, we need to be cautious of https://stats.stackexchange.com/questions/346299/whats-the-effect-of-scaling-a-loss-function-in-deep-learning
-  position_lr_init: 1e-3 # Default MonoGS: 0.00016 (RGB mode has x10)
-  position_lr_final: 1e-5 # Default MonoGS: 0.0000016
+  position_lr_init: 1e-4 # Default MonoGS: 0.00016 (RGB mode has x10)
+  position_lr_final: 1e-6 # Default MonoGS: 0.0000016
   position_lr_delay_mult: 0.01
   position_lr_max_steps: 100 # Default MonoGS: 30000
   feature_lr: 1e-3 # Default MonoGS: 0.0025
@@ -85,10 +85,10 @@ loss:
   rgb_boundary_threshold: 0.01 # Pixel information in an image needs to be at least higher than this 
 
   ### Loss weights
-  alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha1: 0.5 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta: 5.0 # Regularizer on scale changes of the Gaussians
-  beta2: 0.01 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+  beta2: 0.1 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
 # Parameters for transfer SLAM -> Renderer
 input:
@@ -100,7 +100,7 @@ input:
   type: 'replica'
 
 # Default vanilla Gaussian Splatting parameters
-use_spherical_harmonics: False 
+use_spherical_harmonics: True
 pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False

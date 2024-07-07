@@ -850,20 +850,19 @@ class GaussianMapper(object):
         # Filter out the non-keyframes which are not stored in the video.object
         only_kf = [cam for cam in self.cameras if cam.uid in self.idx_mapping]
         # Only feedback the poses, since we will not work with the video again
+        # TODO chen: do we need a case, where we dont optimize poses during the run, but do it on refinement? 
         if self.feedback_poses or self.feedback_disps:
             # HACK allow large differences to the video, else we will filter away occluded regions which we already corrected rightfully
             to_set = self.get_mapping_update(
                 only_kf,
-                feedback_poses=True,  
-                feedback_disps=True,
+                feedback_poses=self.feedback_poses,  
+                feedback_disps=self.feedback_disps,
                 opacity_threshold=0.0,
                 ignore_frames=[],
                 max_diff_to_video=1.0,
             )
             # There is no need to feed back the
             self.video.set_mapping_item(**to_set)
-            # FIXME refinement either does not work correctly or get_mapping_update has a bug after our idx_mapping changed?
-            ipdb.set_trace()
 
         self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
         self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
@@ -1031,6 +1030,10 @@ class GaussianMapper(object):
             for cam in self.cameras:
                 if cam.uid % 5 == 0:
                     self.save_render(cam, f"{self.output}/intermediate_renders/temp/{cam.uid}.png")
+
+        # Free memory each iteration NOTE: this slows it down a bit
+        torch.cuda.empty_cache()
+        gc.collect()
 
         self.iteration_info.append(len(self.new_cameras))
         # Keep track of added cameras
