@@ -4,6 +4,7 @@ import gc
 from time import sleep
 from typing import List, Optional, Tuple
 from tqdm import tqdm
+import logging
 from copy import deepcopy
 from termcolor import colored
 from collections import OrderedDict
@@ -21,7 +22,7 @@ from .droid_net import DroidNet
 from .frontend import FrontendWrapper
 from .backend import BackendWrapper
 from .depth_video import DepthVideo
-from .geom import matrix_to_lie
+from .geom import matrix_to_lie, pose_distance
 from .visualization import droid_visualization, depth2rgb, uncertainty2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .loop_detection import LoopDetector, merge_candidates
@@ -32,6 +33,9 @@ from .gaussian_splatting import eval_utils
 from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
 from .gaussian_splatting.gui import gui_utils, slam_gui
 from .utils import clone_obj, get_all_queue
+
+# A logger for this file
+log = logging.getLogger(__name__)
 
 
 class SLAM:
@@ -159,8 +163,11 @@ class SLAM:
         self.communication_lock = mp.Lock()
         self.condTracking = mp.Condition(lock=self.communication_lock)  # Conditional for fine-grained synchronization
 
-    def info(self, msg: str) -> None:
-        print(colored("[Main]: " + msg, "green"))
+    def info(self, msg: str, logger=None) -> None:
+        if logger is not None:
+            logger.info(colored("[Main]: " + msg, "green"))
+        else:
+            print(colored("[Main]: " + msg, "green"))
 
     def sanity_checks(self) -> None:
         """Perform sanity checks to see if the system is misconfigured, this is just supposed
@@ -196,6 +203,14 @@ class SLAM:
                 Use the loop detector always together with the backend enabled!""",
                 "red",
             )
+
+        if self.cfg.run_backend and self.cfg.run_mapping:
+            assert (
+                self.cfg.mapper_every < self.cfg.backend_every
+            ), """Mapping should generally run more often than backend! 
+            Our current implementation only keeps track of map changes from a 
+            single backend forward pass! If backend ran k times before we update the Mapper, 
+            then we would lose track to reanchor the Gaussians"""
 
     def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
         if output_folder is not None:
@@ -421,8 +436,8 @@ class SLAM:
                     if loop_ii is not None and loop_jj is not None:
                         all_lc_candidates.append((loop_ii, loop_jj))
                 all_loop_ii, all_loop_jj = loop_ii, loop_jj
-                # if len(all_lc_candidates) > 0:
-                #     all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
+                if len(all_lc_candidates) > 0:
+                    all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
 
             if self.backend.enable_loop:
                 self.backend(local_graph=self.frontend.optimizer.graph, add_ii=all_loop_ii, add_jj=all_loop_jj)
@@ -430,11 +445,15 @@ class SLAM:
                 self.backend(add_ii=all_loop_ii, add_jj=all_loop_jj)
             sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
+        sleep(self.sleep_time)  # Let other threads finish their last optimization
+        memoized_backend_count = self.ram_safeguard_backend(
+            max_ram=self.max_ram_usage, count_to_set=memoized_backend_count
+        )  # Try to instantiate again if needed
         if self.backend is not None and run:
             self.info(f"Ran Backend {self.backend.count} times before refinement!")
 
         # Run one last time after tracking finished
-        if run and self.backend.do_refinement:
+        if run and self.backend is not None and self.backend.do_refinement:
             with self.video.get_lock():
                 t_end = self.video.counter.value
 
@@ -489,6 +508,16 @@ class SLAM:
         self.all_finished += 1
         self.info("Backend done!")
 
+    def maybe_reanchor_gaussians(self, threshold: float = 0.05) -> None:
+        """Reanchor the Gaussians to follow a big map update. For this purpose we simply track"""
+        unit = self.video.pose_changes.clone()
+        unit[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.device)
+        delta = pose_distance(self.video.pose_changes, unit)
+        to_update = (delta > threshold).nonzero().squeeze()  # Check for frames with large updates
+        if self.gaussian_mapper.warmup < self.frontend.optimizer.count and len(to_update) > 0:
+            self.gaussian_mapper.reanchor_gaussians(to_update, self.video.pose_changes[to_update])
+            self.video.pose_changes[to_update] = unit  # Reset the pose update
+
     def gaussian_mapping(
         self,
         rank: int,
@@ -509,6 +538,9 @@ class SLAM:
                 continue
 
             semaMapping.acquire()  # Aquire the semaphore (If the counter == 0, then this thread will be blocked)
+            # TODO chen: dont compute this every time, but communicate between backend and mapping so we know that backend ran
+            if self.cfg.run_backend:
+                self.maybe_reanchor_gaussians()  # If the backend is also running, we reanchor Gaussians when large map changes occur
 
             self.gaussian_mapper(mapping_queue, received_mapping)
 
@@ -526,6 +558,9 @@ class SLAM:
         # Run for one last time after everything finished
         if self.gaussian_mapper is not None and run:
             self.info(f"Ran Gaussian Mapper {self.gaussian_mapper.count} times before Refinement!")
+
+        # TODO check if the backend is on and already finished, then do another reanchor!
+
         finished = False
         while not finished and run:
             finished = self.gaussian_mapper(mapping_queue, received_mapping, True)
@@ -615,8 +650,8 @@ class SLAM:
     def evaluate(self, stream, gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None) -> None:
 
         eval_path = os.path.join(self.output, "evaluation")
-        self.info("Saving evaluation results in {}".format(eval_path))
-        self.info("#" * 20 + f" Results for {stream.input_folder} ...")
+        self.info("Saving evaluation results in {}".format(eval_path), logger=log)
+        self.info("#" * 20 + f" Results for {stream.input_folder} ...", logger=log)
 
         #### ------------------- ####
         ### Trajectory evaluation ###
@@ -637,8 +672,8 @@ class SLAM:
         kf_result_ate, all_result_ate = eval_utils.do_odometry_evaluation(
             eval_path, est_c2w_kf_lie, gt_c2w_kf_lie, est_c2w_all_lie, gt_c2w_all_lie, tstamps, kf_tstamps, monocular
         )
-        self.info("(Keyframes only) ATE: {}".format(kf_result_ate))
-        self.info("(All) ATE: {}".format(all_result_ate))
+        self.info("(Keyframes only) ATE: {}".format(kf_result_ate), logger=log)
+        self.info("(All) ATE: {}".format(all_result_ate), logger=log)
         # TODO Can we filter the Dataset name out of this to make it prettier?
         # TODO update loop config flag or add another one, because we will likely run a loop closure mechanism on top
         ### Store main results with attributes for ablation/comparison
@@ -812,19 +847,19 @@ class SLAM:
         gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None,
     ) -> None:
         """fill poses for non-keyframe images and evaluate"""
-        self.info("Initiating termination ...")
+        self.info("Initiating termination ...", logger=log)
 
         # self.save_state()  ## this is not reached
         if self.do_evaluate:
-            self.info("Doing evaluation!")
+            self.info("Doing evaluation!", logger=log)
             self.evaluate(stream, gaussian_mapper_last_state=gaussian_mapper_last_state)
-            self.info("Evaluation complete")
+            self.info("Evaluation complete", logger=log)
 
         for i, p in enumerate(processes):
             p.terminate()
             p.join()
             self.info("Terminated process {}".format(p.name))
-        self.info("Terminate: Done!")
+        self.info("Terminate: Done!", logger=log)
 
     def run(self, stream) -> None:
         processes = [
@@ -884,7 +919,7 @@ class SLAM:
                 pass
             # Receive the final update, so we can do something with it ...
             a = self.mapping_queue.get()
-            self.info("Received final mapping update!")
+            self.info("Received final mapping update!", logger=log)
             if a == "None":
                 a = deepcopy(a)
                 gaussian_mapper_last_state = None

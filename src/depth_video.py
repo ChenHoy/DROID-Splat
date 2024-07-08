@@ -64,6 +64,10 @@ class DepthVideo:
         self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
         self.poses = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
         self.poses_gt = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
+
+        # Measure the change of poses before and after backend optimization, so we can track large map changes
+        self.pose_changes = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
+
         self.disps = torch.ones(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         self.disps_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
         # Estimated Uncertainty weights for Optimization reduced for each node from factor graph
@@ -86,6 +90,7 @@ class DepthVideo:
         ### Initialize poses to identity transformation
         self.poses[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
         self.poses_gt[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
+        self.pose_changes[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=device)
 
         ### Additional flags for multi-view filter -> Clean map for rendering ###
         if self.cfg.tracking.upsample:
@@ -211,10 +216,29 @@ class DepthVideo:
         last_frame = indices.max().item()
         for ix in indices:
             padded_indices.append(
-                torch.arange(max(0, ix - radius), min(last_frame, ix + radius + 1), device=indices.device)
+                torch.arange(max(0, ix - radius), min(last_frame + 1, ix + radius + 1), device=indices.device)
             )
         padded_indices = torch.cat(padded_indices)
         return torch.unique(padded_indices)
+
+    def dummy_filter(self, idx: Optional[torch.Tensor] = None):
+        with self.get_lock():
+            if idx is None:
+                (dirty_index,) = torch.where(self.mapping_dirty.clone())
+                dirty_index = dirty_index
+            else:
+                dirty_index = idx
+
+            if len(dirty_index) == 0:
+                return
+
+            if self.upsampled:
+                disps = torch.index_select(self.disps_up, 0, dirty_index).clone()
+            else:
+                disps = torch.index_select(self.disps, 0, dirty_index).clone()
+
+        self.disps_clean[dirty_index] = disps
+        self.filtered_id = max(dirty_index.max().item(), self.filtered_id)
 
     def filter_map(
         self,
@@ -276,6 +300,7 @@ class DepthVideo:
         disps[~mask] = 0.0  # Filter away invalid points
         self.disps_clean[dirty_index] = disps
         self.filtered_id = max(dirty_index.max().item(), self.filtered_id)
+
         if return_mask:
             return mask
 
@@ -316,54 +341,55 @@ class DepthVideo:
 
     def set_mapping_item(self, index: List[torch.Tensor], poses: List[torch.Tensor], depths: List[torch.Tensor]):
         """Set a part of the video from the Rendering module"""
-        # Filter out invalid views, where we could not render anything
-        index = [idx for idx in index if idx is not None]
-        depths = [depth for depth in depths if depth is not None]
-        # We have an option to not optimize the poses with the renderer, so it is an empty list
-        if len(poses) != 0:
-            poses = [pose for pose in poses if pose is not None]
-
         # Sanity check for when we did not render anything
-        if len(poses) == 0 and len(depths) == 0:
+        if (len(poses) == 0 and len(depths) == 0) or len(index) == 0:
             return
 
-        # Convert to tensors
+        # We may get only poses or only depths, so we need to check for both
         if len(poses) != 0:
+            has_poses = True
             poses = torch.stack(poses)
-        depths = torch.stack(depths)
-        valid = depths > 0
+            assert len(poses) == len(index), "Index should match the number of poses!"
+        else:
+            has_poses = False
+
+        if len(depths) != 0:
+            has_depths = True
+            depths = torch.stack(depths)
+            assert len(depths) == len(index), "Index should match the number of depths!"
+            valid = depths > 0
+        else:
+            has_depths = False
 
         with self.get_lock():
 
-            disps = torch.where(valid, 1.0 / depths, depths)
-            disps.clamp_(min=1e-5)  # Sanity for optimization
+            if has_depths:
+                disps = torch.where(valid, 1.0 / depths, depths)
+                disps.clamp_(min=1e-5)  # Sanity for optimization
 
-            s = self.scale_factor
-            # We work with the original resolution in Rendering
-            if self.upsampled:
-                self.disps_up[index] = torch.where(
-                    valid[:, 0], disps[:, 0].clone().detach().to(self.device), self.disps_up[index]
-                )
-                self.disps[index] = torch.where(
-                    valid[:, 0, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s],
-                    disps[:, 0, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].clone().detach().to(self.device),
-                    self.disps[index],
-                )
-            #  We work with downscaled resolution. This means, we need to upsample the disparities in tracking
-            else:
-                self.disps[index] = torch.where(
-                    valid[:, 0],
-                    disps[:, 0].clone().detach().to(self.device),
-                    self.disps[index],
-                )
+                s = self.scale_factor
+                # We work with the original resolution in Rendering
+                if self.upsampled:
+                    self.disps_up[index] = torch.where(
+                        valid[:, 0], disps[:, 0].clone().detach().to(self.device), self.disps_up[index]
+                    )
+                    self.disps[index] = torch.where(
+                        valid[:, 0, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s],
+                        disps[:, 0, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].clone().detach().to(self.device),
+                        self.disps[index],
+                    )
+                # We work with downscaled resolution. This means, we need to upsample the disparities in tracking
+                else:
+                    self.disps[index] = torch.where(
+                        valid[:, 0],
+                        disps[:, 0].clone().detach().to(self.device),
+                        self.disps[index],
+                    )
 
-            if len(poses) != 0:
+            if has_poses:
                 w2c = poses.clone().detach().to(self.device)  # [4, 4] homogenous matrix
                 w2c_vec = matrix_to_lie(w2c)  # [7, 1] Lie element
-                # TODO do we really need to invert or does this work?
-                # NOTE chen: We normally would need to invert here, but we already do this in Gaussian Mapper
-                # w2c = lietorch.SE3.InitFromVec(c2w_vec).inv().vec()
-                self.poses[index] = w2c_vec
+                self.poses[index] = lietorch.SE3.InitFromVec(w2c_vec).vec()
 
         self.dirty[index] = True  # Mark frames for visualization
 
@@ -535,7 +561,7 @@ class DepthVideo:
                 self.opt_intr,
             )
             self.disps.clamp_(min=1e-5)  # Always make sure that Disparities are non-negative!!!
-            # Reassing intrinsics after optimization
+            # Reassigning intrinsics after optimization
             if self.opt_intr:
                 self.intrinsics[: self.counter.value] = self.intrinsics[intrinsic_common_id]
 
@@ -544,18 +570,19 @@ class DepthVideo:
         This strategy is used to align the scales and shifts before running Bundle Adjustment.
 
         NOTE chen: This is a very different objective than the optical flow one, i.e. there is no guarantee that this helps to converge to the right monocular scale!
-        This also can lead to changes, that the BA optimization has to correct back again.
+        This also can lead to changes, that the BA optimization has to correct back again, thus wasting compute.
         """
 
         # Filter the map, but use self.disps for scale_optimization
         valid_d = self.filter_map(
-            idx=torch.arange(self.counter.value, device=self.device),
+            idx=torch.arange(self.counter.value - 1, device=self.device),
             radius=1,
             use_multiview_consistency=True,
             bin_thresh=0.005,
             min_count=2,
             return_mask=True,
         )
+
         if self.upsampled:
             # Map gets filtered at highest resolution, but scale optimization always uses self.disps_sens not self.disps_sens_up
             s = self.scale_factor

@@ -62,3 +62,31 @@ def align_scale_and_shift(
     avg_error = error_sum / error_num
 
     return scale, shift, avg_error
+
+
+def pose_distance(
+    g1: torch.Tensor | lietorch.SE3, g2: torch.Tensor | lietorch.SE3, beta: float = 0.5, radians: bool = False
+) -> float:
+    """Compute the distance between two SE3 elements. Since there is not left-invariant metric on SE(3),
+    we need to heuristically weight the translation and rotation components.
+
+    NOTE: beta does not depent on the scale of the scene, so be cautious here and select a good value!
+    Example:
+        We have a translation difference of 1m and a rotation difference of 45 degrees (0.785 in radians).
+        The translation could significantly put distance between the frames,
+        but we also want to take the rotation into account here! Large rotation differences are much more critical since they
+        affect the final position depending on the scale of the scene as well.
+    """
+    if isinstance(g1, torch.Tensor):
+        g1 = lietorch.SE3.InitFromVec(g1)
+    if isinstance(g2, torch.Tensor):
+        g2 = lietorch.SE3.InitFromVec(g2)
+
+    g12 = g1 * g2.inv()
+    d_se3 = g12.log()
+    tau, phi = d_se3.split([3, 3], dim=-1)  # Separate into translation and rotation
+    dt = tau.norm(dim=-1)  # NOTE We dont need the translation here
+    dr = phi.norm(dim=-1)
+    if not radians:
+        dr = (180 / torch.pi) * dr  # convert radians to degrees
+    return beta * dr + (1 - beta) * dt

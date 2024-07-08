@@ -6,17 +6,21 @@ use_prior_for_supervision: False # Use the prior for supervision. If not, then u
 
 # NOTE chen: please use MORE ITERATIONS than prune_densify_every! 
 # it is important to optimize newly introduced Gaussians due to densification!!!
-mapping_iters: 30 # Optimization iterations for selected views
+mapping_iters: 27 # Optimization iterations for selected views
 refinement_iters: 50 # Final Optimization iterations for all views
 # These 2 flags filter out noisy points before Rendering Optimization
 filter_multiview: True # Only initialize Gaussians that are consistent in multiple views
 filter_uncertainty: False # Only use very certain points for intializing Gaussians
 
-# use these two flags to snychronize the updated map and poses back into the SLAM system
-feedback_mapping: False
+# Backpropagate the Render updates into Tracking system
+feedback_only_last_window: True
+feedback_disps: False
+feedback_poses: False
 optimize_poses: False
+# NOTE this is actually really important as even with our good initialization, the early Gaussians are not that good!
+feedback_warmup: 6 # Only start feeding back into tracking after we ran the Renderer k times
 
-batch_mode: True # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
+batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
 save_renders: False # Store some rendered images for debugging
 
 # Strategy for adding / pruning Gaussians
@@ -25,17 +29,18 @@ keyframes:
   n_rand_frames: 5 # Optimize random global frames on top
   default_batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
 
-  densify_every: 3 # Densify Gaussians every k updates
-  prune_every: 1 # Prune Gaussians every k updates
-  prune_densify_every: 10 # How often to prune and densify gaussians during optimization
-  prune_mode: "" # "abs" or "new" How to prune: either absolute visibility or covisibility of new frames
-  visibility_th: 2 # Gaussians not visible by visibility_th other frames are pruned
-  prune_last: 10 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
-  abs_visibility_th: 2 # Remove gaussians that are not seen by at least this many other frames
+  densify_every: 2 # Densify Gaussians every k updates
+  prune_every: 3 # Prune Gaussians every k updates
+  prune_densify_every: 5 # How often to prune and densify gaussians during optimization
+  # NOTE: Using the absolute visibility check is more wasteful as we need to count the visiblity of each Gaussian!
+  # -> Use 'new' for faster performance
+  prune_mode: "new" # ["abs", "new"] How to prune: either check for covisible frames everywhere or just in the last n frames
+  prune_last: 5 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
+  visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
 
   filter: # Parameter for filtering incoming points from the SLAM system
     mv_count_thresh: 2 # Pixels need to be consistent within bin_thresh distance across these k views
-    bin_thresh: 0.001 # Distance between points, this depends on the scene scale, so be careful!
+    bin_thresh: 0.01 # Distance between points, this depends on the scene scale, so be careful!
     confidence_thresh: 0.025 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
 
   mapping:
@@ -52,49 +57,50 @@ keyframes:
     gaussian_extent: 4  # Affects densification, i.e. the larger the more we split gaussians
 
 opt_params:
-  init_lr: 10.0
-  #position_lr_init: 0.0005 # Default MonoGS: 0.00016
-  #position_lr_final: 0.00005 # Default MonoGS: 0.000016
-  position_lr_init: 0.00016 # Default MonoGS: 0.00016
-  position_lr_final: 0.000016 # Default MonoGS: 0.000016
+  init_lr: 6.0 # Default MonoGS: 6.0
+  # MonoGS uses their defaults for a window size of 10
+  # Since we want to independent to the batch_size, we adjust the learning rate accordingly
+  # see: https://stackoverflow.com/questions/53033556/how-should-the-learning-rate-change-as-the-batch-size-change
+  # -> lr = defaults / sqrt(10)
+  # However, we need to be cautious of https://stats.stackexchange.com/questions/346299/whats-the-effect-of-scaling-a-loss-function-in-deep-learning
+  position_lr_init: 1e-4 # Default MonoGS: 0.00016 (RGB mode has x10)
+  position_lr_final: 1e-6 # Default MonoGS: 0.0000016
   position_lr_delay_mult: 0.01
-  position_lr_max_steps: 100
-  feature_lr: 0.0025
-  opacity_lr: 0.05
-  scaling_lr: 0.005 # 0.001
-  rotation_lr: 0.001
-  percent_dense: 0.01
+  position_lr_max_steps: 100 # Default MonoGS: 30000
+  feature_lr: 1e-3 # Default MonoGS: 0.0025
+  opacity_lr: 2e-2 # Default MonoGS: 0.05
+  scaling_lr: 4e-4 # Default MonoGS: 0.001
+  rotation_lr: 4e-4
+  percent_dense: 0.01 
 
   # LR for pose optimization
-  # Caution: DONT USE A TOO HIGH LR HERE! THIS CAN DESTROY THE MAP!
-  cam_rot_delta: 0.0003 # 0.0003
-  cam_trans_delta: 0.0001 # 0.0001
+  cam_rot_delta: 3e-4 # Default MonoGS: 0.003
+  cam_trans_delta: 1e-4 # Default MonoGS: 0.001
 
 loss:
   # Decide which loss terms to use
   with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
   use_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
   use_depth_smoothness_reg: True # Similarity loss between depth and image gradients
-
   rgb_boundary_threshold: 0.01 # Pixel information in an image needs to be at least higher than this 
+
   ### Loss weights
-  alpha1: 0.6 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
-  alpha2: 0.85 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
+  alpha1: 0.5 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta: 5.0 # Regularizer on scale changes of the Gaussians
-  beta2: 0.01 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+  beta2: 0.1 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
 # Parameters for transfer SLAM -> Renderer
 input:
   sensor_type: 'depth'
   pcd_downsample_init: 16 # This is a constant downsampling factor
-  pcd_downsample: 8 # NOTE You normally have up to 20k points per frame
+  pcd_downsample: 32 # You ideally have ~5-10k points per frame
   adaptive_pointsize: False
   point_size: 0.02
   type: 'replica'
 
-
 # Default vanilla Gaussian Splatting parameters
-use_spherical_harmonics: False 
+use_spherical_harmonics: True
 pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False

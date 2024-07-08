@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2023, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -12,12 +11,14 @@
 import os
 import ipdb
 from termcolor import colored
+from typing import Optional, List
 
 import numpy as np
 import open3d as o3d
 
 import torch
 from torch import nn
+import lietorch
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 
@@ -32,8 +33,10 @@ from ..utils.general_utils import (
 from ..utils.graphics_utils import BasicPointCloud, getWorld2View2
 from ..utils.sh_utils import RGB2SH
 
+
 def mkdir_p(folder_path):
     from errno import EEXIST
+
     # Creates a directory. equivalent to using mkdir -p on the command line
     try:
         os.makedirs(folder_path)
@@ -107,10 +110,28 @@ class GaussianModel:
         """Returns the number of 3D Gaussians we have"""
         return len(self._xyz)
 
-    def get_avg_scale(self, factor: float = 1.0) -> float:
+    def get_avg_scale(self, factor: float = 1.0, kfIdx: Optional[torch.Tensor | List[int]] = None) -> float:
+        """Get the average depth of the Gaussians in the scene. Optionally, filter by keyframe index to select only Gaussians in a specific area."""
         points = self.get_xyz
+
+        if kfIdx is not None:
+            print(f"Computing scale based on {kfIdx}")
+            select = torch.zeros(points.shape[0], dtype=torch.bool)
+            for idx in kfIdx:
+                # Sanity check if this index actually exists
+                if not (self.unique_kfIDs == idx).any():
+                    continue
+                idx_array = idx * torch.ones_like(self.unique_kfIDs, device=self.unique_kfIDs.device)
+                select = torch.logical_or(select, (self.unique_kfIDs == idx_array))
+            print(f"Selecting {select.sum()} points from {len(points)}")
+            points = points[select]
+
+        if len(points) == 0:
+            return None
+
         depth = points[:, 2]
-        avg_scale = factor * torch.mean(depth, dim=0)
+        avg_scale = factor * torch.median(depth, dim=0)[0]
+        print(f"Using average scale: {avg_scale}")
         return avg_scale.item()
 
     @property
@@ -148,10 +169,25 @@ class GaussianModel:
 
             # If we don't have a depth signal, initialize from random
             else:
-                depth_raw = (
-                    np.ones(rgb_raw.shape[:2]) + (np.random.randn(rgb_raw.shape[0], rgb_raw.shape[1]) - 0.5) * 0.05
-                ) * self.get_avg_scale(factor=0.5)
+                if cam.uid == 0:
+                    # Introduce random Gaussians, this is how MonoGS works in monocular mode
+                    depth_raw = (
+                        np.ones_like(depth_raw)
+                        + (np.random.randn(depth_raw.shape[0], depth_raw.shape[1]) - 0.5) * 0.05
+                    ) * scale
+                else:
+                    # Take the depth of a small neighborhood of Gaussian keyframes
+                    neighbors = torch.arange(max(0, cam.uid - 1), cam.uid + 1, device=self.unique_kfIDs.device)
+                    neighbors_scale = self.get_avg_scale(kfIdx=neighbors)
+                    if neighbors_scale is not None:
+                        depth_raw = np.ones(rgb_raw.shape[:2]) * neighbors_scale
+                    else:
+                        depth_raw = (
+                            np.ones_like(depth_raw)
+                            + (np.random.randn(depth_raw.shape[0], depth_raw.shape[1]) - 0.5) * 0.05
+                        ) * scale
 
+            # Introduce random Gaussians, this is how MonoGS works in monocular mode
             if self.cfg.sensor_type == "monocular":
                 depth_raw = (
                     np.ones_like(depth_raw) + (np.random.randn(depth_raw.shape[0], depth_raw.shape[1]) - 0.5) * 0.05
@@ -165,6 +201,8 @@ class GaussianModel:
 
         return self.create_pcd_from_image_and_depth(cam, rgb, depth, init, downsample_factor=downsample_factor)
 
+    # TODO chen: this is incredibly wasteful as we go back and forth between CPU and GPU here
+    # and all that just to convert 2D -> 3D with a pinhole model, which we could do based on lietorch alone
     def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False, downsample_factor=None):
         if downsample_factor is None:
             if init:
@@ -184,6 +222,7 @@ class GaussianModel:
             convert_rgb_to_intensity=False,
         )
 
+        # NOTE chen: this is literally just a scaling operation, where we do: 1. invert 2. scale 3. invert
         W2C = getWorld2View2(cam.R, cam.T).cpu().numpy()
         pcd_tmp = o3d.geometry.PointCloud.create_from_rgbd_image(
             rgbd,
@@ -206,7 +245,7 @@ class GaussianModel:
 
         if pcd.points.shape[0] <= 5:
             return
-        
+
         self.ply_input = pcd
 
         fused_point_cloud = torch.from_numpy(np.asarray(pcd.points)).float().cuda()
@@ -255,7 +294,9 @@ class GaussianModel:
             new_n_obs=new_n_obs,
         )
 
-    def extend_from_pcd_seq(self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None, mask=None, downsample_factor=None):
+    def extend_from_pcd_seq(
+        self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None, mask=None, downsample_factor=None
+    ):
         features = self.create_pcd_from_image(
             cam_info, init, scale=scale, depthmap=depthmap, mask=mask, downsample_factor=downsample_factor
         )
@@ -376,6 +417,21 @@ class GaussianModel:
             opacities_new[filter] = self.get_opacity[filter]
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
+
+    def reanchor(self, kf_idx: torch.Tensor | List[int], delta_pose: torch.Tensor) -> None:
+        """Transform the centers of Gaussians attached to a keyframe idx with an SE3 transform"""
+
+        to_update = self.unique_kfIDs == kf_idx
+        xyz_to_re = self.get_xyz[to_update]
+        # Make homogenous coordinates
+        xyz_re = torch.cat((xyz_to_re, torch.ones(xyz_to_re.shape[0], 1, device=self.device)), dim=1)
+        xyz_new = self.get_xyz.clone()  # Make copy to replace old Variable
+
+        dP = lietorch.SE3.InitFromVec(delta_pose.to(self.device))
+        xyz_new[to_update] = (dP[None] * xyz_re)[:, :3]  # Transform and extract new 3D coordinates
+        
+        optimizable_tensors = self.replace_tensor_to_optimizer(xyz_new, "xyz")
+        self._xyz = optimizable_tensors["xyz"]
 
     def clean_scales(self) -> None:
         """Sometimes the scales get out of hand due to degenerate supervision"""
@@ -672,20 +728,20 @@ class GaussianModel:
             new_kf_ids=new_kf_id,
             new_n_obs=new_n_obs,
         )
-    
+
+    # TODO does this work when the opacity hole also has no depth? -> Check for both
     def densify_w_opacity(self, opacity, cam, min_opacity=0.1):
         low_opacity = torch.where(opacity.squeeze() < min_opacity, True, False)
-        #print(f"Low opacity: {low_opacity.sum()/cam.image_height/cam.image_width}")
-        features = self.create_pcd_from_image(cam, mask = low_opacity, downsample_factor=1)
+        # FIXME check if this has holes in the depth map where the opacity is low
+
+        # print(f"Low opacity: {low_opacity.sum()/cam.image_height/cam.image_width}")
+        features = self.create_pcd_from_image(cam, mask=low_opacity, downsample_factor=1)
 
         if features is not None:
             fused_point_cloud, features, scales, rots, opacities = features
-            #print("Opacity densification added", fused_point_cloud.shape[0])
+            if len(fused_point_cloud) > 0:
+                print("Opacity densification added", fused_point_cloud.shape[0])
             self.extend_from_pcd(fused_point_cloud, features, scales, rots, opacities, cam.uid)
-
-
-
-    
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom

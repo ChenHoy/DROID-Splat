@@ -1,9 +1,12 @@
 import shutil
 from termcolor import colored
 import ipdb
+import yaml
 import os
 import random
 import hydra
+import logging
+from omegaconf import OmegaConf
 
 import numpy as np
 import torch
@@ -16,9 +19,12 @@ Run the SLAM system on a given dataset or on image folder.
 You can configure the system using .yaml configs. See docs for reference ...
 """
 
+# A logger for this file
+log = logging.getLogger(__name__)
+
 
 def sys_print(msg: str) -> None:
-    print(colored(msg, "white", "on_grey", attrs=["bold"]))
+    log.info(colored(msg, "white", "on_grey", attrs=["bold"]))
 
 
 def setup_seed(seed):
@@ -82,6 +88,10 @@ def get_in_the_wild_heuristics(ht: int, wd: int, strategy: str = "generic") -> t
 def run_slam(cfg):
 
     output_folder = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+    log.info(OmegaConf.to_yaml(cfg))
+    # Save the cfg to yaml file
+    with open(os.path.join(output_folder, "config.yaml"), "w") as f:
+        yaml.dump(OmegaConf.to_container(cfg), f, default_flow_style=False)
 
     setup_seed(43)
     torch.multiprocessing.set_start_method("spawn")

@@ -5,10 +5,12 @@ from termcolor import colored
 
 import torch
 import torch.multiprocessing as mp
+import lietorch
 
 import numpy as np
 
 from ..slam import SLAM
+from ..geom import pose_distance
 from ..gaussian_splatting.eval_utils import EvaluatePacket
 from ..gaussian_splatting.gaussian_renderer import render
 from ..gaussian_splatting.gui import gui_utils
@@ -267,30 +269,69 @@ class SlamTestbed(SLAM):
             # If new keyframe got inserted
             if frontend_old_count != self.frontend.optimizer.t1:
                 # Render all new incoming frames
-                # if (
-                #     self.frontend.optimizer.is_initialized
-                #     and self.frontend.optimizer.t1 % render_freq == 0
-                #     and self.gaussian_mapper.warmup < self.frontend.optimizer.count
-                # ):
-                #     self.gaussian_mapper(None, None)
+                if (
+                    self.frontend.optimizer.is_initialized
+                    and self.frontend.optimizer.t1 % render_freq == 0
+                    and self.gaussian_mapper.warmup < self.frontend.optimizer.count
+                ):
+                    self.gaussian_mapper(None, None)
 
                 # Run backend and loop closure detection occasianally
                 if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % backend_freq == 0:
-                    if self.loop_detector is not None:
-                        loop_candidates = self.loop_detector.check()
-                        if loop_candidates is not None:
-                            loop_ii, loop_jj = loop_candidates
-                        else:
-                            loop_ii, loop_jj = None, None
-                        self.backend(add_ii=loop_ii, add_jj=loop_jj)
-                    else:
-                        self.backend()
+                    # if self.loop_detector is not None:
+                    #     loop_candidates = self.loop_detector.check()
+                    #     if loop_candidates is not None:
+                    #         loop_ii, loop_jj = loop_candidates
+                    #     else:
+                    #         loop_ii, loop_jj = None, None
+                    #     self.backend(add_ii=loop_ii, add_jj=loop_jj)
+                    # else:
+                    #     self.backend()
+                    self.backend()
+
+                    ## Reanchor the Gaussians to follow the big map update
+                    threshold = 0.05
+                    unit = self.video.pose_changes.clone()
+                    unit[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.device)
+                    delta = pose_distance(self.video.pose_changes, unit)
+                    to_update = (delta > threshold).nonzero().squeeze()
+                    if self.gaussian_mapper.warmup < self.frontend.optimizer.count and to_update.ndim > 0:
+                        self.gaussian_mapper.reanchor_gaussians(to_update, self.video.pose_changes[to_update])
+
+        self.gaussian_mapper._last_call(None, None)
+        ipdb.set_trace()
+        self.compare_mapping_video(0)
 
         # Check distance statistics, so you can select a good threshold depending on the Place Recognition Network
         # d_1st, d_2nd, d_3rd = self.get_frame_distance_stats()
         # d_1st = convert_to_tensor(d_1st)
         # d_2nd, d_3rd = convert_to_tensor(d_2nd), convert_to_tensor(d_3rd)
         # ipdb.set_trace()
+
+    def compare_mapping_video(self, idx: int = 0) -> None:
+        """Compare render with video"""
+
+        renderer = self.gaussian_mapper
+
+        assert idx < len(renderer.cameras), "View index out of bounds!"
+        cam = renderer.cameras[idx]
+        render_pkg = render(cam, renderer.gaussians, renderer.pipeline_params, renderer.background, device=self.device)
+        image_render, radii, depth_render = render_pkg["render"], render_pkg["radii"], render_pkg["depth"]
+        image_render.clamp_(0, 1.0)  # Clip numerical errors
+
+        idx_in_video = renderer.idx_mapping[idx]
+        disps_ref = self.video.disps_up[idx_in_video]
+        disps_valid = disps_ref > 0
+        depth_ref = torch.where(disps_valid, 1.0 / disps_ref, disps_ref)
+
+        plot_side_by_side(
+            image_render.detach().clone(),
+            cam.original_image.detach().clone(),
+            depth_render.detach().clone(),
+            depth_ref.clone(),
+            title="Render vs. Tracker",
+            return_image=False,
+        )
 
     def test_tracking(self, stream, backend_freq: int = 10) -> None:
         """Test tracking in a sequential manner."""
@@ -319,6 +360,38 @@ class SlamTestbed(SLAM):
             ):
                 self.backend()
 
+    def test_rendering(self, stream, render_freq: int = 10) -> None:
+        """Test Rendering in a sequential manner."""
+        i = 0
+        for frame in tqdm(stream):
+            frontend_old_count = self.frontend.optimizer.t1  # How many times did the frontend actually run?
+
+            if self.cfg.with_dyn and stream.has_dyn_masks:
+                timestamp, image, depth, intrinsic, gt_pose, static_mask = frame
+            else:
+                timestamp, image, depth, intrinsic, gt_pose = frame
+                static_mask = None
+
+            # Control when to start and when to stop the SLAM system from outside
+            if timestamp < self.t_start:
+                continue
+            if self.t_stop is not None and timestamp > self.t_stop:
+                break
+
+            # Frontend insert new frames
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
+            if (
+                self.frontend.optimizer.is_initialized
+                and self.frontend.optimizer.t1 % render_freq == 0
+                and self.cfg.run_mapping
+                and i > self.gaussian_mapper.warmup
+            ):
+                self.gaussian_mapper(None, None)
+            i += 1
+
+        self.gaussian_mapper(None, None, True)
+        ipdb.set_trace()
+
     def run(self, stream):
         """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
 
@@ -334,11 +407,12 @@ class SlamTestbed(SLAM):
             p.start()
 
         render_freq = 5  # Run rendering every k frontends
-        backend_freq = 20  # Run backend every 5 frontends
+        backend_freq = 10  # Run backend every 5 frontends
 
         # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200)
-        # self.run_track_render(stream, backend_freq=backend_freq, render_freq=render_freq)
-        self.test_tracking(stream, backend_freq=backend_freq)
+        # self.test_tracking(stream, backend_freq=backend_freq)
+        # self.test_rendering(stream, render_freq=render_freq)
+        self.run_track_render(stream, backend_freq=backend_freq, render_freq=render_freq)
         ipdb.set_trace()
 
         self.terminate(processes, stream, None)

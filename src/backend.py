@@ -2,11 +2,13 @@ import gc
 from termcolor import colored
 from copy import deepcopy
 from typing import Optional
+import ipdb
 
 import torch
 import numpy as np
 
 from .factor_graph import FactorGraph
+import lietorch
 
 
 class BackendWrapper(torch.nn.Module):
@@ -135,8 +137,18 @@ class Backend:
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)
 
+        # Sanity check: always reset the pose changes so we dont accidentally detect a change from some previous optimization ...
+        self.video.pose_changes[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.device)
+
+        poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
         # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
         graph.update_lowmem(t0=t_start + 1, t1=t_end, steps=steps, iters=iters, max_t=t_end, motion_only=motion_only)
+
+        poses_after = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
+        g0, g1 = lietorch.SE3.InitFromVec(poses_before), lietorch.SE3.InitFromVec(poses_after)
+        dP = g1 * g0.inv()  # Get relative pose in forward direction
+        self.video.pose_changes[t_start + 1 : t_end] = dP.vec()  # You can now get g_cur = dP * g_prev
+
         graph.clear_edges()
         with self.video.get_lock():
             self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
@@ -189,8 +201,7 @@ class Backend:
                 if val is not None:
                     setattr(graph, key, deepcopy(val))
 
-        # TODO chen: does this really always use remove=True in GO-SLAM?
-        # NOTE this removes past edges since remove=True per default
+        # NOTE this removes past edges since remove=True per default (in GO-SLAM)
         n_edges = graph.add_loop_aware_proximity_factors(
             t_start,
             t_end,
@@ -200,15 +211,22 @@ class Backend:
             self.beta,
             self.loop_thresh,
             max_factors,
+            remove=False,
             loop=True,
         )
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)
 
+        poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
         # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
         graph.update_lowmem(
             t0=t_start_loop + 1, t1=t_end, steps=steps, iters=iters, max_t=t_end, lm=lm, ep=ep, motion_only=motion_only
         )
+        poses_after = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
+        g0, g1 = lietorch.SE3.InitFromVec(poses_before), lietorch.SE3.InitFromVec(poses_after)
+        dP = g1 * g0.inv()  # Get relative pose in forward direction
+        self.video.pose_changes[t_start + 1 : t_end] = dP.vec()  # You can now get g_cur = dP * g_prev
+
         graph.clear_edges()
         # Free up memory again after optimization
         del graph
@@ -220,10 +238,15 @@ class Backend:
 
         return n, n_edges
 
-    # TODO implement sparse Pose Graph Optimization similar to HI-SLAM
+    # TODO implement sparse Pose Graph Optimization similar to HI-SLAM or other systems like ORB-SLAMv3
     # we dont want to optimize all the local frames, only global links in a loop closure fashion
     # This only optimizes the SIM3 poses, not disparity or intrinsics
     # -> How would you transform a normal pose graph into segments with relative pose edges?!
+    # i) We need to cluster our graph into distinct segments, we could take e.g. the frontend windows as segments
+    # ii) We need to add relative pose edges between the segments, these should not be in SE3, but SIM3 in order to correct scale drift
+    # iii) We add a regularization term to our pose graph optimization, which minimizes the difference between the relative pose and the diff. between estimated poses
+    #       see https://alida.tistory.com/69#5.-relative-pose-error-pgo
+    # -> This would require to either implement a pure Python optimization or adapt the CUDA kernels
     @torch.no_grad()
     def sparse_ba(
         self, t_start: int = 0, t_end: Optional[int] = None, steps: int = 6, iter: int = 4, motion_only: bool = False

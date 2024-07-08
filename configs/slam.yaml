@@ -9,10 +9,10 @@ defaults:
 
 hydra:
   run:
-    dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}_${mode}
   job:
     chdir: False
-    name: mono_slam
+    name: mono_slam # Change this to your experiment run name, e.g. the dataset you run on
 
 device: "cuda:0"
 sync_method: strict
@@ -31,14 +31,15 @@ run_backend: True # Global optimization
 run_loop_detection: False # Loop closure detection
 run_mapping: True # Rendering 
 ## Visualizations / GUIs
-run_visualization: False
+run_visualization: True
 run_mapping_gui: False
 show_stream: False
 
 # Frequencies for synchronizing the different main parts of the pipeline
 # In an optimal setup, the Frontend would be the bottlenck, which can run at ~20-30FPS
+# Mapping takes ~5-7 iters/s, i.e. with a well tuned system each Render update hits <= 0.4fps
 backend_every: 5 # Run global bundle adjustment only every k Frontend updates
-mapper_every: 5 # When using the Renderer in tandem to Frontend, we can optimize over very small batches of Cameras and few iterations!
+mapper_every: 4  # Run Renderer every k Frontend updates
 
 ## Evaluation
 evaluate: False
