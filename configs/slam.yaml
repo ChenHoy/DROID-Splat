@@ -27,7 +27,7 @@ opt_intr: False # Optimizes additional intrinsic parameters
 sleep_delay: 0.01 # Sleep timer to cool off the system sometimtes
 
 run_frontend: True # This should always be True!
-run_backend: False # Global optimization
+run_backend: True # Global optimization
 run_loop_detection: False # Loop closure detection
 run_mapping: True # Rendering 
 ## Visualizations / GUIs
@@ -38,7 +38,7 @@ show_stream: False
 # Frequencies for synchronizing the different main parts of the pipeline
 # In an optimal setup, the Frontend would be the bottlenck, which can run at ~20-30FPS
 backend_every: 5 # Run global bundle adjustment only every k Frontend updates
-mapper_every: 1 # When using the Renderer in tandem to Frontend, we can optimize over very small batches of Cameras and few iterations!
+mapper_every: 5 # When using the Renderer in tandem to Frontend, we can optimize over very small batches of Cameras and few iterations!
 
 ## Evaluation
 evaluate: False

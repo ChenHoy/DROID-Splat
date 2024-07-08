@@ -470,9 +470,10 @@ class GaussianMapper(object):
                 scale_invariant=scale_invariant,
             )
 
-            # low_opacity.append((view, opacity))
+            #low_opacity.append((view, opacity))
 
         # Regularize scale changes of the Gaussians
+        #loss = loss / len(frames)
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
         loss += self.loss_params.beta * len(frames) * isotropic_loss.mean()
@@ -480,7 +481,7 @@ class GaussianMapper(object):
         # NOTE chen: this can happen we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
 
-        scaled_loss = loss * np.sqrt(len(frames)) / 2  # Scale the loss with the number of frames
+        scaled_loss = loss #* np.sqrt(len(frames))  # Scale the loss with the number of frames
         scaled_loss.backward()
 
         with torch.no_grad():
