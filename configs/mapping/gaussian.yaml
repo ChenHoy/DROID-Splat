@@ -1,30 +1,30 @@
 warmup: 15 # Wait until tracking gets to this frame
-delay: 1 # Delay between tracking and mapping
+delay: 3 # Delay between tracking and mapping (This should be >= 2, because else )
 
 # Map Refinement after we are done with everything
-refinement_iters: 50 # Final Optimization iterations for all views
-refinement_bs: 15 # Batch size for refinement (Use <= 70 to avoid OOM!)
-refine_random_subset: 0.3 # Always optimize over a random subset of frames with size % of all to save compute
+refinement_iters: 100 # Final Optimization iterations for all views
+refinement_bs: 20 # Batch size for refinement (Use <= 70 to avoid OOM!)
+refine_random_subset: 0.8 # Always optimize over a random subset of frames with size % of all to save compute
 refine_w_importance_sampling: True # Use importance sampling for the final optimization
 use_non_keyframes: False # Use non-keyframes during map refinement
 keyframes_at_least: null # Always make sure to have >30% keyframes in a batch
-refine_densify_until: 20 # Dont densify after this many iterations, ALL gaussians are well optimized
+refine_densify_until: 50 # Dont densify after this many iterations, ALL gaussians are well optimized
 
 # Backpropagate the Render updates into Tracking system
 # NOTE this is actually really important as even with our good initialization, the early Gaussians are not that good!
 feedback_warmup: 6 # Only start feeding back into tracking after we ran the Renderer k times
-feedback_only_last_window: True
+feedback_only_last_window: False
 feedback_disps: False
 feedback_poses: False
 optimize_poses: False
 
 # NOTE chen: please use MORE ITERATIONS than prune_densify_every! 
 # it is important to optimize newly introduced Gaussians due to densification!!!
-mapping_iters: 17 # Optimization iterations for selected views
+mapping_iters: 18 # Optimization iterations for selected views
 # These 2 flags filter out noisy points before Rendering Optimization
 filter_multiview: True # Only initialize Gaussians that are consistent in multiple views
 filter_uncertainty: False # Only use very certain points for intializing Gaussians
-use_prior_for_supervision: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
+use_prior_for_supervision: False # Use the prior for supervision. If not, then use the current filtered map from SLAM
 batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
 save_renders: False # Store some rendered images for debugging
 
@@ -53,17 +53,16 @@ keyframes:
     confidence_thresh: 0.025 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
 
   mapping:
-    # chen: TODO when changing the learning rates, you should also change the grad_threshold!
-    densify_grad_threshold: 0.0002 # Gradient clipping
+    densify_grad_threshold: 0.0005 # Gradient clipping
     size_threshold: 20 # Max screen size
     opacity_th: 0.01 # Min opacity
-    gaussian_extent: 1 # Affects densification, i.e. the larger the more we split gaussians
+    gaussian_extent: 4 # Affects densification, i.e. the larger the more we split gaussians
 
   refinement:
     densify_grad_threshold: 0.0002 # Gradient clipping
     size_threshold: 20 # Max screen size
     opacity_th: 0.01 # Min opacity
-    gaussian_extent: 1  # Affects densification, i.e. the larger the more we split gaussians
+    gaussian_extent: 2  # Affects densification, i.e. the larger the more we split gaussians
 
 opt_params:
   init_lr: 6.0 # Default MonoGS: 6.0
@@ -72,13 +71,13 @@ opt_params:
   # see: https://stackoverflow.com/questions/53033556/how-should-the-learning-rate-change-as-the-batch-size-change
   # -> lr = defaults / sqrt(10)
   # However, we need to be cautious of https://stats.stackexchange.com/questions/346299/whats-the-effect-of-scaling-a-loss-function-in-deep-learning
-  position_lr_init: 1e-4 # Default MonoGS: 0.00016 (RGB mode has x10)
+  position_lr_init: 1e-3 # Default MonoGS: 0.00016 (RGB mode has x10)
   position_lr_final: 1e-6 # Default MonoGS: 0.0000016
   position_lr_delay_mult: 0.01
   position_lr_max_steps: 100 # Default MonoGS: 30000
   feature_lr: 1e-3 # Default MonoGS: 0.0025
   opacity_lr: 2e-2 # Default MonoGS: 0.05
-  scaling_lr: 4e-4 # Default MonoGS: 0.001
+  scaling_lr: 1e-3 # Default MonoGS: 0.001
   rotation_lr: 4e-4
   percent_dense: 0.01 
 
@@ -96,8 +95,8 @@ loss:
   ### Loss weights
   alpha1: 0.8 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
-  beta: 5.0 # Regularizer on scale changes of the Gaussians
-  beta2: 0.01 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+  beta: 3.0 # Regularizer on scale changes of the Gaussians
+  beta2: 0.05 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
 # Parameters for transfer SLAM -> Renderer
 input:

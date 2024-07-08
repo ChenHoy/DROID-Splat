@@ -1,7 +1,7 @@
 import os
 import ipdb
 from copy import deepcopy
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import math
 import gc
 from termcolor import colored
@@ -328,6 +328,54 @@ class GaussianMapper(object):
                 gui_utils.GaussianPacket(gaussians=clone_obj(self.gaussians), keyframes=updated_cams)
             )
 
+    def densify_holes(self, idx: int, mask: torch.Tensor, downsample_factor: float = 1.0) -> None:
+        """When initializing the map based on multi-view filtered depths, we often have holes
+        in areas that are only visible in a single camera. Since we usually have access to a semi-reliable dense
+        depth map (either from SLAM or an external sensor), we can simply patch these holes based on a reference.
+        """
+        cam = self.cameras[idx]
+        # Only do this for actual keyframes (in case we added others), because we need a reference from Tracking
+        if idx not in self.idx_mapping:
+            return
+
+        idx_in_video = self.idx_mapping[idx]
+        # We have a dense depth prior that is reliable in rgbd mode
+        if self.mode == "rgbd":
+            dense_disps_ref = self.video.disps_sens_up[idx_in_video].clone().cpu()
+            valid = dense_disps_ref > 0
+            dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
+        # We have a dense depth reference in the video (from Tracking)
+        elif self.video.upsampled:
+            dense_disps_ref = self.video.disps_up[idx_in_video].clone().cpu()
+            valid = dense_disps_ref > 0
+            dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
+        # We have at least a scaled prior (from an external source)
+        elif self.mode == "prgbd":
+            dense_disps_ref = self.video.disps_sens_up[idx_in_video].clone().cpu()
+            valid = dense_disps_ref > 0
+            dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
+        else:
+            # Get the average scale in this keyframe from the Gaussians
+            # Densify the hole from this new point cloud
+            # NOTE chen: since holes are usually further away it makes sense to take > median
+            avg_depth = self.gaussians.get_avg_scale([idx], factor=1.5)  # Take factor*median
+            dense_depth_ref = torch.ones_like(mask, device="cpu") * avg_depth
+
+        # Densify based on the mask
+        self.gaussians.extend_from_pcd_seq(
+            cam,
+            kf_id=idx,
+            init=False,
+            mask=mask,
+            depthmap=dense_depth_ref.numpy(),
+            downsample_factor=downsample_factor,
+        )
+
+    def get_ram_usage(self) -> Tuple[float, float]:
+        free_mem, total_mem = torch.cuda.mem_get_info(device=self.device)
+        used_mem = 1 - (free_mem / total_mem)
+        return used_mem, free_mem
+
     def map_refinement(
         self,
         num_iters: int = 100,
@@ -374,7 +422,7 @@ class GaussianMapper(object):
             ### Select the right frames depending on strategy
             if not has_nonkf:  # Sample only from keyframes (self.cameras)
                 if random_frames is not None:
-                    rnd_idx = np.random.choice(len(to_refine), n_kf, replace=False)
+                    rnd_idx = np.random.choice(len(to_refine), n_refine, replace=False)
                     frame_idx = [to_refine[i] for i in rnd_idx]
                     frames = [self.cameras[i] for i in frame_idx]
                 else:
@@ -399,10 +447,28 @@ class GaussianMapper(object):
 
             return frames
 
+        @torch.no_grad()
+        def maybe_fill_holes(render_pkg, view_id: int, size_hole: int = 100, max_mem: float = 0.95) -> bool:
+            # NOTE chen: we sometimes still have holes left due to using only covisible areas for initialization
+            mask = torch.all((render_pkg["render"].squeeze() == self.background[:, None, None]), dim=0)
+            if mask.sum() > size_hole:
+                has_hole = True
+                self.info(f"Detected holes in view {view_id} during importance sampling. Adding higher weight ...")
+                # Help out in those frames by refining these more!
+                used_mem, free_mem = self.get_ram_usage()
+                # NOTE chen: this can add up a lot of memory, only this if we have enough slack
+                if used_mem <= max_mem:
+                    self.info(f"Patching up holes in view {view_id} manually using Depth from Tracking ...")
+                    self.densify_holes(view_id, mask, downsample_factor=2.0)
+            else:
+                has_hole = False
+            return has_hole
+
         # Warnings for misconfiguration
         if random_frames is None and kf_always is not None:
             self.info("Warning. If we dont do random sampling, it does not make sense to set kf_always ...")
-        if importance_sampling and random_frames is not None and kf_always is None:
+        has_nonkf = len(self.cameras) != len(self.idx_mapping)  # Check if we added non-keyframes
+        if importance_sampling and random_frames is not None and kf_always is None and has_nonkf:
             self.info(
                 """Warning. Importance sampling is implemented for keyframes only! 
                 You have not selected a fixed percentage of keyframes in your random subsets, 
@@ -442,26 +508,38 @@ class GaussianMapper(object):
         # Gather importance weights by computing the loss over all frames first
         # Because we dont want to waste too much compute, we backpropagate over this large accumulated batch
         if importance_sampling:
-            weights = []
+            loss, weights = 0.0, []
             scale_invariant = self.supervise_with_prior and self.mode == "prgbd"
             # NOTE chen: we only compute the importance weights for keyframe cams to save compute
             kf_cams = [cam for cam in self.cameras if cam.uid in self.idx_mapping]
-            loss = 0.0
-            for view in kf_cams:
-                loss_i, _ = self.render_compare(view, scale_invariant=scale_invariant)
-                weights.append(loss_i)
+            self.info("Gathering importance weights for refinement ...")
+            for i, view in tqdm(enumerate(kf_cams)):
+                loss_i, render_pkg = self.render_compare(view, scale_invariant=scale_invariant)
+                has_holes = maybe_fill_holes(render_pkg, view.uid, size_hole=100)
                 loss += loss_i
-            scaling = self.gaussians.get_scaling
-            isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-            loss += self.loss_params.beta * isotropic_loss.mean()
-            loss = loss / len(kf_cams) * lr_factor
+                # We need to detach loss_i and copy, so the computation graph does not grow too large!
+                if has_holes:
+                    weights.append(4 * loss_i.detach().clone().item()) # Give higher weight to frames with holes
+                else:
+                    weights.append(loss_i.detach().clone().item())
 
-            self.gaussians.check_nans()  # NOTE chen: this can happen we have zero depth and an inconvenient pose
-            scaled_loss = loss * np.sqrt(len(kf_cams))
-            # Optimize first iteration over all keyframes
-            scaled_loss.backward()
-            self.gaussians.optimizer.step()
-            self.gaussians.optimizer.zero_grad()
+                # Keep memory in check by only backpropagating in batches
+                if i % batch_size == 0:
+                    self.gaussians.check_nans()  # NOTE chen: this can happen we have zero depth and an inconvenient pose
+
+                    scaling = self.gaussians.get_scaling
+                    isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
+                    loss += self.loss_params.beta * isotropic_loss.mean()
+                    # Scale loss according to batch size
+                    loss = loss / batch_size * lr_factor
+                    loss = loss * np.sqrt(batch_size)
+                    # Backpropagate through batch
+                    loss.backward()
+                    # Make step
+                    self.gaussians.optimizer.step()
+                    self.gaussians.optimizer.zero_grad()
+                    loss = 0.0  # Reset loss
+
             self.gaussians.update_learning_rate(0)
             num_iters -= 1  # Dont do the first iteration again
         else:
@@ -672,8 +750,8 @@ class GaussianMapper(object):
         iter: int,
         frames: List[Camera],
         kf_mng_params: Dict,
-        prune_densify: bool = True,
-        opacity_densify: bool = True,
+        prune_densify: bool = False,
+        opacity_densify: bool = False,
         opacity_reset: bool = False,
         optimize_poses: bool = False,
         lr_factor: float = 1.0,

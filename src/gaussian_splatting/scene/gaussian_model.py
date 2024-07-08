@@ -30,6 +30,7 @@ from ..utils.general_utils import (
     inverse_sigmoid,
     strip_symmetric,
 )
+from ..camera_utils import Camera
 from ..utils.graphics_utils import BasicPointCloud, getWorld2View2
 from ..utils.sh_utils import RGB2SH
 
@@ -151,7 +152,15 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_pcd_from_image(self, cam, init=False, scale=2.0, depthmap=None, mask=None, downsample_factor=None):
+    def create_pcd_from_image(
+        self,
+        cam: Camera,
+        init=False,
+        scale: float = 2.0,
+        depthmap: np.ndarray = None,
+        mask: torch.Tensor = None,
+        downsample_factor: float = None,
+    ):
         image_ab = (torch.exp(cam.exposure_a)) * cam.original_image + cam.exposure_b
         image_ab = torch.clamp(image_ab, 0.0, 1.0)
         if mask is not None:
@@ -178,7 +187,9 @@ class GaussianModel:
                 else:
                     # Take the depth of a small neighborhood of Gaussian keyframes
                     neighbors = torch.arange(max(0, cam.uid - 1), cam.uid + 1, device=self.unique_kfIDs.device)
-                    neighbors_scale = self.get_avg_scale(kfIdx=neighbors)
+                    neighbors_scale = self.get_avg_scale(
+                        kfIdx=neighbors, factor=1.5
+                    )  # Take 1.5*median of neighboring frames
                     if neighbors_scale is not None:
                         depth_raw = np.ones(rgb_raw.shape[:2]) * neighbors_scale
                     else:

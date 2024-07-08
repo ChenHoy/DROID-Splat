@@ -17,20 +17,20 @@ frontend:
   # NOTE this slows down the system a lot, since you increase the number of factors drastically
   max_age: 30 # (default: 25) Max age of a factor, we remove these after optimizing them for so long in the current window
 
-  keyframe_thresh: 4.0  # remove keyframe if avg flow < 
-  thresh: 16.0   # Add edges between frames within this distance
-  window: 25  # local ba window size
-  max_factors: 150  # num of edges within local ba
+  keyframe_thresh: 4.0 # remove keyframe if avg flow < 
+  thresh: 16.0 # Add edges between frames within this distance
+  window: 25 # local ba window size
+  max_factors: 150 # num of edges within local ba
   radius: 5 # Always build edges between nearby frames
   nms: 1
 
-  release_cache: True # Tradeoff: memory vs. speed, This can save up to ~5GB
+  release_cache: False # Tradeoff: memory vs. speed, This can save up to ~5GB
   
 backend:
   warmup: 15
   do_refinement: True # Do we want to refine the map afterwards with backend?
   window: 150 # Dont optimize more keyframes to avoid OOM
-  thresh: 50.0 # Add edges between frames within this distance
+  thresh: 60.0 # Add edges between frames within this distance
   max_factor_mult: 16
   radius: 2
   nms: 2

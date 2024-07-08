@@ -172,6 +172,9 @@ class SLAM:
     def sanity_checks(self) -> None:
         """Perform sanity checks to see if the system is misconfigured, this is just supposed
         to protect the user when running the system"""
+        assert (
+            self.cfg.run_frontend
+        ), "All other systems rely on the Frontend Tracker. This component must run at all times!"
         if self.cfg.mode == "stereo":
             # NOTE chen: I noticed, that this is really not impemented, i.e.
             # we would need to do some changes in motion_filter, depth_video, BA, etc. to even store the right images, fmaps, etc.
@@ -357,6 +360,12 @@ class SLAM:
             if candidates is not None:
                 self.loop_detector.info("Sending loop candidates ...")
                 loop_queue.put(candidates)
+
+        
+        # Free memory
+        del self.loop_detector
+        torch.cuda.empty_cache()
+        gc.collect()
 
         self.loop_detection_finished += 1
         self.all_finished += 1
