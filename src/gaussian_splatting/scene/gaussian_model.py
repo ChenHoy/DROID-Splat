@@ -429,7 +429,7 @@ class GaussianModel:
 
         dP = lietorch.SE3.InitFromVec(delta_pose.to(self.device))
         xyz_new[to_update] = (dP[None] * xyz_re)[:, :3]  # Transform and extract new 3D coordinates
-        
+
         optimizable_tensors = self.replace_tensor_to_optimizer(xyz_new, "xyz")
         self._xyz = optimizable_tensors["xyz"]
 
@@ -729,18 +729,18 @@ class GaussianModel:
             new_n_obs=new_n_obs,
         )
 
-    # TODO does this work when the opacity hole also has no depth? -> Check for both
+    # FIXME does this initialize correctly if we have a depth hole in this part of the scene?!
+    # NOTE chen: yes it should, because in case we have a hole, we will have NUM_POINTS < MIN_NUM_POINTS, i.e.
+    # we will random initialize based on the median depth of neighboring keyframes
     def densify_w_opacity(self, opacity, cam, min_opacity=0.1):
         low_opacity = torch.where(opacity.squeeze() < min_opacity, True, False)
-        # FIXME check if this has holes in the depth map where the opacity is low
-
         # print(f"Low opacity: {low_opacity.sum()/cam.image_height/cam.image_width}")
         features = self.create_pcd_from_image(cam, mask=low_opacity, downsample_factor=1)
 
         if features is not None:
             fused_point_cloud, features, scales, rots, opacities = features
-            if len(fused_point_cloud) > 0:
-                print("Opacity densification added", fused_point_cloud.shape[0])
+            # if len(fused_point_cloud) > 0:
+            #     print("Opacity densification added", fused_point_cloud.shape[0])
             self.extend_from_pcd(fused_point_cloud, features, scales, rots, opacities, cam.uid)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):

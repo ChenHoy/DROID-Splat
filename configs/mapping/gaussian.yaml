@@ -1,25 +1,30 @@
 warmup: 15 # Wait until tracking gets to this frame
-delay: 2 # Delay between tracking and mapping
-use_non_keyframes: False # Use non-keyframes during map refinement
-max_frames_refinement: 70 # Maximum number of frames to optimize during refinement
-use_prior_for_supervision: False # Use the prior for supervision. If not, then use the current filtered map from SLAM
+delay: 1 # Delay between tracking and mapping
 
-# NOTE chen: please use MORE ITERATIONS than prune_densify_every! 
-# it is important to optimize newly introduced Gaussians due to densification!!!
-mapping_iters: 27 # Optimization iterations for selected views
+# Map Refinement after we are done with everything
 refinement_iters: 50 # Final Optimization iterations for all views
-# These 2 flags filter out noisy points before Rendering Optimization
-filter_multiview: True # Only initialize Gaussians that are consistent in multiple views
-filter_uncertainty: False # Only use very certain points for intializing Gaussians
+refinement_bs: 15 # Batch size for refinement (Use <= 70 to avoid OOM!)
+refine_random_subset: 0.3 # Always optimize over a random subset of frames with size % of all to save compute
+refine_w_importance_sampling: True # Use importance sampling for the final optimization
+use_non_keyframes: False # Use non-keyframes during map refinement
+keyframes_at_least: null # Always make sure to have >30% keyframes in a batch
+refine_densify_until: 20 # Dont densify after this many iterations, ALL gaussians are well optimized
 
 # Backpropagate the Render updates into Tracking system
+# NOTE this is actually really important as even with our good initialization, the early Gaussians are not that good!
+feedback_warmup: 6 # Only start feeding back into tracking after we ran the Renderer k times
 feedback_only_last_window: True
 feedback_disps: False
 feedback_poses: False
 optimize_poses: False
-# NOTE this is actually really important as even with our good initialization, the early Gaussians are not that good!
-feedback_warmup: 6 # Only start feeding back into tracking after we ran the Renderer k times
 
+# NOTE chen: please use MORE ITERATIONS than prune_densify_every! 
+# it is important to optimize newly introduced Gaussians due to densification!!!
+mapping_iters: 17 # Optimization iterations for selected views
+# These 2 flags filter out noisy points before Rendering Optimization
+filter_multiview: True # Only initialize Gaussians that are consistent in multiple views
+filter_uncertainty: False # Only use very certain points for intializing Gaussians
+use_prior_for_supervision: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
 batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
 save_renders: False # Store some rendered images for debugging
 
@@ -29,13 +34,17 @@ keyframes:
   n_rand_frames: 5 # Optimize random global frames on top
   default_batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
 
-  densify_every: 2 # Densify Gaussians every k updates
-  prune_every: 3 # Prune Gaussians every k updates
-  prune_densify_every: 5 # How often to prune and densify gaussians during optimization
+  densify_every: 3 # Densify Gaussians every k updates
+  prune_every: 2 # Prune Gaussians every k updates
+  # How often to prune and densify gaussians during optimization
+  prune_densify_every: 5 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
+  # Densify Gaussians based on opacity only after k Mapper updates
+  opacity_densify_after: 10  # NOTE we usually run the Mapper ~30-40 times on normal videos
   # NOTE: Using the absolute visibility check is more wasteful as we need to count the visiblity of each Gaussian!
   # -> Use 'new' for faster performance
+  opacity_reset_every: 5 # Reset the opacity of non-visible Gaussians every k updates
   prune_mode: "new" # ["abs", "new"] How to prune: either check for covisible frames everywhere or just in the last n frames
-  prune_last: 5 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
+  prune_last: 7 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
   visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
 
   filter: # Parameter for filtering incoming points from the SLAM system
@@ -44,17 +53,17 @@ keyframes:
     confidence_thresh: 0.025 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
 
   mapping:
-    # NOTE when changing the learning rates, you should also change the grad_threshold!
+    # chen: TODO when changing the learning rates, you should also change the grad_threshold!
     densify_grad_threshold: 0.0002 # Gradient clipping
     size_threshold: 20 # Max screen size
-    opacity_th: 0.1 # Min opacity
-    gaussian_extent: 4 # Affects densification, i.e. the larger the more we split gaussians
+    opacity_th: 0.01 # Min opacity
+    gaussian_extent: 1 # Affects densification, i.e. the larger the more we split gaussians
 
   refinement:
     densify_grad_threshold: 0.0002 # Gradient clipping
-    size_threshold: 10 # Max screen size
-    opacity_th: 0.05 # Min opacity
-    gaussian_extent: 2  # Affects densification, i.e. the larger the more we split gaussians
+    size_threshold: 20 # Max screen size
+    opacity_th: 0.01 # Min opacity
+    gaussian_extent: 1  # Affects densification, i.e. the larger the more we split gaussians
 
 opt_params:
   init_lr: 6.0 # Default MonoGS: 6.0
@@ -82,13 +91,13 @@ loss:
   with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
   use_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
   use_depth_smoothness_reg: True # Similarity loss between depth and image gradients
-  rgb_boundary_threshold: 0.01 # Pixel information in an image needs to be at least higher than this 
+  rgb_boundary_threshold: 0.001 # Pixel information in an image needs to be at least higher than this 
 
   ### Loss weights
-  alpha1: 0.5 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha1: 0.8 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta: 5.0 # Regularizer on scale changes of the Gaussians
-  beta2: 0.1 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+  beta2: 0.01 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
 # Parameters for transfer SLAM -> Renderer
 input:
@@ -100,7 +109,7 @@ input:
   type: 'replica'
 
 # Default vanilla Gaussian Splatting parameters
-use_spherical_harmonics: True
+use_spherical_harmonics: False
 pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False
