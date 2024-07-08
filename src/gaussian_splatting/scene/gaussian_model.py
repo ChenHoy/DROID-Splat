@@ -730,17 +730,14 @@ class GaussianModel:
         )
 
     # TODO does this work when the opacity hole also has no depth? -> Check for both
-    def densify_w_opacity(self, opacity, cam, min_opacity=0.1):
-        low_opacity = torch.where(opacity.squeeze() < min_opacity, True, False)
+    def densify_from_mask(self, cam, mask, downsample_factor=1):
         # FIXME check if this has holes in the depth map where the opacity is low
 
-        # print(f"Low opacity: {low_opacity.sum()/cam.image_height/cam.image_width}")
-        features = self.create_pcd_from_image(cam, mask=low_opacity, downsample_factor=1)
+        features = self.create_pcd_from_image(cam, mask=mask, downsample_factor=downsample_factor)
 
         if features is not None:
             fused_point_cloud, features, scales, rots, opacities = features
-            if len(fused_point_cloud) > 0:
-                print("Opacity densification added", fused_point_cloud.shape[0])
+
             self.extend_from_pcd(fused_point_cloud, features, scales, rots, opacities, cam.uid)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):

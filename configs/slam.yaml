@@ -31,7 +31,7 @@ run_backend: True # Global optimization
 run_loop_detection: False # Loop closure detection
 run_mapping: True # Rendering 
 ## Visualizations / GUIs
-run_visualization: True
+run_visualization: False
 run_mapping_gui: False
 show_stream: False
 

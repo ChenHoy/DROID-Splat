@@ -87,14 +87,24 @@ loss:
   ### Loss weights
   alpha1: 0.5 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
-  beta: 5.0 # Regularizer on scale changes of the Gaussians
+  beta: 1.0 # Regularizer on scale changes of the Gaussians
   beta2: 0.1 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+
+  ### Low opacity densification
+  low_opacity_th: 0.3 # Opacity value below which we densify
+  low_opacity_ratio: 0.1 # Ratio of low opacity points to densify
+
+  ## High error densification
+  rel_error_th: 0.5 # Relative error threshold for densification
+  rel_error_ratio: 0.1 # Ratio of high error points to densify
+
+
 
 # Parameters for transfer SLAM -> Renderer
 input:
   sensor_type: 'depth'
   pcd_downsample_init: 16 # This is a constant downsampling factor
-  pcd_downsample: 32 # You ideally have ~5-10k points per frame
+  pcd_downsample: 64 # You ideally have ~5-10k points per frame
   adaptive_pointsize: False
   point_size: 0.02
   type: 'replica'
