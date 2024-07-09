@@ -106,7 +106,7 @@ class SLAM:
             self.loop_detector = LoopDetector(self.cfg.loop_closure, self.net, self.video, self.device)
         else:
             self.loop_detector = None
-        if cfg.run_mapping_gui and cfg.run_mapping and not cfg.evaluate:
+        if cfg.run_mapping_gui and cfg.run_mapping:
             self.q_main2vis = mp.Queue()
             self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs=(self.q_main2vis))
             self.mapping_warmup = min(self.frontend.window, self.gaussian_mapper.warmup)
@@ -918,7 +918,7 @@ class SLAM:
             ),
             mp.Process(
                 target=self.mapping_gui,
-                args=(6, self.cfg.run_mapping_gui and self.cfg.run_mapping and not self.cfg.evaluate),
+                args=(6, self.cfg.run_mapping_gui and self.cfg.run_mapping),
                 name="Mapping GUI",
             ),
         ]

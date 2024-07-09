@@ -782,12 +782,23 @@ class GaussianMapper(object):
 
         if optimize_poses:
             pose_optimizer = self.get_pose_optimizer(frames)
+<<<<<<< HEAD
         scale_invariant = self.supervise_with_prior and self.mode == "prgbd"
 
         loss = 0.0
         # Collect for densification and pruning
         opacity_acm, radii_acm = [], []
         visibility_filter_acm, viewspace_point_tensor_acm = [], []
+=======
+        
+        n_pixel = frames[0].original_image.shape[-2] * frames[0].original_image.shape[-1]
+        loss = 0.0
+        viewspace_point_tensor_list = []
+        visibility_filter_list = []
+        radii_list = []
+        low_opacity_frames = []
+        high_error_frames = []
+>>>>>>> b321e821d12df47eef73a03ff62c5eedd4b8c459
         for view in frames:
 
             current_loss, render_pkg = self.render_compare(view, scale_invariant=scale_invariant)
@@ -804,9 +815,35 @@ class GaussianMapper(object):
             viewspace_point_tensor_acm.append(viewspace_point_tensor)
             radii_acm.append(radii)
 
+<<<<<<< HEAD
             loss += current_loss
 
+=======
+            viewspace_point_tensor_list.append(viewspace_point_tensor)
+            visibility_filter_list.append(visibility_filter)
+            radii_list.append(radii)
+        
+            # Check for low opacity and high error frames
+            low_opacity_mask = opacity.squeeze() < self.loss_params.low_opacity_th
+            if low_opacity_mask.sum() / n_pixel > self.loss_params.low_opacity_ratio:
+                low_opacity_frames.append((view, low_opacity_mask))
+
+            disp_ref = self.video.disps_up[view.uid] if self.video.upsampled else self.video.disps[view.uid]
+            depth_ref = torch.where(disp_ref > 0, 1.0 / disp_ref, disp_ref)
+            err = torch.abs(depth - depth_ref) /  depth_ref
+            high_err_mask = err.squeeze() > self.loss_params.rel_error_th
+            #print(high_err_mask.sum() / n_pixel)
+            if high_err_mask.sum() / n_pixel > self.loss_params.rel_error_ratio:
+                high_error_frames.append((view, high_err_mask))
+
+
+            loss += current_loss
+
+        # NOTE chen: we allow lr_factor to make it possible to change the learning rate on the fly
+        loss = loss / len(frames)
+>>>>>>> b321e821d12df47eef73a03ff62c5eedd4b8c459
         # Regularize scale changes of the Gaussians
+        #loss = loss / len(frames)
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
         loss += self.loss_params.beta * isotropic_loss.mean()
@@ -820,11 +857,12 @@ class GaussianMapper(object):
         # NOTE chen: this is only a valid strategy for standard optimizers
         # if the optimizer has a regularization term (e.g. weight decay), then this changes the trade-off between objective and regularizor!
         # NOTE chen: MonoGS scales their loss with len(frames), while we scale it with sqrt(len(frames))
-        scaled_loss = loss * np.sqrt(len(frames))
+        scaled_loss = loss * np.sqrt(len(frames)) * lr_factor
         scaled_loss.backward()
 
         ### Maybe Densify and Prune before update
         with torch.no_grad():
+<<<<<<< HEAD
             for idx in range(len(viewspace_point_tensor_acm)):
                 # Dont let Gaussians grow too much by forcing radius to not change
                 self.gaussians.max_radii2D[visibility_filter_acm[idx]] = torch.max(
@@ -851,6 +889,43 @@ class GaussianMapper(object):
             if (iter + 1) % self.kf_mng_params.opacity_reset_every == 0 and opacity_reset:
                 self.info("Resetting the opacity of non-visible Gaussians")
                 self.gaussians.reset_opacity_nonvisible(visibility_filter_acm)
+=======
+            # Dont let Gaussians grow too much
+            for viewspace, visibility, radii in zip(viewspace_point_tensor_list, visibility_filter_list, radii_list):
+
+                self.gaussians.max_radii2D[visibility] = torch.max(
+                    self.gaussians.max_radii2D[visibility],
+                    radii[visibility],
+                )
+
+                if densify:
+                    self.gaussians.add_densification_stats(viewspace, visibility)
+
+            if self.last_idx > self.n_last_frames and (iter + 1) % self.kf_mng_params.prune_densify_every == 0:
+                if prune_densify:
+                    # General pruning based on opacity and size + densification
+                    self.gaussians.densify_and_prune(
+                        kf_mng_params.densify_grad_threshold,
+                        kf_mng_params.opacity_th,
+                        kf_mng_params.gaussian_extent,
+                        kf_mng_params.size_threshold,
+                    )
+                if densify and self.last_idx > 30: # FIXME: on the first call to many images have low opacity and too many gaussians are added
+                    print(len(low_opacity_frames), "frames with low opacity")
+                    print(len(high_error_frames), "frames with high error")
+                    ng_before = len(self.gaussians)
+                    #for view, mask in low_opacity_frames:
+                    for view, mask in low_opacity_frames:
+                        self.gaussians.densify_from_mask(view, mask, downsample_factor=1)
+                    for view, mask in high_error_frames:
+                        # NOTE leon: error densification is way more dense, we hace to downscale to compensate.
+                        self.gaussians.densify_from_mask(view, mask, downsample_factor=32) 
+                    # Only print when we added some new Gaussians
+                    if (len(self.gaussians) - ng_before) > 0:
+                        self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity/error")
+
+
+>>>>>>> b321e821d12df47eef73a03ff62c5eedd4b8c459
 
             # Densify in low opacity regions only after the map is stable already
             # (else we waste compute, because densify_and_prune will fill initial holes quickly)
@@ -878,14 +953,15 @@ class GaussianMapper(object):
             for view in frames:
                 update_pose(view)
 
-        return loss.item()
+        return scaled_loss.item()
 
     def covisibility_pruning(self, prune: str = "new", dont_prune_last: int = 1, visibility_thresh: int = 2):
         """Covisibility based pruning.
 
-        If prune is set to "last", we only prune the last n frames. Else we check for all frames if Gaussians are visible in at least k frames.
+        If prune is set to "new", we only prune the last n frames. Else we check for all frames if Gaussians are visible in at least k frames.
         A Gaussian is visible if it touched at least a single pixel in a view.
         """
+        if prune != "new" and prune != "abs": return
         # TODO do these a sanity check in __init__ so we dont get this print just once
         # Sanity checks, so this is not misused
         if dont_prune_last >= len(self.new_cameras):
@@ -997,6 +1073,10 @@ class GaussianMapper(object):
             # Only optimize over 20% of the whole video and always make sure that 30% of each batch is keyframes
             self.map_refinement(
                 num_iters=self.refinement_iters,
+<<<<<<< HEAD
+=======
+                densify=False,
+>>>>>>> b321e821d12df47eef73a03ff62c5eedd4b8c459
                 prune_densify=True,
                 opacity_densify=True,
                 optimize_poses=self.optimize_poses,
