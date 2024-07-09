@@ -194,8 +194,8 @@ class GaussianModel:
                         depth_raw = np.ones(rgb_raw.shape[:2]) * neighbors_scale
                     else:
                         depth_raw = (
-                            np.ones_like(depth_raw)
-                            + (np.random.randn(depth_raw.shape[0], depth_raw.shape[1]) - 0.5) * 0.05
+                            np.ones_like(rgb_raw.shape[:2])
+                            + (np.random.randn(rgb_raw.shape[0], rgb_raw.shape[1]) - 0.5) * 0.05
                         ) * scale
 
             # Introduce random Gaussians, this is how MonoGS works in monocular mode
@@ -740,9 +740,6 @@ class GaussianModel:
             new_n_obs=new_n_obs,
         )
 
-    # FIXME does this initialize correctly if we have a depth hole in this part of the scene?!
-    # NOTE chen: yes it should, because in case we have a hole, we will have NUM_POINTS < MIN_NUM_POINTS, i.e.
-    # we will random initialize based on the median depth of neighboring keyframes
     def densify_w_opacity(self, opacity, cam, min_opacity=0.1):
         low_opacity = torch.where(opacity.squeeze() < min_opacity, True, False)
         # print(f"Low opacity: {low_opacity.sum()/cam.image_height/cam.image_width}")

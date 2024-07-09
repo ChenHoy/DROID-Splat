@@ -376,6 +376,7 @@ class GaussianMapper(object):
         used_mem = 1 - (free_mem / total_mem)
         return used_mem, free_mem
 
+    # FIXME why does this still affect pose metrics when we i) dont feed the result back ii) we dont optimize the poses?
     def map_refinement(
         self,
         num_iters: int = 100,
@@ -405,7 +406,7 @@ class GaussianMapper(object):
             if random_frames is not None:
                 n_refine = int(len(self.cameras) * random_frames)
                 if kf_always is not None and has_nonkf:
-                    n_kf = int(n_refine * kf_always)  # Min. number of keyframes
+                    n_kf = int(len(kf_cams) * kf_always)  # Min. number of keyframes
 
             # Importance sampling is only implemented for keyframes, because we dont want to do a full render of the whole video in the beginning
             if importance_weights is not None:
@@ -519,7 +520,7 @@ class GaussianMapper(object):
                 loss += loss_i
                 # We need to detach loss_i and copy, so the computation graph does not grow too large!
                 if has_holes:
-                    weights.append(4 * loss_i.detach().clone().item()) # Give higher weight to frames with holes
+                    weights.append(4 * loss_i.detach().clone().item())  # Give higher weight to frames with holes
                 else:
                     weights.append(loss_i.detach().clone().item())
 
@@ -558,8 +559,22 @@ class GaussianMapper(object):
                 batches = [frames[i : i + batch_size] for i in range(0, len(frames), batch_size)]
                 loss = 0  # Accumulate logging loss over all batches
                 for batch in batches:
+                    contains_non_kf = any([cam.uid not in self.idx_mapping for cam in batch])
+                    if contains_non_kf:
+                        step_kwargs["opacity_densify"] = (
+                            False  # Dont densify non-keyframes with poor depth initialization
+                        )
+                    elif iter <= self.refine_densify_until:
+                        step_kwargs["opacity_densify"] = True
+
                     loss += self.mapping_step(iter, batch, self.kf_mng_params.refinement, **step_kwargs)
             else:
+                contains_non_kf = any([cam.uid not in self.idx_mapping for cam in frames])
+                if contains_non_kf:
+                    step_kwargs["opacity_densify"] = False  # Dont densify non-keyframes with poor depth initialization
+                elif iter <= self.refine_densify_until:
+                    step_kwargs["opacity_densify"] = True
+
                 loss = self.mapping_step(iter, frames, self.kf_mng_params.refinement, **step_kwargs)
 
             clean_loss = 1 / lr_factor * loss  # Multiply by 1/lr_factor to get actual loss
@@ -996,12 +1011,12 @@ class GaussianMapper(object):
             torch.cuda.empty_cache()
             gc.collect()
 
-        self.info(f"Feeding back into video.map ...")
         # Filter out the non-keyframes which are not stored in the video.object
         only_kf = [cam for cam in self.cameras if cam.uid in self.idx_mapping]
         # Only feedback the poses, since we will not work with the video again
         # TODO chen: do we need a case, where we dont optimize poses during the run, but do it on refinement?
         if self.feedback_poses or self.feedback_disps:
+            self.info(f"Feeding back into video.map ...")
             # HACK allow large differences to the video, else we will filter away occluded regions which we already corrected rightfully
             to_set = self.get_mapping_update(
                 only_kf,

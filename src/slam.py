@@ -361,7 +361,6 @@ class SLAM:
                 self.loop_detector.info("Sending loop candidates ...")
                 loop_queue.put(candidates)
 
-        
         # Free memory
         del self.loop_detector
         torch.cuda.empty_cache()
@@ -762,6 +761,11 @@ class SLAM:
         """Get the poses both for the whole video sequence and only the keyframes for evaluation.
         Poses are in format [B, 7, 1] as lie elements.
         """
+        # FIXME this is not working correctly! When not optimizing anything, we still get a lower ATE RMSE :/
+        # TODO we get the error independently of the optimization, so the bug should be in the conversion here ...
+        # What is the difference between this one here and the traj_filler down below?
+        # TODO safe both to file and compare manually!
+
         # When using Gaussian Mapping, we might have already used the trajectory interpolation during refinement
         if self.cfg.run_mapping and self.cfg.mapping.refinement_iters > 0 and self.cfg.mapping.use_non_keyframes:
             assert (
@@ -779,6 +783,7 @@ class SLAM:
             ), "After adding non-keyframes, Gaussian Mapper contain all frames of the whole video stream!"
             tstamps = list(pose_dict.keys())
 
+            # FIXME is there a bug here? We get way lower error when using these poses even if we dont optimize anything ...
             ordered_poses = dict(sorted(pose_dict.items()))
             est_w2c_all = torch.stack(list(ordered_poses.values()))
             est_c2w_all_lie = SE3.InitFromVec(matrix_to_lie(est_w2c_all)).inv().vec()
