@@ -13,9 +13,9 @@ dependencies:
   - pytorch=2.1
   - cudatoolkit
   - tensorboard
-  - pytorch3d
+  - pytorch3d==0.7.7 # This version is very important!
   - scipy
-  - opencv
+  - opencv==4.9
   - tqdm
   - suitesparse
   - pyyaml
