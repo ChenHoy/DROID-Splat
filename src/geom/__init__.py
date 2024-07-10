@@ -1,25 +1,34 @@
 from typing import Tuple
+import ipdb
 
 import torch
 import lietorch
 from .projective_ops import coords_grid, projective_transform, proj, iproj
 
 
+# NOTE both functions are numerically precise to ~1e-7
 def matrix_to_lie(matrix: torch.Tensor) -> torch.Tensor:
     """Transforms a batch of 4x4 homogenous matrix into a 7D lie vector,
     see https://github.com/princeton-vl/lietorch/issues/14
+
+    PyTorch3D has a different coordinate system:
     """
-    from pytorch3d.transforms import matrix_to_quaternion
+    from pytorch3d.transforms import matrix_to_quaternion, quaternion_multiply
 
     # Ensure we always have a batched tensor
     if matrix.ndim == 2:
         matrix = matrix.unsqueeze(0)
-
     quat = matrix_to_quaternion(matrix[:, :3, :3])
     quat = torch.cat((quat[:, 1:], quat[:, 0][:, None]), 1)  # swap real first to real last
     trans = matrix[:, :3, 3]
-    vec = torch.cat((trans, quat), 1)
+    vec = torch.cat((trans, -1 * quat), 1)  # FIX PyTorch3D diff. coordinate system
     return vec
+
+
+def lie_to_matrix(tensor: torch.Tensor) -> torch.Tensor:
+    """Transform a 7x1 tensor into a 4x4 homogenous matrix."""
+    tensor_lie = lietorch.SE3.InitFromVec(tensor)
+    return tensor_lie.matrix()
 
 
 @torch.no_grad()
