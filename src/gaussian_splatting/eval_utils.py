@@ -2,7 +2,9 @@ import json
 from termcolor import colored
 from tqdm import tqdm
 import ipdb
+import pickle
 from typing import List, Dict, Optional
+from omegaconf import DictConfig
 import os
 
 import numpy as np
@@ -18,7 +20,7 @@ from ..geom import matrix_to_lie
 from evo.core import metrics, sync
 
 # NOTE chen: MonoGS uses PosePath3D, everyone else uses PoseTrajectory3D which seems more compatible with our video structure
-from evo.core.trajectory import PosePath3D, PoseTrajectory3D
+from evo.core.trajectory import PoseTrajectory3D
 from evo.tools.plot import PlotMode, prepare_axis, traj, traj_colormap
 from matplotlib import pyplot as plt
 
@@ -45,7 +47,8 @@ class EvaluatePacket:
         gaussians: GaussianModel = None,
         cameras: List[Camera] = None,
         timestamps: torch.Tensor = None,
-        idx_mapping: Dict = None,
+        cam2buffer: Dict = None,
+        buffer2cam: Dict = None,
     ):
         self.has_gaussians = False
         if gaussians is not None:
@@ -68,10 +71,49 @@ class EvaluatePacket:
         self.cameras = cameras
         self.timestamps = timestamps
         self.gaussians = gaussians
-        self.idx_mapping = idx_mapping
+        self.cam2buffer = cam2buffer
+        self.buffer2cam = buffer2cam
 
     def __str__(self) -> str:
         print("Im getting something: {} {}".format(self.pipeline_params, len(self.cameras)))
+
+
+# TODO Can we filter the Dataset name out of this to make it prettier?
+def create_odometry_csv(results_kf: Dict, results_all: Dict, cfg: DictConfig, input_path: str) -> Dict:
+    csv_dict = {
+        "ate_on_keyframes_only": [True, False],
+        "run_backend": [str(cfg.run_backend), str(cfg.run_backend)],
+        "run_mapping": [str(cfg.run_mapping), str(cfg.run_mapping)],
+        "stride": [str(cfg.stride), str(cfg.stride)],
+        "loop_closure": [
+            str(cfg.tracking.backend.use_loop_closure),
+            str(cfg.tracking.backend.use_loop_closure),
+        ],
+        "loop_detector": [str(cfg.run_loop_detection), str(cfg.run_loop_detection)],
+        "dataset": [input_path, input_path],
+        "mode": [cfg.mode, cfg.mode],
+        "ape": [results_kf["mean"], results_all["mean"]],
+    }
+    return csv_dict
+
+
+# TODO Can we filter the Dataset name out of this to make it prettier?
+def create_rendering_csv(results_kf, results_nonkf, cfg: DictConfig, input_path: str) -> Dict:
+    csv_dict = {
+        "run_backend": [str(cfg.run_backend), str(cfg.run_backend)],
+        "run_mapping": [str(cfg.run_mapping), str(cfg.run_mapping)],
+        "stride": [str(cfg.stride), str(cfg.stride)],
+        "loop_closure": [str(cfg.tracking.backend.use_loop_closure), str(cfg.tracking.backend.use_loop_closure)],
+        "loop_detector": [str(cfg.run_loop_detection), str(cfg.run_loop_detection)],
+        "dataset": [input_path, input_path],
+        "mode": [cfg.mode, cfg.mode],
+        "psnr": [results_kf["mean_psnr"], results_nonkf["mean_psnr"]],
+        "ssim": [results_kf["mean_ssim"], results_nonkf["mean_ssim"]],
+        "lpips": [results_kf["mean_lpips"], results_nonkf["mean_lpips"]],
+        "extra_non_kf": [str(cfg.mapping.use_non_keyframes), str(cfg.mapping.use_non_keyframes)],
+        "eval_on_keyframes": [True, False],
+    }
+    return csv_dict
 
 
 ### Odometry ###
@@ -99,11 +141,12 @@ def evaluate_evo(
         positions_xyz=poses_gt[:, :3], orientations_quat_wxyz=poses_gt[:, 3:], timestamps=np.array(timestamps)
     )
 
-    traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est)
+    traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est)  # This synchronizes according to timestamps
     # Scale correct monocular odometry for a fair comparison if needed
     # NOTE chen: monocular can sometimes even be better than RGBD due to the adjustment
     traj_est_aligned = clone_obj(traj_est)
-    traj_est_aligned.align(traj_ref, correct_scale=monocular)
+    # traj_est_aligned.align_origin(traj_ref) # this only aligns the origins
+    traj_est_aligned.align(traj_ref, correct_scale=monocular)  # this computes an se3 transform to register est on ref
 
     # Get APE statistics
     ape_metric = metrics.APE(metrics.PoseRelation.translation_part)
@@ -452,6 +495,10 @@ def eval_rendering(
     output["mean_psnr"] = float(np.mean(psnr_array))
     output["mean_ssim"] = float(np.mean(ssim_array))
     output["mean_lpips"] = float(np.mean(lpips_array))
+
+    rnd_statistics = {"psnr": psnr_array, "ssim": ssim_array, "lpips": lpips_array}
+    with open(os.path.join(save_dir, "frame_statistics.pkl"), "wb") as f:
+        pickle.dump(rnd_statistics, f)
 
     # Print this in pretty so we can see it
     loss_str = "[Eval] mean PSNR: {}, SSIM: {}, LPIPS: {}".format(
