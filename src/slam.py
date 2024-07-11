@@ -229,10 +229,7 @@ class SLAM:
         os.makedirs(f"{self.output}/evaluation", exist_ok=True)
 
     def update_cam(self, cfg: DictConfig) -> None:
-        """
-        Update the camera intrinsics according to the pre-processing config,
-        such as resize or edge crop
-        """
+        """Update the camera intrinsics according to the pre-processing config, such as resize or edge crop"""
         # resize the input images to crop_size(variable name used in lietorch)
         H, W = float(cfg.data.cam.H), float(cfg.data.cam.W)
         fx, fy = cfg.data.cam.fx, cfg.data.cam.fy
@@ -517,12 +514,17 @@ class SLAM:
         self.info("Backend done!")
 
     def maybe_reanchor_gaussians(self, threshold: float = 0.05) -> None:
-        """Reanchor the Gaussians to follow a big map update. For this purpose we simply track"""
+        """Reanchor the Gaussians to follow a big map update.
+        For this purpose we simply track the pose changes after a backend optimization."""
         unit = self.video.pose_changes.clone()
         unit[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.device)
         delta = pose_distance(self.video.pose_changes, unit)
         to_update = (delta > threshold).nonzero().squeeze()  # Check for frames with large updates
-        if self.gaussian_mapper.warmup < self.frontend.optimizer.count and len(to_update) > 0:
+        if (
+            self.gaussian_mapper is not None
+            and self.gaussian_mapper.warmup < self.frontend.optimizer.count
+            and len(to_update) > 0
+        ):
             self.gaussian_mapper.reanchor_gaussians(to_update, self.video.pose_changes[to_update])
             self.video.pose_changes[to_update] = unit  # Reset the pose update
 
@@ -554,9 +556,8 @@ class SLAM:
 
             # Notify leading Tracking thread, that we finished the current Render optimization
             # -> This avoids both Frontend and Renderer to run at the same time and conflict on depth_video
-            if (
-                self.tracking_finished < 1
-            ):  # Notify Tracking thread only when it is still alive, else we get a deadlock
+            # (Notify Tracking thread only when it is still alive, else we get a deadlock)
+            if self.tracking_finished < 1:
                 with communication_lock:
                     self.mapping_done += 1
                     condTracking.notify()
@@ -567,7 +568,8 @@ class SLAM:
         if self.gaussian_mapper is not None and run:
             self.info(f"Ran Gaussian Mapper {self.gaussian_mapper.count} times before Refinement!")
 
-        # TODO check if the backend is on and already finished, then do another reanchor!
+        if self.cfg.run_backend:
+            self.maybe_reanchor_gaussians()  # If the backend is also running, we reanchor Gaussians when large map changes occur
 
         finished = False
         while not finished and run:
@@ -682,23 +684,8 @@ class SLAM:
         )
         self.info("(Keyframes only) ATE: {}".format(kf_result_ate), logger=log)
         self.info("(All) ATE: {}".format(all_result_ate), logger=log)
-        # TODO Can we filter the Dataset name out of this to make it prettier?
-        # TODO update loop config flag or add another one, because we will likely run a loop closure mechanism on top
         ### Store main results with attributes for ablation/comparison
-        odometry_results = {
-            "ate_on_keyframes_only": [True, False],
-            "run_backend": [str(self.cfg.run_backend), str(self.cfg.run_backend)],
-            "run_mapping": [str(self.cfg.run_mapping), str(self.cfg.run_mapping)],
-            "stride": [str(self.cfg.stride), str(self.cfg.stride)],
-            "loop_closure": [
-                str(self.cfg.tracking.backend.use_loop_closure),
-                str(self.cfg.tracking.backend.use_loop_closure),
-            ],
-            "loop_detector": [str(self.cfg.run_loop_detection), str(self.cfg.run_loop_detection)],
-            "dataset": [stream.input_folder, stream.input_folder],
-            "mode": [self.cfg.mode, self.cfg.mode],
-            "ape": [kf_result_ate["mean"], all_result_ate["mean"]],
-        }
+        odometry_results = eval_utils.create_odometry_csv(kf_result_ate, all_result_ate, self.cfg, stream.input_folder)
         df = pd.DataFrame(odometry_results)
         df.to_csv(os.path.join(eval_path, "odometry", "evaluation_results.csv"), index=False)
 
@@ -724,8 +711,7 @@ class SLAM:
                 kf_cams, kf_tstamps, gaussians, stream, render_cfg, background, save_dir, True, monocular
             )
 
-            ### Evalaute on non-keyframes, which we have never seen during training
-            # NOTE this is the proper metric, that people compare in papers
+            ### Evalaute on non-keyframes, which we have never seen during training (NOTE this is the proper metric, that people compare in papers)
             _, _, nonkf_tstamps = eval_utils.torch_intersect1d(torch.tensor(kf_tstamps), torch.tensor(tstamps))
             nonkf_tstamps = [int(i) for i in nonkf_tstamps]
             nonkf_cams = [all_cams[i] for i in nonkf_tstamps]
@@ -734,23 +720,9 @@ class SLAM:
                 nonkf_cams, nonkf_tstamps, gaussians, stream, render_cfg, background, save_dir, True, monocular
             )
 
-            rendering_results = {
-                "run_backend": [str(self.cfg.run_backend), str(self.cfg.run_backend)],
-                "run_mapping": [str(self.cfg.run_mapping), str(self.cfg.run_mapping)],
-                "stride": [str(self.cfg.stride), str(self.cfg.stride)],
-                "loop_closure": [
-                    str(self.cfg.tracking.backend.use_loop_closure),
-                    str(self.cfg.tracking.backend.use_loop_closure),
-                ],
-                "loop_detector": [str(self.cfg.run_loop_detection), str(self.cfg.run_loop_detection)],
-                "dataset": [stream.input_folder, stream.input_folder],
-                "mode": [self.cfg.mode, self.cfg.mode],
-                "psnr": [kf_rnd_metrics["mean_psnr"], nonkf_rnd_metrics["mean_psnr"]],
-                "ssim": [kf_rnd_metrics["mean_ssim"], nonkf_rnd_metrics["mean_ssim"]],
-                "lpips": [kf_rnd_metrics["mean_lpips"], nonkf_rnd_metrics["mean_lpips"]],
-                "extra_non_kf": [str(self.cfg.mapping.use_non_keyframes), str(self.cfg.mapping.use_non_keyframes)],
-                "eval_on_keyframes": [True, False],
-            }
+            rendering_results = eval_utils.create_rendering_csv(
+                kf_rnd_metrics, nonkf_rnd_metrics, self.cfg, stream.input_folder
+            )
             # Check if the dataset has depth images
             if len(stream.depth_paths) != 0:
                 rendering_results["l1_depth"] = [kf_rnd_metrics["mean_l1"], nonkf_rnd_metrics["mean_l1"]]
@@ -760,45 +732,70 @@ class SLAM:
     def get_trajectories(self, stream, gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None):
         """Get the poses both for the whole video sequence and only the keyframes for evaluation.
         Poses are in format [B, 7, 1] as lie elements.
-        """
-        # FIXME this is not working correctly! When not optimizing anything, we still get a lower ATE RMSE :/
-        # TODO we get the error independently of the optimization, so the bug should be in the conversion here ...
-        # What is the difference between this one here and the traj_filler down below?
-        # TODO safe both to file and compare manually!
 
-        # When using Gaussian Mapping, we might have already used the trajectory interpolation during refinement
+        NOTE the trajectory filler will create keyframe poses, that slightly deviate due to how the interpolation works (we solve local motion_only BA problems)
+        NOTE the poses from GaussianMapper are stored as 4x4 homogeneous matrices. When we convert them back into a Lie algebra the mapping is not unique
+            (Example: a 180° rotation can be +180° or -180°, i.e. a sign flip of the quaternion).
+        NOTE since the evaluation frame evo, will register the estimated trajectory to the groundtruth with a single SE3 transform
+        in a best fit way, the sign does not matter as much and might make small numerical differences
+        """
+        from .geom import matrix_to_lie, lie_to_matrix, lie_quat_swap_convention
+
+        # When using Gaussian Mapping w. Refinement, we have already interpolated the trajectory and might get
+        # better results than when using only the SLAM system for interpolation
         if self.cfg.run_mapping and self.cfg.mapping.refinement_iters > 0 and self.cfg.mapping.use_non_keyframes:
             assert (
                 gaussian_mapper_last_state is not None
             ), "Missing GaussianMapper state for evaluation even though we ran Mapping!"
-            pose_dict = self.gaussian_mapper.get_camera_trajectory(gaussian_mapper_last_state.cameras)
-            kf_ids = torch.tensor(list(gaussian_mapper_last_state.idx_mapping.keys()))
+            est_w2c_all_matr = self.gaussian_mapper.get_camera_trajectory(gaussian_mapper_last_state.cameras)
+            est_w2c_all_lie = matrix_to_lie(est_w2c_all_matr)
+            # Evo expects c2w convention (I think)
+            est_c2w_all_lie = SE3.InitFromVec(est_w2c_all_lie).inv().vec()
+
+            ## Get timestamps and make sanity check, that Gaussian Mapper has the same
+            kf_ids = torch.tensor(list(gaussian_mapper_last_state.cam2buffer.keys()))
             kf_tstamps = self.video.timestamp[: self.video.counter.value].int().cpu()
-            # Sanity checks
             assert (
                 (kf_ids == kf_tstamps).all().item()
-            ), "Gaussian Mapper should contain the same keyframes as in DepthVideo!"
-            assert len(list(pose_dict.keys())) == len(
+            ), """Gaussian Mapper should contain the keyframes at the same position as in 
+            global timestamps from the Video Buffer after interpolation!"""
+            assert len(est_w2c_all_matr) == len(
                 stream
-            ), "After adding non-keyframes, Gaussian Mapper contain all frames of the whole video stream!"
-            tstamps = list(pose_dict.keys())
+            ), """After adding non-keyframes, Gaussian Mapper contain 
+            all frames of the whole video stream!"""
+            tstamps = np.arange(len(est_w2c_all_matr)).tolist()
 
-            # FIXME is there a bug here? We get way lower error when using these poses even if we dont optimize anything ...
-            ordered_poses = dict(sorted(pose_dict.items()))
-            est_w2c_all = torch.stack(list(ordered_poses.values()))
-            est_c2w_all_lie = SE3.InitFromVec(matrix_to_lie(est_w2c_all)).inv().vec()
-            est_c2w_kf_lie = est_c2w_all_lie[kf_ids]
-            kf_tstamps = kf_tstamps.cpu().int().tolist()
+            est_c2w_kf_lie, est_w2c_kf_lie = est_c2w_all_lie[kf_ids], est_w2c_all_lie[kf_ids]
+            est_w2c_kf_matr, est_c2w_kf_matr = est_w2c_all_matr[kf_ids], lie_to_matrix(est_c2w_kf_lie)
+            # Take from video directly without interpolation optimization
+            # vid_w2c_kf_lie = self.video.poses[: self.video.counter.value]
+            # vid_c2w_kf_lie = SE3.InitFromVec(vid_w2c_kf_lie).inv().vec()
+            # vid_w2c_kf_matr, vid_c2w_kf_matr = lie_to_matrix(vid_w2c_kf_lie), lie_to_matrix(vid_c2w_kf_lie)
+
+            kf_tstamps = kf_tstamps.tolist()
+
         else:
             # NOTE chen: even if we have optimized the poses with the GaussianMapper, we would have fed them back
             kf_tstamps = self.video.timestamp[: self.video.counter.value].int().cpu().tolist()
             est_w2c_all, tstamps = self.traj_filler(stream, return_tstamps=True)
             est_c2w_all_lie = est_w2c_all.inv().vec().cpu()  # 7x1 Lie algebra
-            est_c2w_kf_lie = est_c2w_all_lie[kf_tstamps]
 
-        est_c2w_all_lie, est_c2w_kf_lie = est_c2w_all_lie.cpu().numpy(), est_c2w_kf_lie.cpu().numpy()
-        gt_c2w_all_lie = eval_utils.get_gt_c2w_from_stream(stream).cpu().numpy()
+            # NOTE the trajectory filler will create keyframe poses, that slightly deviate
+            # est_c2w_kf_lie = est_c2w_all_lie[kf_tstamps]
+            # Take from video directly without interpolation optimization
+            est_w2c_kf_lie = self.video.poses[: self.video.counter.value]
+            est_c2w_kf_lie = SE3.InitFromVec(est_w2c_kf_lie).inv().vec()
+
+        est_c2w_all_lie, est_c2w_kf_lie = est_c2w_all_lie.cpu(), est_c2w_kf_lie.cpu()
+        gt_c2w_all_lie = eval_utils.get_gt_c2w_from_stream(stream).float().cpu()
         gt_c2w_kf_lie = gt_c2w_all_lie[kf_tstamps]
+
+        # Evo evaluation package assumes lie algebras to be in form [tx, ty, tz, qw, qx, qy, qz]
+        est_c2w_all_lie = lie_quat_swap_convention(est_c2w_all_lie).numpy()
+        est_c2w_kf_lie = lie_quat_swap_convention(est_c2w_kf_lie).numpy()
+        gt_c2w_all_lie = lie_quat_swap_convention(gt_c2w_all_lie).numpy()
+        gt_c2w_kf_lie = lie_quat_swap_convention(gt_c2w_kf_lie).numpy()
+
         return est_c2w_all_lie, est_c2w_kf_lie, gt_c2w_all_lie, gt_c2w_kf_lie, kf_tstamps, tstamps
 
     def get_all_cams_for_rendering(
