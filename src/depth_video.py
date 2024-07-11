@@ -10,7 +10,7 @@ import droid_backends
 
 from .droid_net import cvx_upsample
 from .geom import projective_ops as pops
-from .geom import matrix_to_lie, align_scale_and_shift
+from .geom import matrix_to_lie, align_scale_and_shift, check_and_correct_transform
 from .geom.ba import bundle_adjustment
 
 from .gaussian_splatting.camera_utils import Camera
@@ -334,10 +334,11 @@ class DepthVideo:
             # [7, 1]
             if use_gt:
                 c2w = lietorch.SE3(self.poses_gt[index].clone()).to(device)
+                w2c = c2w.inv().vec()
             else:
-                w2c = lietorch.SE3(self.poses[index].clone()).to(device)
-                c2w = w2c.inv()
-            return image, est_depth, depth_prior, intrinsics, c2w, static_mask
+                w2c = self.poses[index].clone().to(device)
+
+            return image, est_depth, depth_prior, intrinsics, w2c, static_mask
 
     def set_mapping_item(self, index: List[torch.Tensor], poses: List[torch.Tensor], depths: List[torch.Tensor]):
         """Set a part of the video from the Rendering module"""
@@ -381,15 +382,18 @@ class DepthVideo:
                 # We work with downscaled resolution. This means, we need to upsample the disparities in tracking
                 else:
                     self.disps[index] = torch.where(
-                        valid[:, 0],
-                        disps[:, 0].clone().detach().to(self.device),
-                        self.disps[index],
+                        valid[:, 0], disps[:, 0].clone().detach().to(self.device), self.disps[index]
                     )
 
             if has_poses:
                 w2c = poses.clone().detach().to(self.device)  # [4, 4] homogenous matrix
                 w2c_vec = matrix_to_lie(w2c)  # [7, 1] Lie element
-                self.poses[index] = lietorch.SE3.InitFromVec(w2c_vec).vec()
+                # Since Matrix2Lie is not unique, we need to check for sign flips!
+                vid_w2c_vec = self.poses[index].clone()
+                corrected = check_and_correct_transform(w2c_vec, vid_w2c_vec)
+                # Sanity check: Always leave the first pose fixed
+                valid_idx = torch.tensor(index)[torch.tensor(index) > 0]
+                self.poses[valid_idx] = corrected[torch.tensor(index) > 0]
 
         self.dirty[index] = True  # Mark frames for visualization
 
@@ -480,7 +484,6 @@ class DepthVideo:
         # Rescale the external disparities
         self.disps_sens = self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
         self.disps_sens_up = self.disps_sens_up * self.scales[:, None, None] + self.shifts[:, None, None]
-        self.disps_sens.clamp_(min=1e-5)
         # Reset the scale and shift parameters to initial state
         self.scales = torch.ones_like(self.scales, device=self.device)
         self.shifts = torch.zeros_like(self.shifts, device=self.device)
@@ -564,6 +567,8 @@ class DepthVideo:
             # Reassigning intrinsics after optimization
             if self.opt_intr:
                 self.intrinsics[: self.counter.value] = self.intrinsics[intrinsic_common_id]
+
+            self.mapping_dirty[t0:t1] = True
 
     def linear_align_prior(self) -> None:
         """Do a linear alignmnet between the prior and the current map after initialization.
@@ -663,3 +668,5 @@ class DepthVideo:
                 # After optimizing the prior, we need to update the disps_sens and reset the scales
                 # only then can we use global BA and intrinsics optimization with the CUDA kernel later
                 self.reset_prior()
+
+                self.mapping_dirty[t0:t1] = True
