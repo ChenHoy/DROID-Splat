@@ -38,7 +38,8 @@ dependencies:
     - PyOpenGL-accelerate  # Installing this manually works, using conda does not
     - glfw
     - imgviz
-    - glm
+      # - glm
+    - PyGLM # This substitutes glm
     - dask
     - faiss-gpu
     - gdown
