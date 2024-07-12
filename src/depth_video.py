@@ -70,9 +70,9 @@ class DepthVideo:
 
         self.disps = torch.ones(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         self.disps_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
-        # Estimated Uncertainty weights for Optimization reduced for each node from factor graph
-        self.uncertainty = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float)
-        self.uncertainty_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
+        # Estimated confidence weights for Optimization reduced for each node from factor graph
+        self.confidence = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float)
+        self.confidence_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
 
         self.disps_sens_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
         self.disps_sens = torch.zeros(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
@@ -244,12 +244,12 @@ class DepthVideo:
         self,
         idx: Optional[torch.Tensor] = None,
         radius: int = 2,
-        min_count: int = 2,
-        bin_thresh: float = 0.1,
-        min_disp_thresh: float = 0.01,
-        unc_threshold: float = 0.1,
-        use_multiview_consistency: bool = True,
-        use_uncertainty: bool = True,
+        mv_count_th: int = 2,
+        bin_th: float = 0.1,
+        min_disp_th: float = 0.01,
+        conf_th: float = 0.1,
+        multiview: bool = True,
+        uncertainty: bool = True,
         return_mask: bool = False,
     ) -> None:
         """Filter the map based on consistency across multiple views and uncertainty.
@@ -274,28 +274,28 @@ class DepthVideo:
             if self.upsampled:
                 disps = torch.index_select(self.disps_up, 0, dirty_index).clone()
                 intrinsics = self.intrinsics[0] * self.scale_factor
-                if use_uncertainty:
-                    unc = torch.index_select(self.uncertainty_up, 0, dirty_index).clone()
+                if uncertainty:
+                    conf = torch.index_select(self.confidence_up, 0, dirty_index).clone()
             else:
                 disps = torch.index_select(self.disps, 0, dirty_index).clone()
                 intrinsics = self.intrinsics[0]
-                if use_uncertainty:
-                    unc = torch.index_select(self.uncertainty, 0, dirty_index).clone()
+                if uncertainty:
+                    conf = torch.index_select(self.confidence, 0, dirty_index).clone()
 
         mask = torch.ones_like(disps, dtype=torch.bool)
-        if use_multiview_consistency:
+        if multiview:
             # Only take pixels where multiple points are consistent across views and they do not have an outlier disparity
-            thresh = bin_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
+            thresh = bin_th * torch.ones_like(disps.mean(dim=[1, 2]))
             if self.upsampled:
                 count = droid_backends.depth_filter(self.poses, self.disps_up, intrinsics, dirty_index, thresh)
             else:
                 count = droid_backends.depth_filter(self.poses, self.disps, intrinsics, dirty_index, thresh)
-            mv_mask = (count >= min_count) & (disps > min_disp_thresh * disps.mean(dim=[1, 2], keepdim=True))
+            mv_mask = (count >= mv_count_th) & (disps > min_disp_th * disps.mean(dim=[1, 2], keepdim=True))
             mask = mask & mv_mask
 
-        if use_uncertainty:
-            unc_mask = unc > unc_threshold
-            mask = mask & unc_mask
+        if uncertainty:
+            conf_mask = conf > conf_th
+            mask = mask & conf_mask
 
         disps[~mask] = 0.0  # Filter away invalid points
         self.disps_clean[dirty_index] = disps
@@ -414,8 +414,8 @@ class DepthVideo:
         disps_up = cvx_upsample(self.disps[ix].unsqueeze(dim=-1), mask)  # [b, h, w, 1]
         self.disps_up[ix] = disps_up.squeeze()  # [b, h, w]
 
-        uncertainty_up = cvx_upsample(self.uncertainty[ix].unsqueeze(-1), mask)  # [b, h, w, 1]
-        self.uncertainty_up[ix] = uncertainty_up.squeeze()  # [b, h, w]
+        confidence_up = cvx_upsample(self.confidence[ix].unsqueeze(-1), mask)  # [b, h, w, 1]
+        self.confidence_up[ix] = confidence_up.squeeze()  # [b, h, w]
 
     def normalize(self):
         """normalize depth and poses"""
@@ -444,10 +444,10 @@ class DepthVideo:
 
         return coords, valid_mask
 
-    def reduce_uncertainties(self, weights: torch.Tensor, ii: torch.Tensor, strategy: str = "avg") -> torch.Tensor:
+    def reduce_confidence(self, weights: torch.Tensor, ii: torch.Tensor, strategy: str = "avg") -> torch.Tensor:
         """Given the factor graph for the scene, we optimize poses at different camera locations.
         Each location/pose is a node in the graph and can have multiple edges to other nodes.
-        For each edge we have a predicted uncertainty weight map given the learned feature correlations.
+        For each edge we have a predicted confidence weight map given the learned feature correlations.
         We are interested in viewing these uncertainties or use them later on, as they should correlate
         with moving objects and pixels/points that do not contribute to a good reconstruction.
         Given the indices of an optimization window we reduce edges to get a single uncertainty estimate
@@ -456,9 +456,9 @@ class DepthVideo:
         args:
         ---
         weight [torch.Tensor]: Weight tensor of shape [len(nodes), 2, ht // 8, wd // 8]. Optimization weights for bundle adjustment.
-            Each point is a vector [u_x, u_y] \in [0, 1], which measures the uncertainty for x- and y-components.
+            Each point is a vector [u_x, u_y] \in [0, 1], which measures the confidence for x- and y-components.
         ii [torch.Tensor]: Indices of source nodes (We go from i to j, i.e. we have edges e_ij) with same length as jj.
-        strategy [str]: How to reduce across edges. Choices: (avg, max). Given multiple uncertainty weight maps for
+        strategy [str]: How to reduce across edges. Choices: (avg, max). Given multiple confidence weight maps for
             each pixel, it is unclear how to correctly reduce this. In the end these are optimal to compute correct camera motion
             and static scene maps. Which edge contributes more to this goal is not straight-forward.
         """
@@ -530,9 +530,9 @@ class DepthVideo:
         with self.get_lock():
 
             # Store the uncertainty maps for source frames, that will get updated
-            uncertainty, idx = self.reduce_uncertainties(weight, ii)
+            confidence, idx = self.reduce_confidence(weight, ii)
             # Uncertainties are for [x, y] directions -> Take norm to get single scalar
-            self.uncertainty[idx] = torch.norm(uncertainty, dim=1)
+            self.confidence[idx] = torch.norm(confidence, dim=1)
 
             # [t0, t1] window of bundle adjustment optimization
             if t1 is None:
@@ -570,7 +570,7 @@ class DepthVideo:
 
             self.mapping_dirty[t0:t1] = True
 
-    def linear_align_prior(self) -> None:
+    def linear_align_prior(self, min_num_points: int=300) -> None:
         """Do a linear alignmnet between the prior and the current map after initialization.
         This strategy is used to align the scales and shifts before running Bundle Adjustment.
 
@@ -582,11 +582,13 @@ class DepthVideo:
         valid_d = self.filter_map(
             idx=torch.arange(self.counter.value - 1, device=self.device),
             radius=1,
-            use_multiview_consistency=True,
-            bin_thresh=0.005,
-            min_count=2,
+            multiview=True,
+            bin_th=0.005,
+            mv_count_th=2,
             return_mask=True,
         )
+        if valid_d.sum() < min_num_points:
+            return
 
         if self.upsampled:
             # Map gets filtered at highest resolution, but scale optimization always uses self.disps_sens not self.disps_sens_up
@@ -612,9 +614,9 @@ class DepthVideo:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
             # Store the uncertainty maps for source frames, that will get updated
-            uncertainty, idx = self.reduce_uncertainties(weight, ii)
+            confidence, idx = self.reduce_confidence(weight, ii)
             # Uncertainties are for [x, y] directions -> Take norm to get single scalar
-            self.uncertainty[idx] = torch.norm(uncertainty, dim=1)
+            self.confidence[idx] = torch.norm(confidence, dim=1)
 
             # Precondition
             self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
