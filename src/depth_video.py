@@ -314,6 +314,10 @@ class DepthVideo:
                 static_mask = self.static_masks[index].clone().to(device)  # [H, W]
                 intrinsics = self.intrinsics[0].clone().contiguous().to(device) * s  # [4]
                 disp_prior = self.disps_sens_up[index].clone().to(device)  # [H, W]
+
+                print((self.disps_sens_up.sum(dim=[1, 2])>0).sum())
+
+
             else:
                 # Color is always stored in the original resolution, downsample here to match
                 image = self.images[index, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].clone()
@@ -477,13 +481,19 @@ class DepthVideo:
         This makes it possible to continue to optimize them, but still provide the correct disps_sens to the
         CUDA kernel for global BA in the backend.
         """
+    
         # Rescale the external disparities
+        #print((self.disps_sens_up.sum(dim=[1, 2])>0).sum())
+
         self.disps_sens = self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
         self.disps_sens_up = self.disps_sens_up * self.scales[:, None, None] + self.shifts[:, None, None]
-        self.disps_sens.clamp_(min=1e-5)
+        #self.disps_sens.clamp_(min=1e-5)
         # Reset the scale and shift parameters to initial state
         self.scales = torch.ones_like(self.scales, device=self.device)
         self.shifts = torch.zeros_like(self.shifts, device=self.device)
+        #print((self.disps_sens_up.sum(dim=[1, 2])>0).sum())
+
+
 
     def distance(self, ii=None, jj=None, beta=0.3, bidirectional=True):
         """frame distance metric, where distance = sqrt((u(ii) - u(jj->ii))^2 + (v(ii) - v(jj->ii))^2)"""
@@ -565,7 +575,7 @@ class DepthVideo:
             if self.opt_intr:
                 self.intrinsics[: self.counter.value] = self.intrinsics[intrinsic_common_id]
 
-    def linear_align_prior(self) -> None:
+    def linear_align_prior(self, eps: float=0.05) -> None:
         """Do a linear alignmnet between the prior and the current map after initialization.
         This strategy is used to align the scales and shifts before running Bundle Adjustment.
 
@@ -583,6 +593,10 @@ class DepthVideo:
             return_mask=True,
         )
 
+        if valid_d.sum() < 300:
+            print(colored("Not enough valid points for linear optimization!", "red"))
+            return
+
         if self.upsampled:
             # Map gets filtered at highest resolution, but scale optimization always uses self.disps_sens not self.disps_sens_up
             s = self.scale_factor
@@ -591,6 +605,13 @@ class DepthVideo:
         scale_t, shift_t, error_t = align_scale_and_shift(
             self.disps_sens[: self.counter.value - 1], self.disps[: self.counter.value - 1], valid_d
         )
+
+        scale_t[torch.isnan(scale_t)], shift_t[torch.isnan(shift_t)] = 1.0, 0.0
+        valid_scale = scale_t > eps
+        scale_t[~valid_scale] = 1.0
+
+        #print("Frames with wrong scale: ", (~valid_scale).sum().item())
+
         scale_t[torch.isnan(scale_t)], shift_t[torch.isnan(shift_t)] = 1.0, 0.0
         self.scales[: self.counter.value - 1], self.shifts[: self.counter.value - 1] = scale_t, shift_t
         self.reset_prior()  # Reset the prior and update disps_sens to fit the map
@@ -602,6 +623,8 @@ class DepthVideo:
         We optimize scale and shift parameters on top of the scene disparity.
         """
         with self.get_lock():
+            print((self.disps_sens_up.sum(dim=[1, 2])>0).sum())
+
             # [t0, t1] window of bundle adjustment optimization
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
@@ -612,6 +635,8 @@ class DepthVideo:
             self.uncertainty[idx] = torch.norm(uncertainty, dim=1)
 
             # Precondition
+
+
             self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
 
             # Block coordinate descent optimization
@@ -663,3 +688,5 @@ class DepthVideo:
                 # After optimizing the prior, we need to update the disps_sens and reset the scales
                 # only then can we use global BA and intrinsics optimization with the CUDA kernel later
                 self.reset_prior()
+
+            print((self.disps_sens_up.sum(dim=[1, 2])>0).sum())

@@ -80,6 +80,7 @@ class GaussianMapper(object):
         # Refinement parameters
         self.refinement_iters = cfg.mapping.refinement_iters
         self.refine_w_importance_sampling = cfg.mapping.refine_w_importance_sampling
+        self.refine_lr_factor = cfg.mapping.refine_lr_factor
         self.use_non_keyframes = cfg.mapping.use_non_keyframes
         self.refine_kf_at_least = cfg.mapping.keyframes_at_least
         self.refinement_bs = cfg.mapping.refinement_bs  # Batch size during refinement
@@ -255,6 +256,7 @@ class GaussianMapper(object):
             # update intrinsics in case we use opt_intrinsics
             cam.update_intrinsics(intrinsics, color.shape[-2:], self.z_near, self.z_far)
             if self.mode == "prgbd":
+                depth_prior = depth_prior.detach()
                 cam.depth_prior = depth_prior.detach()  # Update prior in case of scale_change
             cam.depth = depth.detach()
             cam.update_RT(R, T)
@@ -782,23 +784,14 @@ class GaussianMapper(object):
 
         if optimize_poses:
             pose_optimizer = self.get_pose_optimizer(frames)
-<<<<<<< HEAD
         scale_invariant = self.supervise_with_prior and self.mode == "prgbd"
 
         loss = 0.0
         # Collect for densification and pruning
-        opacity_acm, radii_acm = [], []
-        visibility_filter_acm, viewspace_point_tensor_acm = [], []
-=======
-        
         n_pixel = frames[0].original_image.shape[-2] * frames[0].original_image.shape[-1]
-        loss = 0.0
-        viewspace_point_tensor_list = []
-        visibility_filter_list = []
-        radii_list = []
-        low_opacity_frames = []
-        high_error_frames = []
->>>>>>> b321e821d12df47eef73a03ff62c5eedd4b8c459
+        visibility_filter_acm, viewspace_point_tensor_acm, radii_acm = [], [], []
+        low_opacity_frames, high_error_frames = [], []
+
         for view in frames:
 
             current_loss, render_pkg = self.render_compare(view, scale_invariant=scale_invariant)
@@ -807,24 +800,16 @@ class GaussianMapper(object):
                 continue
 
             visibility_filter, viewspace_point_tensor = render_pkg["visibility_filter"], render_pkg["viewspace_points"]
-            opacity, radii = render_pkg["opacity"], render_pkg["radii"]
+            depth, opacity, radii = render_pkg["depth"], render_pkg["opacity"], render_pkg["radii"]
 
             # Accumulate for after loss backpropagation
-            opacity_acm.append((view, render_pkg["opacity"]))
             visibility_filter_acm.append(visibility_filter)
             viewspace_point_tensor_acm.append(viewspace_point_tensor)
             radii_acm.append(radii)
-
-<<<<<<< HEAD
-            loss += current_loss
-
-=======
-            viewspace_point_tensor_list.append(viewspace_point_tensor)
-            visibility_filter_list.append(visibility_filter)
-            radii_list.append(radii)
         
-            # Check for low opacity and high error frames
+            #Check for low opacity and high error frames
             low_opacity_mask = opacity.squeeze() < self.loss_params.low_opacity_th
+            #print(low_opacity_mask.sum() / n_pixel)
             if low_opacity_mask.sum() / n_pixel > self.loss_params.low_opacity_ratio:
                 low_opacity_frames.append((view, low_opacity_mask))
 
@@ -841,14 +826,12 @@ class GaussianMapper(object):
 
         # NOTE chen: we allow lr_factor to make it possible to change the learning rate on the fly
         loss = loss / len(frames)
->>>>>>> b321e821d12df47eef73a03ff62c5eedd4b8c459
         # Regularize scale changes of the Gaussians
         #loss = loss / len(frames)
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
         loss += self.loss_params.beta * isotropic_loss.mean()
         # NOTE chen: we allow lr_factor to make it possible to change the learning rate on the fly
-        loss = loss / len(frames) * lr_factor
 
         # NOTE chen: this can happen we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
@@ -862,44 +845,16 @@ class GaussianMapper(object):
 
         ### Maybe Densify and Prune before update
         with torch.no_grad():
-<<<<<<< HEAD
-            for idx in range(len(viewspace_point_tensor_acm)):
-                # Dont let Gaussians grow too much by forcing radius to not change
-                self.gaussians.max_radii2D[visibility_filter_acm[idx]] = torch.max(
-                    self.gaussians.max_radii2D[visibility_filter_acm[idx]],
-                    radii_acm[idx][visibility_filter_acm[idx]],
-                )
-                self.gaussians.add_densification_stats(viewspace_point_tensor_acm[idx], visibility_filter_acm[idx])
-
-            # Prune and Densify
-            if (
-                self.last_idx > self.n_last_frames
-                and (iter + 1) % self.kf_mng_params.prune_densify_every == 0
-                and prune_densify
-            ):
-                # General pruning based on opacity and size + densification
-                self.gaussians.densify_and_prune(
-                    kf_mng_params.densify_grad_threshold,
-                    kf_mng_params.opacity_th,
-                    kf_mng_params.gaussian_extent,
-                    kf_mng_params.size_threshold,
-                )
-
-            # Opacity reset
-            if (iter + 1) % self.kf_mng_params.opacity_reset_every == 0 and opacity_reset:
-                self.info("Resetting the opacity of non-visible Gaussians")
-                self.gaussians.reset_opacity_nonvisible(visibility_filter_acm)
-=======
             # Dont let Gaussians grow too much
-            for viewspace, visibility, radii in zip(viewspace_point_tensor_list, visibility_filter_list, radii_list):
+            for viewspace, visibility, radii in zip(viewspace_point_tensor_acm, visibility_filter_acm, radii_acm):
 
                 self.gaussians.max_radii2D[visibility] = torch.max(
                     self.gaussians.max_radii2D[visibility],
                     radii[visibility],
                 )
 
-                if densify:
-                    self.gaussians.add_densification_stats(viewspace, visibility)
+
+                self.gaussians.add_densification_stats(viewspace, visibility)
 
             if self.last_idx > self.n_last_frames and (iter + 1) % self.kf_mng_params.prune_densify_every == 0:
                 if prune_densify:
@@ -910,22 +865,7 @@ class GaussianMapper(object):
                         kf_mng_params.gaussian_extent,
                         kf_mng_params.size_threshold,
                     )
-                if densify and self.last_idx > 30: # FIXME: on the first call to many images have low opacity and too many gaussians are added
-                    print(len(low_opacity_frames), "frames with low opacity")
-                    print(len(high_error_frames), "frames with high error")
-                    ng_before = len(self.gaussians)
-                    #for view, mask in low_opacity_frames:
-                    for view, mask in low_opacity_frames:
-                        self.gaussians.densify_from_mask(view, mask, downsample_factor=1)
-                    for view, mask in high_error_frames:
-                        # NOTE leon: error densification is way more dense, we hace to downscale to compensate.
-                        self.gaussians.densify_from_mask(view, mask, downsample_factor=32) 
-                    # Only print when we added some new Gaussians
-                    if (len(self.gaussians) - ng_before) > 0:
-                        self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity/error")
 
-
->>>>>>> b321e821d12df47eef73a03ff62c5eedd4b8c459
 
             # Densify in low opacity regions only after the map is stable already
             # (else we waste compute, because densify_and_prune will fill initial holes quickly)
@@ -934,11 +874,19 @@ class GaussianMapper(object):
                 and opacity_densify
                 and self.count > self.kf_mng_params.opacity_densify_after
             ):
+
+                print(len(low_opacity_frames), "frames with low opacity")
+                print(len(high_error_frames), "frames with high error")
                 ng_before = len(self.gaussians)
-                for view, opacity in opacity_acm:
-                    self.gaussians.densify_w_opacity(opacity, view)
+                #for view, mask in low_opacity_frames:
+                for view, mask in low_opacity_frames:
+                    self.gaussians.densify_from_mask(view, mask, downsample_factor=1)
+                for view, mask in high_error_frames:
+                    # NOTE leon: error densification is way more dense, we hace to downscale to compensate.
+                    self.gaussians.densify_from_mask(view, mask, downsample_factor=32) 
+                # Only print when we added some new Gaussians
                 if (len(self.gaussians) - ng_before) > 0:
-                    self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity")
+                    self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity/error")
 
         ### Update states
         self.gaussians.optimizer.step()
@@ -1073,16 +1021,13 @@ class GaussianMapper(object):
             # Only optimize over 20% of the whole video and always make sure that 30% of each batch is keyframes
             self.map_refinement(
                 num_iters=self.refinement_iters,
-<<<<<<< HEAD
-=======
-                densify=False,
->>>>>>> b321e821d12df47eef73a03ff62c5eedd4b8c459
                 prune_densify=True,
                 opacity_densify=True,
                 optimize_poses=self.optimize_poses,
                 random_frames=self.refine_random_subset,
                 kf_always=self.refine_kf_at_least,
                 importance_sampling=self.refine_w_importance_sampling,
+                lr_factor=self.refine_lr_factor,
             )
             self.info(f"Gaussians after Map Refinement: {len(self.gaussians)}")
             self.info("Mapping refinement finished")

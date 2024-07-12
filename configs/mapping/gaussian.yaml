@@ -2,13 +2,14 @@ warmup: 15 # Wait until tracking gets to this frame
 delay: 3 # Delay between tracking and mapping (This should be >= 2, because else )
 
 # Map Refinement after we are done with everything
-refinement_iters: 1 # Final Optimization iterations for all views
+refinement_iters: 50 # Final Optimization iterations for all views
 refinement_bs: 20 # Batch size for refinement (Use <= 70 to avoid OOM!)
 refine_random_subset: 0.1 # Always optimize over a random subset of frames with size % of all to save compute
 refine_w_importance_sampling: True # Use importance sampling for the final optimization
-use_non_keyframes: True # Use non-keyframes during map refinement
+refine_lr_factor: 1
+use_non_keyframes: False # Use non-keyframes during map refinement
 keyframes_at_least: 0.9 # Always make sure to have >30% keyframes in a batch
-refine_densify_until: 50 # Dont densify after this many iterations, ALL gaussians are well optimized
+refine_densify_until: 0 # Dont densify after this many iterations, ALL gaussians are well optimized
 
 # Backpropagate the Render updates into Tracking system
 # NOTE this is actually really important as even with our good initialization, the early Gaussians are not that good!
@@ -20,11 +21,11 @@ optimize_poses: False
 
 # NOTE chen: please use MORE ITERATIONS than prune_densify_every! 
 # it is important to optimize newly introduced Gaussians due to densification!!!
-mapping_iters: 14 # Optimization iterations for selected views
+mapping_iters: 30 # Optimization iterations for selected views
 # These 2 flags filter out noisy points before Rendering Optimization
 filter_multiview: True # Only initialize Gaussians that are consistent in multiple views
 filter_uncertainty: False # Only use very certain points for intializing Gaussians
-use_prior_for_supervision: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
+use_prior_for_supervision: False # Use the prior for supervision. If not, then use the current filtered map from SLAM
 batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
 save_renders: False # Store some rendered images for debugging
 
@@ -37,14 +38,14 @@ keyframes:
   densify_every: 3 # Densify Gaussians every k updates
   prune_every: 2 # Prune Gaussians every k updates
   # How often to prune and densify gaussians during optimization
-  prune_densify_every: 5 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
+  prune_densify_every: 3 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
   # Densify Gaussians based on opacity only after k Mapper updates
   opacity_densify_after: 10  # NOTE we usually run the Mapper ~30-40 times on normal videos
   # NOTE: Using the absolute visibility check is more wasteful as we need to count the visiblity of each Gaussian!
   # -> Use 'new' for faster performance
   opacity_reset_every: 5 # Reset the opacity of non-visible Gaussians every k updates
   prune_mode: "new" # ["abs", "new"] How to prune: either check for covisible frames everywhere or just in the last n frames
-  prune_last: 5 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
+  prune_last: 10 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
   visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
 
   filter: # Parameter for filtering incoming points from the SLAM system
@@ -53,7 +54,7 @@ keyframes:
     confidence_thresh: 0.025 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
 
   mapping:
-    densify_grad_threshold: 0.0005 # Gradient clipping
+    densify_grad_threshold: 0.0002 # Gradient clipping
     size_threshold: 20 # Max screen size
     opacity_th: 0.01 # Min opacity
     gaussian_extent: 3 # Affects densification, i.e. the larger the more we split gaussians
@@ -71,13 +72,13 @@ opt_params:
   # see: https://stackoverflow.com/questions/53033556/how-should-the-learning-rate-change-as-the-batch-size-change
   # -> lr = defaults / sqrt(10)
   # However, we need to be cautious of https://stats.stackexchange.com/questions/346299/whats-the-effect-of-scaling-a-loss-function-in-deep-learning
-  position_lr_init: 5e-3 # Default MonoGS: 0.00016 (RGB mode has x10)
+  position_lr_init: 1e-3 # Default MonoGS: 0.00016 (RGB mode has x10)
   position_lr_final: 1e-5 # Default MonoGS: 0.0000016
   position_lr_delay_mult: 0.01
   position_lr_max_steps: 100 # Default MonoGS: 30000
   feature_lr: 1e-3 # Default MonoGS: 0.0025
   opacity_lr: 2e-2 # Default MonoGS: 0.05
-  scaling_lr: 1e-3 # Default MonoGS: 0.001
+  scaling_lr: 3e-3 # Default MonoGS: 0.001
   rotation_lr: 4e-4
   percent_dense: 0.01 
 
@@ -95,16 +96,16 @@ loss:
   ### Loss weights
   alpha1: 0.8 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
-  beta: 5.0 # Regularizer on scale changes of the Gaussians
+  beta: 3.0 # Regularizer on scale changes of the Gaussians
   beta2: 0.05 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
   ### Low opacity densification
-  low_opacity_th: 0.3 # Opacity value below which we densify
-  low_opacity_ratio: 0.1 # Ratio of low opacity points to densify
+  low_opacity_th: 0.7 # Opacity value below which we densify
+  low_opacity_ratio: 0.0 # Ratio of low opacity points to densify
 
   ## High error densification
   # TODO is this useful?
-  rel_error_th: 0.5 # Relative error threshold for densification
+  rel_error_th: 0.3 # Relative error threshold for densification
   rel_error_ratio: 0.1 # Ratio of high error points to densify
 
 
@@ -112,7 +113,7 @@ loss:
 input:
   sensor_type: 'depth'
   pcd_downsample_init: 16 # This is a constant downsampling factor
-  pcd_downsample: 64 # You ideally have ~5-10k points per frame
+  pcd_downsample: 16 # You ideally have ~5-10k points per frame
   adaptive_pointsize: False
   point_size: 0.02
   type: 'replica'

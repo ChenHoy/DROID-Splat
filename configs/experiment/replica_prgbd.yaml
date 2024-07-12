@@ -1,0 +1,37 @@
+# @package _global_
+defaults:
+  - override /data: Replica/base
+  - override /tracking: base
+
+
+mode: prgbd
+stride: 2
+evaluate: True
+run_mapping_gui: True
+opt_intr: False
+
+
+tracking:
+  frontend:
+    optimize_scales: False
+
+
+mapping:
+  mapping_iters: 50
+  refinement_iters: 50 # Final Optimization iterations for all views
+  use_prior_for_supervision: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
+
+
+  opt_params:
+    position_lr_init: 1e-3 # Default MonoGS: 0.00016 (RGB mode has x10)
+    position_lr_final: 1e-6 # Default MonoGS: 0.0000016
+    position_lr_max_steps: 50 # Default MonoGS: 30000
+
+  keyframes:
+    prune_last: 5 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
+
+
+
+  input:
+    pcd_downsample_init: 16 # This is a constant downsampling factor
+    pcd_downsample: 32 # You ideally have ~5-10k points per frame

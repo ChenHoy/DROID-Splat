@@ -499,6 +499,7 @@ class FactorGraph:
                     # Use pure Python BA implementation with scale correction for priors
                     # (This makes it possible to work with monocular depth prediction priors)
                     self.video.ba_prior(target, weight, damping, ii, jj, t0=t0, t1=t1, iters=iters + 2, lm=lm, ep=ep)
+
                 else:
                     self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False)
 
