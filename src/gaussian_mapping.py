@@ -565,18 +565,20 @@ class GaussianMapper(object):
                     self.gaussians.check_nans()  # NOTE chen: this can happen we have zero depth and an inconvenient pose
 
                     loss = loss / batch_size  # Average over batch
+                    # Scale loss according to batch size, so we have a good learning rate
+                    scaled_loss = loss * lr_factor * np.sqrt(batch_size)
+                    # Punish anisotropic Gaussians
                     scaling = self.gaussians.get_scaling
                     isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-                    loss += self.loss_params.beta * isotropic_loss.mean()
-                    # Scale loss according to batch size
-                    scaled_loss = loss * lr_factor * np.sqrt(batch_size)
+                    scaled_loss += self.loss_params.beta * isotropic_loss.mean()
                     # Backpropagate through batch
+                    self.gaussians.check_nans()  # Sanity check to avoid invalid Gaussians (e.g. from 0 depths)
                     scaled_loss.backward()
                     # Make step
                     self.gaussians.optimizer.step()
                     self.gaussians.optimizer.zero_grad()
                     loss = 0.0  # Reset loss
-                    
+
                     gc.collect()
                     torch.cuda.empty_cache()
 
@@ -621,7 +623,9 @@ class GaussianMapper(object):
 
             if self.use_gui:
                 self.q_main2vis.put_nowait(
-                    gui_utils.GaussianPacket(gaussians=clone_obj(self.gaussians), keyframes=frames)
+                    gui_utils.GaussianPacket(
+                        gaussians=clone_obj(self.gaussians), keyframes=[frame.detach() for frame in frames]
+                    )
                 )
 
     # TODO get better parameters for rejecting bad frames
@@ -634,9 +638,9 @@ class GaussianMapper(object):
         feedback_disps: bool = False,
         opacity_threshold: float = 0.2,
         ignore_frames: List[int] = [0, 1, 2, 3, 4, 5, 6, 7, 8],
-        min_coverage: float = 0.6, # Min. Density of frame after eliminiating outliers
-        max_lonely_gaussians: float = 0.3, # A frame should have at most <= 30% Gaussians that are only visible in its own frameMin. Density of frame after eliminiating outliers
-        max_diff_to_video: float = 0.15, # Maximum abs. rel. deviation from the dense video depth
+        min_coverage: float = 0.6,  # Min. Density of frame after eliminiating outliers
+        max_lonely_gaussians: float = 0.3,  # A frame should have at most <= 30% Gaussians that are only visible in its own frameMin. Density of frame after eliminiating outliers
+        max_diff_to_video: float = 0.15,  # Maximum abs. rel. deviation from the dense video depth
     ) -> Dict:
         """Get the index, poses and depths of the frames that were already optimized. We can use this to then feedback
         the outputs of the Gaussian Rendering optimization back into the video.map.
@@ -820,22 +824,22 @@ class GaussianMapper(object):
             radii_acm.append(radii)
 
             loss += current_loss
+
         loss = loss / len(frames)  # Average over batch
+        # Scale the loss with the number of frames so we adjust the learning rate dependent on batch size
+        # NOTE chen: this is only a valid strategy for standard optimizers
+        # if the optimizer has a regularization term (e.g. weight decay), then this changes the trade-off between objective and regularizor!
+        # NOTE chen: MonoGS scales their loss with len(frames), while we scale it with sqrt(len(frames)), see https://stackoverflow.com/questions/53033556/how-should-the-learning-rate-change-as-the-batch-size-change
+        scaled_loss = loss * np.sqrt(len(frames)) * lr_factor
 
         # Regularize scale changes of the Gaussians
         # loss = loss / len(frames)
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-        loss += self.loss_params.beta * isotropic_loss.mean()
+        scaled_loss += self.loss_params.beta * isotropic_loss.mean()
 
         # NOTE chen: this can happen we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
-
-        # Scale the loss with the number of frames so we adjust the learning rate dependent on batch size
-        # NOTE chen: this is only a valid strategy for standard optimizers
-        # if the optimizer has a regularization term (e.g. weight decay), then this changes the trade-off between objective and regularizor!
-        # NOTE chen: MonoGS scales their loss with len(frames), while we scale it with sqrt(len(frames))
-        scaled_loss = loss * np.sqrt(len(frames)) * lr_factor
         scaled_loss.backward()
 
         ### Maybe Densify and Prune before update
@@ -1066,13 +1070,12 @@ class GaussianMapper(object):
         self.info(f"{len(self.iteration_info)} iterations, {len(self.cameras)/len(self.iteration_info)} cams/it")
 
         # Export Cameras and Gaussians to the main Process
-        cameras_detached = [cam.detach() for cam in self.cameras]  # When we optimize poses, these are still attached
         # NOTE chen: we safeguard against None Queues in case we are in test mode ...
         if self.evaluate and mapping_queue is not None:
             mapping_queue.put(
                 EvaluatePacket(
                     pipeline_params=clone_obj(self.pipeline_params),
-                    cameras=cameras_detached,
+                    cameras=[cam.detach() for cam in self.cameras],
                     gaussians=clone_obj(self.gaussians),
                     background=clone_obj(self.background),
                     cam2buffer=clone_obj(self.cam2buffer),
@@ -1121,8 +1124,8 @@ class GaussianMapper(object):
         self.q_main2vis.put_nowait(
             gui_utils.GaussianPacket(
                 gaussians=clone_obj(self.gaussians),
-                current_frame=last_new_cam,
-                keyframes=self.cameras,
+                current_frame=last_new_cam.detach(),
+                keyframes=[cam.detach() for cam in self.cameras],
                 kf_window=None,
                 gtcolor=img,
                 gtdepth=gtdepth,
