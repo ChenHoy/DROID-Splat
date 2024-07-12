@@ -208,8 +208,7 @@ class SLAM:
             )
 
         if self.cfg.run_backend and self.cfg.run_mapping:
-
-            if self.cfg.mapper_every <= self.cfg.backend_every:
+            if self.cfg.mapper_every > self.cfg.backend_every:
                 print(colored("Mapping is run less often than backend!", "red"))
 
     def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
