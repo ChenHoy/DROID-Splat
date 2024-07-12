@@ -208,12 +208,9 @@ class SLAM:
             )
 
         if self.cfg.run_backend and self.cfg.run_mapping:
-            assert (
-                self.cfg.mapper_every <= self.cfg.backend_every
-            ), """Mapping should generally run more often than backend! 
-            Our current implementation only keeps track of map changes from a 
-            single backend forward pass! If backend ran k times before we update the Mapper, 
-            then we would lose track to reanchor the Gaussians"""
+
+            if self.cfg.mapper_every <= self.cfg.backend_every:
+                print(colored("Mapping is run less often than backend!", "red"))
 
     def create_out_dirs(self, output_folder: Optional[str] = None) -> None:
         if output_folder is not None:
