@@ -667,15 +667,13 @@ class SLAM:
         else:
             monocular = False
 
-        est_c2w_all_lie, est_c2w_kf_lie, gt_c2w_all_lie, gt_c2w_kf_lie, kf_tstamps, tstamps = self.get_trajectories(
-            stream, gaussian_mapper_last_state
-        )
+        est_c2w_all_lie, eval_traj, kf_tstamps, tstamps = self.get_trajectories(stream, gaussian_mapper_last_state)
 
         # Evo expects floats for timestamps
         kf_tstamps = [float(i) for i in kf_tstamps]
         tstamps = [float(i) for i in tstamps]
         kf_result_ate, all_result_ate = eval_utils.do_odometry_evaluation(
-            eval_path, est_c2w_kf_lie, gt_c2w_kf_lie, est_c2w_all_lie, gt_c2w_all_lie, tstamps, kf_tstamps, monocular
+            eval_path, tstamps=tstamps, kf_tstamps=kf_tstamps, monocular=monocular, **eval_traj
         )
         self.info("(Keyframes only) ATE: {}".format(kf_result_ate), logger=log)
         self.info("(All) ATE: {}".format(all_result_ate), logger=log)
@@ -790,12 +788,12 @@ class SLAM:
         gt_c2w_kf_lie = gt_c2w_all_lie[kf_tstamps]
 
         # Evo evaluation package assumes lie algebras to be in form [tx, ty, tz, qw, qx, qy, qz]
-        est_c2w_all_lie = lie_quat_swap_convention(est_c2w_all_lie).numpy()
-        est_c2w_kf_lie = lie_quat_swap_convention(est_c2w_kf_lie).numpy()
-        gt_c2w_all_lie = lie_quat_swap_convention(gt_c2w_all_lie).numpy()
-        gt_c2w_kf_lie = lie_quat_swap_convention(gt_c2w_kf_lie).numpy()
-
-        return est_c2w_all_lie, est_c2w_kf_lie, gt_c2w_all_lie, gt_c2w_kf_lie, kf_tstamps, tstamps
+        traj_eval = {}
+        traj_eval["est_c2w_all_lie"] = lie_quat_swap_convention(est_c2w_all_lie.clone()).numpy()
+        traj_eval["gt_c2w_all_lie"] = lie_quat_swap_convention(gt_c2w_all_lie).numpy()
+        traj_eval["est_c2w_kf_lie"] = lie_quat_swap_convention(est_c2w_kf_lie).numpy()
+        traj_eval["gt_c2w_kf_lie"] = lie_quat_swap_convention(gt_c2w_kf_lie).numpy()
+        return est_c2w_all_lie, traj_eval, kf_tstamps, tstamps
 
     def get_all_cams_for_rendering(
         self,
