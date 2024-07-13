@@ -210,6 +210,8 @@ def bundle_adjustment(
     # Remove the batch dimension again
     poses = Gs.data[0]
     disps = disps[0]
+    if disps_sens is not None:
+        disps_sens = disps_sens.unsqueeze(0)
     if scale_prior:
         scales = scales[0]
         shifts = shifts[0]
@@ -417,7 +419,7 @@ def BA(
         t0, t1: Optimization window
     """
     # Select keyframe window to optimize over!
-    disps, poses, intrinsics = get_keyframe_window(all_disps, all_poses, all_intrinsics, t1)
+    disps, poses, intrinsics = get_keyframe_window(all_poses, all_intrinsics, all_disps, t1)
     if all_disps_sens is not None:
         disps_sens = all_disps_sens[:, :t1]
     else:
@@ -655,7 +657,7 @@ def BA_prior(
     # Residuals for r2(disps, s, o) (B, N, HW)
     scaled_prior = disps_sens[:, kx_exp].view(bs, -1, ht * wd) * scales[:, kx_exp, None] + shifts[:, kx_exp, None]
     # Prior should never be negative, i.e. clip this if s and o are diverging
-    scaled_prior.clamp_(min=0.001)
+    scaled_prior.clamp_(min=1e-5)
 
     ## Rescale the prior residuals according to estimated uncertainty
     # NOTE this gets rid of strong outliers like the sky or dynamic objects for scale adjustment
