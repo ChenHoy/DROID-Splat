@@ -485,8 +485,8 @@ class DepthVideo:
         self.disps_sens = self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
         self.disps_sens_up = self.disps_sens_up * self.scales[:, None, None] + self.shifts[:, None, None]
         # Reset the scale and shift parameters to initial state
-        self.scales = torch.ones_like(self.scales, device=self.device)
-        self.shifts = torch.zeros_like(self.shifts, device=self.device)
+        self.scales = torch.ones_like(self.scales, device=self.device).share_memory_()
+        self.shifts = torch.zeros_like(self.shifts, device=self.device).share_memory_()
 
     def distance(self, ii=None, jj=None, beta=0.3, bidirectional=True):
         """frame distance metric, where distance = sqrt((u(ii) - u(jj->ii))^2 + (v(ii) - v(jj->ii))^2)"""
@@ -570,7 +570,7 @@ class DepthVideo:
 
             self.mapping_dirty[t0:t1] = True
 
-    def linear_align_prior(self, min_num_points: int=300) -> None:
+    def linear_align_prior(self, min_num_points: int = 300, eps: float = 0.05) -> None:
         """Do a linear alignmnet between the prior and the current map after initialization.
         This strategy is used to align the scales and shifts before running Bundle Adjustment.
 
@@ -588,6 +588,12 @@ class DepthVideo:
             return_mask=True,
         )
         if valid_d.sum() < min_num_points:
+            print(
+                colored(
+                    f"Could not find enough valid points for linear scale alignment, continuing without initial scale alignment ...",
+                    "red",
+                )
+            )
             return
 
         if self.upsampled:
@@ -599,6 +605,16 @@ class DepthVideo:
             self.disps_sens[: self.counter.value - 1], self.disps[: self.counter.value - 1], valid_d
         )
         scale_t[torch.isnan(scale_t)], shift_t[torch.isnan(shift_t)] = 1.0, 0.0
+        valid_scale = scale_t > eps
+        if ~valid_scale.sum().item() > 0:
+            print(
+                colored(
+                    f"Linear scale alignment of monocular prior failed, continuing without initial scale alignment ...",
+                    "red",
+                )
+            )
+        scale_t[~valid_scale] = 1.0
+
         self.scales[: self.counter.value - 1], self.shifts[: self.counter.value - 1] = scale_t, shift_t
         self.reset_prior()  # Reset the prior and update disps_sens to fit the map
 

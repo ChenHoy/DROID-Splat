@@ -189,8 +189,8 @@ class SLAM:
                 "red",
             )
         if self.cfg.run_mapping:
-            if self.cfg.mapping.use_non_keyframes:
-                assert self.cfg.mapping.refinement_iters > 0, colored(
+            if self.cfg.mapping.refinement.use_non_keyframes:
+                assert self.cfg.mapping.refinement.iters > 0, colored(
                     """If you want to use non-keyframes during Gaussian Rendering Optimization, 
                     make sure that you actually refine the map after running tracking!""",
                     "red",
@@ -544,7 +544,6 @@ class SLAM:
                 continue
 
             semaMapping.acquire()  # Aquire the semaphore (If the counter == 0, then this thread will be blocked)
-            # TODO chen: dont compute this every time, but communicate between backend and mapping so we know that backend ran
             if self.cfg.run_backend:
                 self.maybe_reanchor_gaussians()  # If the backend is also running, we reanchor Gaussians when large map changes occur
 
@@ -739,7 +738,11 @@ class SLAM:
 
         # When using Gaussian Mapping w. Refinement, we have already interpolated the trajectory and might get
         # better results than when using only the SLAM system for interpolation
-        if self.cfg.run_mapping and self.cfg.mapping.refinement_iters > 0 and self.cfg.mapping.use_non_keyframes:
+        if (
+            self.cfg.run_mapping
+            and self.cfg.mapping.refinement.iters > 0
+            and self.cfg.mapping.refinement.use_non_keyframes
+        ):
             assert (
                 gaussian_mapper_last_state is not None
             ), "Missing GaussianMapper state for evaluation even though we ran Mapping!"
@@ -801,7 +804,7 @@ class SLAM:
         gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None,
     ) -> List[Camera]:
 
-        if self.cfg.mapping.use_non_keyframes:
+        if self.cfg.mapping.refinement.use_non_keyframes:
             all_cams = gaussian_mapper_last_state.cameras
         else:
             all_cams = []
