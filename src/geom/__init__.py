@@ -187,9 +187,17 @@ def align_scale_and_shift(
     b_0 = torch.sum(weights * prediction * target, dim=[1, 2])
     b_1 = torch.sum(weights * target, dim=[1, 2])
     # solution: x = A^-1 . b = [[a_11, -a_01], [-a_10, a_00]] / (a_00 * a_11 - a_01 * a_10) . b
+    scale = torch.ones_like(b_0)
+    shift = torch.zeros_like(b_1)
+
+    # NOTE chen: degenerate cases do happen!
     det = a_00 * a_11 - a_01 * a_01
-    scale = (a_11 * b_0 - a_01 * b_1) / det
-    shift = (-a_01 * b_0 + a_00 * b_1) / det
+
+    # A needs to be a positive definite matrix!
+    valid = det > 0
+    scale[valid] = (a_11[valid] * b_0[valid] - a_01[valid] * b_1[valid]) / det[valid]
+    shift[valid] = (-a_01[valid] * b_0[valid] + a_00[valid] * b_1[valid]) / det[valid]
+
     error = (scale[:, None, None] * prediction + shift[:, None, None] - target).abs()
     masked_error = error * weights
     error_sum = masked_error.sum(dim=[1, 2])
