@@ -201,10 +201,10 @@ def bundle_adjustment(
             ba_function = BA
 
     #### Bundle Adjustment Loop
-    disps.clamp_(min=0.001), disps_sens.clamp_(min=0.001)
+    disps.clamp_(min=1e-3)
     for i in range(iters):
         ba_function(*args, **skwargs, ep=ep, lm=lm)
-        disps.clamp_(min=0.001)  # Disparities should never be negative
+        disps.clamp_(min=1e-3)  # Disparities should never be negative
 
     #### Update data structure
     # Remove the batch dimension again
@@ -266,6 +266,7 @@ def get_hessian_and_rhs(
     r = rearrange(r, "b n (hw xy) -> b n hw xy", hw=ht * wd)
     wJzT = (w[..., None] * Jz).mT  # (B N HW 1 XY)
     wk = einsum(-wJzT.squeeze(-2), r, "b n hw xy, b n hw xy -> b n hw").double()
+
     Ck = einsum(wJzT.squeeze(-2), Jz.squeeze(-1), "b n hw xy, b n hw xy -> b n hw")
     Ck = Ck.double()
 

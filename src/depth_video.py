@@ -60,7 +60,7 @@ class DepthVideo:
         # List for keeping track of updated frames for Map Renderer
         self.mapping_dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
 
-        self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float)
+        self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float).share_memory_()
         self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
         self.poses = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
         self.poses_gt = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
@@ -313,7 +313,7 @@ class DepthVideo:
                 image = self.images[index].clone().contiguous().to(device)  # [H, W, 3]
                 static_mask = self.static_masks[index].clone().to(device)  # [H, W]
                 intrinsics = self.intrinsics[0].clone().contiguous().to(device) * s  # [4]
-                disp_prior = self.disps_sens_up[index].clone().to(device)  # [H, W]
+                disp_prior = self.disps_sens_up[index].contiguous().clone().to(device)  # [H, W]
             else:
                 # Color is always stored in the original resolution, downsample here to match
                 image = self.images[index, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].clone()
@@ -321,7 +321,7 @@ class DepthVideo:
                 static_mask = self.static_masks[index, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
                 static_mask = static_mask.contiguous().to(device)  # [H // s, W // s]
                 intrinsics = self.intrinsics[0].clone().contiguous().to(device)  # [4]
-                disp_prior = self.disps_sens[index].clone().to(device)  # [H // s, W // s]
+                disp_prior = self.disps_sens[index].contiguous().clone().to(device)  # [H // s, W // s]
 
             est_disp = self.disps_clean[index].clone().contiguous().to(device)  # [H, W]
             est_depth = torch.where(est_disp > 0, 1.0 / est_disp, est_disp)
@@ -485,8 +485,8 @@ class DepthVideo:
         self.disps_sens = self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
         self.disps_sens_up = self.disps_sens_up * self.scales[:, None, None] + self.shifts[:, None, None]
         # Reset the scale and shift parameters to initial state
-        self.scales = torch.ones_like(self.scales, device=self.device).share_memory_()
-        self.shifts = torch.zeros_like(self.shifts, device=self.device).share_memory_()
+        self.scales = torch.ones_like(self.scales, device=self.device)
+        self.shifts = torch.zeros_like(self.shifts, device=self.device)
 
     def distance(self, ii=None, jj=None, beta=0.3, bidirectional=True):
         """frame distance metric, where distance = sqrt((u(ii) - u(jj->ii))^2 + (v(ii) - v(jj->ii))^2)"""
@@ -577,13 +577,12 @@ class DepthVideo:
         NOTE chen: This is a very different objective than the optical flow one, i.e. there is no guarantee that this helps to converge to the right monocular scale!
         This also can lead to changes, that the BA optimization has to correct back again, thus wasting compute.
         """
-
         # Filter the map, but use self.disps for scale_optimization
         valid_d = self.filter_map(
             idx=torch.arange(self.counter.value - 1, device=self.device),
             radius=1,
             multiview=True,
-            bin_th=0.005,
+            bin_th=0.01,
             mv_count_th=2,
             return_mask=True,
         )
@@ -602,18 +601,15 @@ class DepthVideo:
             valid_d = valid_d[..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
 
         scale_t, shift_t, error_t = align_scale_and_shift(
-            self.disps_sens[: self.counter.value - 1], self.disps[: self.counter.value - 1], valid_d
+            self.disps_sens[: self.counter.value - 1].clone(), self.disps[: self.counter.value - 1].clone(), valid_d
         )
+        # NOTE chen: double safeguard against accidental degenerate cases
         scale_t[torch.isnan(scale_t)], shift_t[torch.isnan(shift_t)] = 1.0, 0.0
-        valid_scale = scale_t > eps
+        scale_t[torch.isinf(scale_t)], shift_t[torch.isinf(shift_t)] = 1.0, 0.0
+
+        valid_scale = scale_t > eps  # Safeguard against 0.0 scales which would decimate the disps_sens
         if ~valid_scale.sum().item() > 0:
-            print(
-                colored(
-                    f"Linear scale alignment of monocular prior failed, continuing without initial scale alignment ...",
-                    "red",
-                )
-            )
-        scale_t[~valid_scale] = 1.0
+            scale_t[~valid_scale] = 1.0
 
         self.scales[: self.counter.value - 1], self.shifts[: self.counter.value - 1] = scale_t, shift_t
         self.reset_prior()  # Reset the prior and update disps_sens to fit the map
@@ -625,14 +621,15 @@ class DepthVideo:
         We optimize scale and shift parameters on top of the scene disparity.
         """
         with self.get_lock():
-            # [t0, t1] window of bundle adjustment optimization
-            if t1 is None:
-                t1 = max(ii.max().item(), jj.max().item()) + 1
 
             # Store the uncertainty maps for source frames, that will get updated
             confidence, idx = self.reduce_confidence(weight, ii)
             # Uncertainties are for [x, y] directions -> Take norm to get single scalar
             self.confidence[idx] = torch.norm(confidence, dim=1)
+
+            # [t0, t1] window of bundle adjustment optimization
+            if t1 is None:
+                t1 = max(ii.max().item(), jj.max().item()) + 1
 
             # Precondition
             self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
@@ -640,7 +637,8 @@ class DepthVideo:
             # Block coordinate descent optimization
             for i in range(iters):
                 # Sanity check for non-negative disparities
-                self.disps.clamp_(min=1e-5), self.disps_sens.clamp_(min=1e-5)
+                self.disps.clamp_(min=1e-5)
+
                 # Motion only Bundle Adjustment (MoBA)
                 droid_backends.ba(
                     self.poses,
@@ -683,6 +681,7 @@ class DepthVideo:
                     structure_only=True,
                     alpha=alpha,
                 )
+
                 # After optimizing the prior, we need to update the disps_sens and reset the scales
                 # only then can we use global BA and intrinsics optimization with the CUDA kernel later
                 self.reset_prior()
