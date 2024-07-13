@@ -580,7 +580,7 @@ class DepthVideo:
 
             self.mapping_dirty[t0:t1] = True
 
-    def linear_align_prior(self, min_num_points: int=300) -> None:
+    def linear_align_prior(self, min_num_points: int = 300, eps: float = 0.05) -> None:
         """Do a linear alignmnet between the prior and the current map after initialization.
         This strategy is used to align the scales and shifts before running Bundle Adjustment.
 
@@ -598,6 +598,12 @@ class DepthVideo:
             return_mask=True,
         )
         if valid_d.sum() < min_num_points:
+            print(
+                colored(
+                    f"Could not find enough valid points for linear scale alignment, continuing without initial scale alignment ...",
+                    "red",
+                )
+            )
             return
 
         if self.upsampled:
@@ -616,6 +622,16 @@ class DepthVideo:
         #print("Frames with wrong scale: ", (~valid_scale).sum().item())
 
         scale_t[torch.isnan(scale_t)], shift_t[torch.isnan(shift_t)] = 1.0, 0.0
+        valid_scale = scale_t > eps
+        if ~valid_scale.sum().item() > 0:
+            print(
+                colored(
+                    f"Linear scale alignment of monocular prior failed, continuing without initial scale alignment ...",
+                    "red",
+                )
+            )
+        scale_t[~valid_scale] = 1.0
+
         self.scales[: self.counter.value - 1], self.shifts[: self.counter.value - 1] = scale_t, shift_t
         self.reset_prior()  # Reset the prior and update disps_sens to fit the map
 

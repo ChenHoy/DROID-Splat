@@ -24,24 +24,25 @@ def mapping_rgbd_loss(
     with_depth_smoothness: bool = False,
     alpha1: float = 0.8,
     alpha2: float = 0.85,
-    beta: float = 0.001,
+    beta2: float = 0.001,
     rgb_boundary_threshold: float = 0.01,
     supervise_with_prior: bool = False,
     scale_invariant: bool = False,
+    **kwargs,
 ) -> float:
     if cam.depth is not None or (cam.depth_prior is not None and supervise_with_prior):
         has_depth = True
-        if supervise_with_prior: # NOTE leon: this can be active on mono mode, but both depths are the same
-            depth_gt = cam.depth_prior 
+        if supervise_with_prior:  # NOTE leon: this can be active on mono mode, but both depths are the same
+            depth_gt = cam.depth_prior
         else:
             depth_gt = cam.depth
     else:
         has_depth = False
 
     # Transform with exposure (done in other papers)
-    #image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
+    # image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
     image_gt = cam.original_image
-    
+
     # Mask out pixels with little information and invalid depth pixels
     rgb_pixel_mask = (image_gt.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
 
@@ -63,7 +64,7 @@ def mapping_rgbd_loss(
         if cam.mask is not None:
             depth_pixel_mask = depth_pixel_mask & cam.mask
         loss_depth = depth_loss(
-            depth, depth_gt, with_depth_smoothness, beta, image_gt, depth_pixel_mask, scale_invariant=scale_invariant
+            depth, depth_gt, with_depth_smoothness, beta2, image_gt, depth_pixel_mask, scale_invariant=scale_invariant
         )
         return alpha1 * loss_rgb + (1 - alpha1) * loss_depth
     else:

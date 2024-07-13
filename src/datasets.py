@@ -201,6 +201,23 @@ class BaseDataset(Dataset):
 
         return color_data
 
+    def _get_depth(self, index: int) -> torch.Tensor:
+        depth_data = self.depthloader(index)
+        H_out_with_edge, W_out_with_edge = (self.H_out + self.H_edge * 2, self.W_out + self.W_edge * 2)
+        outsize = (H_out_with_edge, W_out_with_edge)
+
+        if depth_data is not None:
+            depth_data = torch.from_numpy(depth_data).float()
+            depth_data = F.interpolate(depth_data[None, None], outsize, mode="nearest")[0, 0]
+            # Crop
+            if self.H_edge > 0:
+                edge = self.H_edge
+                depth_data = depth_data[edge:-edge, :]
+            if self.W_edge > 0:
+                edge = self.W_edge
+                depth_data = depth_data[:, edge:-edge]
+        return depth_data
+
     def __getitem__(self, index: int):
         color_path = self.color_paths[index]
         color_data = cv2.imread(color_path)
@@ -211,10 +228,7 @@ class BaseDataset(Dataset):
             # undistortion is only applied on color image, not depth!
             color_data = cv2.undistort(color_data, K, self.distortion)
 
-        H_out_with_edge, W_out_with_edge = (
-            self.H_out + self.H_edge * 2,
-            self.W_out + self.W_edge * 2,
-        )
+        H_out_with_edge, W_out_with_edge = (self.H_out + self.H_edge * 2, self.W_out + self.W_edge * 2)
         outsize = (H_out_with_edge, W_out_with_edge)
 
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
