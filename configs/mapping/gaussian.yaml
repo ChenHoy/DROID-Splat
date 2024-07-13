@@ -34,6 +34,7 @@ keyframes:
   n_last_frames: 10 # Always optimize the last n frames
   n_rand_frames: 5 # Optimize random global frames on top
   default_batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
+  dont_prune_latest: 0
 
   densify_every: 3 # Densify Gaussians every k updates
   prune_every: 2 # Prune Gaussians every k updates

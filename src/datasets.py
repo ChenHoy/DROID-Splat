@@ -463,7 +463,6 @@ class TotalRecon(BaseDataset):
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
 
-
     def load_poses(self, paths):
         self.poses = []
         for path in paths:
@@ -944,6 +943,7 @@ class EuRoC(BaseDataset):
 
         if self.poses is not None:
             pose = matrix_to_lie(torch.tensor(self.poses[index])).float()
+            ipdb.set_trace()
         else:
             pose = None
 

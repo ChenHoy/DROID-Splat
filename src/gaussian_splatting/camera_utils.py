@@ -15,7 +15,7 @@ class Camera(nn.Module):
         color: torch.Tensor,
         depth_est: torch.Tensor,
         depth_gt: torch.Tensor,
-        pose_c2w: torch.Tensor,
+        pose_w2c: torch.Tensor,
         projection_matrix: torch.Tensor,
         intrinsics: Tuple[float, float, float, float],
         fov: Tuple[float, float],
@@ -31,8 +31,8 @@ class Camera(nn.Module):
         self.FoVx, self.FoVy = fov
         self.image_height, self.image_width = img_size
 
-        self.R_gt = pose_c2w[:3, :3]
-        self.T_gt = pose_c2w[:3, 3]
+        self.R_gt = pose_w2c[:3, :3]
+        self.T_gt = pose_w2c[:3, 3]
         self.update_RT(self.R_gt, self.T_gt)
 
         self.original_image = color
@@ -42,13 +42,34 @@ class Camera(nn.Module):
 
         self.mask = mask
 
-        self.cam_rot_delta = nn.Parameter(torch.zeros(3, requires_grad=True, device=device))
-        self.cam_trans_delta = nn.Parameter(torch.zeros(3, requires_grad=True, device=device))
+        # Always fix first frame!
+        if self.uid == 0:
+            self.cam_rot_delta = nn.Parameter(torch.zeros(3, requires_grad=False, device=device))
+            self.cam_trans_delta = nn.Parameter(torch.zeros(3, requires_grad=False, device=device))
+        else:
+            self.cam_rot_delta = nn.Parameter(torch.zeros(3, requires_grad=True, device=device))
+            self.cam_trans_delta = nn.Parameter(torch.zeros(3, requires_grad=True, device=device))
 
         self.exposure_a = nn.Parameter(torch.tensor([0.0], requires_grad=True, device=device))
         self.exposure_b = nn.Parameter(torch.tensor([0.0], requires_grad=True, device=device))
 
         self.projection_matrix = projection_matrix.to(device=device)
+
+    def detach(self):
+        """Clone and detach all tensors from the camera object"""
+        return Camera(
+            self.uid,
+            self.original_image.clone().detach(),
+            self.depth.clone().detach() if self.depth is not None else None,
+            self.depth_prior.clone().detach() if self.depth_prior is not None else None,
+            self.pose.clone().detach(),
+            self.projection_matrix.clone().detach(),
+            (self.fx, self.fy, self.cx, self.cy),
+            (self.FoVx, self.FoVy),
+            (self.image_height, self.image_width),
+            self.device,
+            self.mask.clone().detach() if self.mask is not None else None,
+        )
 
     @staticmethod
     def init_from_dataset(dataset, idx, projection_matrix):
@@ -86,6 +107,12 @@ class Camera(nn.Module):
     @property
     def world_view_transform(self):
         return getWorld2View2(self.R, self.T).transpose(0, 1)
+
+    @property
+    def pose(self):
+        tensor = torch.eye(4, device=self.device)
+        tensor[:3, :3], tensor[:3, 3] = self.R, self.T
+        return tensor
 
     @property
     def full_proj_transform(self):

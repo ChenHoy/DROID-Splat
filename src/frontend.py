@@ -162,7 +162,6 @@ class Frontend:
         # NOTE chen: Sanity check, because this was sometimes []
         if self.graph.ii.numel() > 0:
             self.video.dirty[self.graph.ii.min() : self.t1] = True
-            self.video.mapping_dirty[self.graph.ii.min() : self.t1] = True
 
     def __initialize(self):
         """initialize the SLAM system"""

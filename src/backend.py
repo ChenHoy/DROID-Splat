@@ -108,6 +108,17 @@ class Backend:
         self.loop_max_factor = cfg.tracking.backend.get("loop_max_factor_mult", 16)
 
     @torch.no_grad()
+    def accumulate_pose_change(self, pose_prev, pose_cur, t0, t1) -> None:
+        """Consider old video.pose_changes to accumulate over multiple backend updates -> dP_cur = dP * dP_prev
+
+        Derivation: g12 = g2 * g1.inv(), g23 = g3 * g2.inv()  -> g3 = g23 * g2 = g23 * g12 * g1 = g13 * g1
+        """
+        g0, g1 = lietorch.SE3.InitFromVec(pose_prev), lietorch.SE3.InitFromVec(pose_cur)
+        dP = g1 * g0.inv()  # Get relative pose in forward direction
+        dP_prev = lietorch.SE3.InitFromVec(self.video.pose_changes[t0:t1])
+        self.video.pose_changes[t0:t1] = (dP * dP_prev).vec()  # You can now get g_cur = dP * g_prev
+
+    @torch.no_grad()
     def dense_ba(
         self,
         t_start: int = 0,
@@ -143,11 +154,9 @@ class Backend:
         poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
         # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
         graph.update_lowmem(t0=t_start + 1, t1=t_end, steps=steps, iters=iters, max_t=t_end, motion_only=motion_only)
-
         poses_after = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
-        g0, g1 = lietorch.SE3.InitFromVec(poses_before), lietorch.SE3.InitFromVec(poses_after)
-        dP = g1 * g0.inv()  # Get relative pose in forward direction
-        self.video.pose_changes[t_start + 1 : t_end] = dP.vec()  # You can now get g_cur = dP * g_prev
+        # Memoize pose change in self.video so other Processes can adapt their datastructures
+        self.accumulate_pose_change(poses_before, poses_after, t0=t_start + 1, t1=t_end)
 
         graph.clear_edges()
         with self.video.get_lock():
@@ -223,9 +232,8 @@ class Backend:
             t0=t_start_loop + 1, t1=t_end, steps=steps, iters=iters, max_t=t_end, lm=lm, ep=ep, motion_only=motion_only
         )
         poses_after = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
-        g0, g1 = lietorch.SE3.InitFromVec(poses_before), lietorch.SE3.InitFromVec(poses_after)
-        dP = g1 * g0.inv()  # Get relative pose in forward direction
-        self.video.pose_changes[t_start + 1 : t_end] = dP.vec()  # You can now get g_cur = dP * g_prev
+        # Memoize pose change in self.video so other Processes can adapt their datastructures
+        self.accumulate_pose_change(poses_before, poses_after, t0=t_start + 1, t1=t_end)
 
         graph.clear_edges()
         # Free up memory again after optimization
@@ -247,6 +255,8 @@ class Backend:
     # iii) We add a regularization term to our pose graph optimization, which minimizes the difference between the relative pose and the diff. between estimated poses
     #       see https://alida.tistory.com/69#5.-relative-pose-error-pgo
     # -> This would require to either implement a pure Python optimization or adapt the CUDA kernels
+    # -> We can use the reference implementation in: https://github.com/princeton-vl/lietorch/blob/master/examples/pgo/main.py, but we first need to define edge sets for this!
+    # TODO build up segment datastructure which allows to register a new frontend segment to previous segments
     @torch.no_grad()
     def sparse_ba(
         self, t_start: int = 0, t_end: Optional[int] = None, steps: int = 6, iter: int = 4, motion_only: bool = False

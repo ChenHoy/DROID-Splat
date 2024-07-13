@@ -1,5 +1,5 @@
 import ipdb
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from tqdm import tqdm
 from termcolor import colored
 
@@ -9,8 +9,9 @@ import lietorch
 
 import numpy as np
 
+from ..gaussian_splatting.camera_utils import Camera
 from ..slam import SLAM
-from ..geom import pose_distance
+from ..geom import pose_distance, matrix_to_lie
 from ..gaussian_splatting.eval_utils import EvaluatePacket
 from ..gaussian_splatting.gaussian_renderer import render
 from ..gaussian_splatting.gui import gui_utils
@@ -94,6 +95,8 @@ class SlamTestbed(SLAM):
             - Does the optimization actually converge to the correct image and depth?
             - Does the scale change somehow, how we observe it in the normal point cloud viewer?
         """
+
+        assert self.cfg.run_mapping, "Need to run mapping to test rendering"
         renderer = self.gaussian_mapper
         renderer.info("Currently has: {} gaussians".format(len(renderer.gaussians)))
 
@@ -235,11 +238,37 @@ class SlamTestbed(SLAM):
                 d_3rd[key] = d_sorted[2]
         return d_1st, d_2nd, d_3rd
 
+    def compare_mapping_video(self, idx: int = 0) -> None:
+        """Compare render with video"""
+
+        renderer = self.gaussian_mapper
+
+        assert idx < len(renderer.cameras), "View index out of bounds!"
+        cam = renderer.cameras[idx]
+        render_pkg = render(cam, renderer.gaussians, renderer.pipeline_params, renderer.background, device=self.device)
+        image_render, radii, depth_render = render_pkg["render"], render_pkg["radii"], render_pkg["depth"]
+        image_render.clamp_(0, 1.0)  # Clip numerical errors
+
+        idx_in_video = renderer.cam2buffer[idx]
+        disps_ref = self.video.disps_up[idx_in_video]
+        disps_valid = disps_ref > 0
+        depth_ref = torch.where(disps_valid, 1.0 / disps_ref, disps_ref)
+
+        plot_side_by_side(
+            image_render.detach().clone(),
+            cam.original_image.detach().clone(),
+            depth_render.detach().clone(),
+            depth_ref.clone(),
+            title="Render vs. Tracker",
+            return_image=False,
+        )
+
     def run_track_render(self, stream, backend_freq: int = 10, render_freq: int = 10) -> None:
         """Sequential processing of the stream, where we run
             i) Tracking
             ii) Rendering
-            iii) Global Backend optimization
+            iii) Check for Loops
+            iv) Global Backend optimization
         one after the other.
         This is to check how well the system performs when we run it sequentially.
         Is the system stable? -> Move on to parallel processing but with a well balanced load.
@@ -247,6 +276,8 @@ class SlamTestbed(SLAM):
 
         def convert_to_tensor(x: Dict) -> torch.Tensor:
             return torch.tensor(list(x.values())).to(self.device)
+
+        assert self.cfg.run_mapping, "Need to run mapping to test rendering"
 
         for frame in tqdm(stream):
             frontend_old_count = self.frontend.optimizer.t1  # How many times did the frontend actually run?
@@ -278,15 +309,15 @@ class SlamTestbed(SLAM):
 
                 # Run backend and loop closure detection occasianally
                 if self.frontend.optimizer.is_initialized and self.frontend.optimizer.t1 % backend_freq == 0:
-                    # if self.loop_detector is not None:
-                    #     loop_candidates = self.loop_detector.check()
-                    #     if loop_candidates is not None:
-                    #         loop_ii, loop_jj = loop_candidates
-                    #     else:
-                    #         loop_ii, loop_jj = None, None
-                    #     self.backend(add_ii=loop_ii, add_jj=loop_jj)
-                    # else:
-                    #     self.backend()
+                    if self.loop_detector is not None:
+                        loop_candidates = self.loop_detector.check()
+                        if loop_candidates is not None:
+                            loop_ii, loop_jj = loop_candidates
+                        else:
+                            loop_ii, loop_jj = None, None
+                        self.backend(add_ii=loop_ii, add_jj=loop_jj)
+                    else:
+                        self.backend()
                     self.backend()
 
                     ## Reanchor the Gaussians to follow the big map update
@@ -298,43 +329,22 @@ class SlamTestbed(SLAM):
                     if self.gaussian_mapper.warmup < self.frontend.optimizer.count and to_update.ndim > 0:
                         self.gaussian_mapper.reanchor_gaussians(to_update, self.video.pose_changes[to_update])
 
+        self.gaussian_mapper._update(iters=self.gaussian_mapper.mapping_iters + 10, delay_to_tracking=False)
         self.gaussian_mapper._last_call(None, None)
+
         ipdb.set_trace()
-        self.compare_mapping_video(0)
+        # self.compare_mapping_video(0)
 
         # Check distance statistics, so you can select a good threshold depending on the Place Recognition Network
-        # d_1st, d_2nd, d_3rd = self.get_frame_distance_stats()
-        # d_1st = convert_to_tensor(d_1st)
-        # d_2nd, d_3rd = convert_to_tensor(d_2nd), convert_to_tensor(d_3rd)
-        # ipdb.set_trace()
-
-    def compare_mapping_video(self, idx: int = 0) -> None:
-        """Compare render with video"""
-
-        renderer = self.gaussian_mapper
-
-        assert idx < len(renderer.cameras), "View index out of bounds!"
-        cam = renderer.cameras[idx]
-        render_pkg = render(cam, renderer.gaussians, renderer.pipeline_params, renderer.background, device=self.device)
-        image_render, radii, depth_render = render_pkg["render"], render_pkg["radii"], render_pkg["depth"]
-        image_render.clamp_(0, 1.0)  # Clip numerical errors
-
-        idx_in_video = renderer.idx_mapping[idx]
-        disps_ref = self.video.disps_up[idx_in_video]
-        disps_valid = disps_ref > 0
-        depth_ref = torch.where(disps_valid, 1.0 / disps_ref, disps_ref)
-
-        plot_side_by_side(
-            image_render.detach().clone(),
-            cam.original_image.detach().clone(),
-            depth_render.detach().clone(),
-            depth_ref.clone(),
-            title="Render vs. Tracker",
-            return_image=False,
-        )
+        if self.loop_detector is not None:
+            d_1st, d_2nd, d_3rd = self.get_frame_distance_stats()
+            d_1st = convert_to_tensor(d_1st)
+            d_2nd, d_3rd = convert_to_tensor(d_2nd), convert_to_tensor(d_3rd)
 
     def test_tracking(self, stream, backend_freq: int = 10) -> None:
         """Test tracking in a sequential manner."""
+        assert self.cfg.run_backend, "Need to run backend for this test to make sense!"
+
         for frame in tqdm(stream):
             frontend_old_count = self.frontend.optimizer.t1  # How many times did the frontend actually run?
 
@@ -360,9 +370,11 @@ class SlamTestbed(SLAM):
             ):
                 self.backend()
 
-    def test_rendering(self, stream, render_freq: int = 10) -> None:
+    def test_rendering(self, stream, render_freq: int = 10, test_until: Optional[int] = None) -> None:
         """Test Rendering in a sequential manner."""
         i = 0
+        assert self.cfg.run_mapping, "Need to run mapping to test rendering"
+
         for frame in tqdm(stream):
             frontend_old_count = self.frontend.optimizer.t1  # How many times did the frontend actually run?
 
@@ -377,6 +389,9 @@ class SlamTestbed(SLAM):
                 continue
             if self.t_stop is not None and timestamp > self.t_stop:
                 break
+            # HACK If config was not set, overwrite here
+            if test_until is not None and timestamp > test_until:
+                break
 
             # Frontend insert new frames
             self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
@@ -390,7 +405,76 @@ class SlamTestbed(SLAM):
             i += 1
 
         self.gaussian_mapper(None, None, True)
-        ipdb.set_trace()
+
+    # TODO
+    def test_nonkeyframes_mapping(self, stream, render_freq: int = 2, test_until: int = 200) -> None:
+        """We observe differences when doing a manual trajectory interpolation and when we do it in Gaussian Mapper.
+        Test here why the back and forth does not work correctly ...
+        """
+
+        def get_poses_from_cameras(cameras: List[Camera]) -> torch.Tensor | List:
+            poses = []
+            for cam in cameras:
+                pose = torch.eye(4)
+                pose[:3, :3] = cam.R
+                pose[:3, 3] = cam.T
+                poses.append(pose)
+            poses = torch.stack(poses)
+            return poses
+
+        # Overwrite Config to force setup
+        self.gaussian_mapper.refinement_iters = 0  # Make sure we never refine during last_call to do it manually
+
+        # Track & Render until early stopping
+        self.test_rendering(stream, render_freq=render_freq, test_until=test_until)
+        renderer = self.gaussian_mapper
+
+        ####
+        # 1. Get the trajectory of all cameras on the conventional way
+        ####
+        # Since we do early stopping, only look at interpolated poses until last keyframe
+        last_kf = self.video.timestamp[self.video.counter.value - 1]
+        w2c_all, tstamps = self.traj_filler(stream, return_tstamps=True)
+
+        w2c_all, tstamps = w2c_all[: int(last_kf) + 1], tstamps[: int(last_kf) + 1]
+        c2w_all_lie = w2c_all.inv().vec().cpu()  # 7x1 Lie algebra
+
+        ####
+        # 2. Get the trajectory inside the Gaussian Mapper
+        ####
+        # 0. Test: are non_kf_cams_w2c_lie and w2c_all the same for the non-keyframes? -> yes!
+        non_kf_cams, non_kf_cams_w2c_lie = renderer.get_nonkeyframe_cameras(stream, self.traj_filler)
+        # 1. Test: if we get the pose from the actual Camera object, will this be the same? -> yes!
+        test = get_poses_from_cameras([non_kf_cams[0]])  # Is lie(test) == w2c_all[non_kf_cams[0].uid]?
+
+        # Add these Cameras to kf_cams in self.cameras and reassing id's
+        new_mapping, masked_mapping = {}, {}
+        ## Change id's of existing keyframe to global timestamp in video
+        for cam in renderer.cameras:
+            new_id = int(self.video.timestamp[cam.uid].item())
+            masked_mapping[cam.uid] = (new_id, renderer.gaussians.unique_kfIDs == cam.uid)
+            new_mapping[new_id] = cam.uid  # Memoize from timestamp to old video index
+            cam.uid = new_id  # Reassign local keyframe ids to global stream ids
+
+        self.cam2buffer = new_mapping
+        # Update the keyframe ids for each Gaussian, so they fit the new global uid
+        for key, val in masked_mapping.items():
+            new_id, mask = val
+            renderer.gaussians.unique_kfIDs[mask] = new_id
+
+        rnd_w2c_kf = get_poses_from_cameras(renderer.cameras)
+        rnd_w2c_kf_lie = [matrix_to_lie(matr) for matr in rnd_w2c_kf]  # 7x1 Lie algebra
+        # Sanity check: Compare these with self.video.poses[:len(renderer.cameras)]
+        w2c_kf_lie = self.video.poses[: self.video.counter.value]  # 7x1 Lie algebra
+        # 3. test: are these the same? -> yes!
+
+        renderer.cameras += non_kf_cams  # Add to set of cameras
+        # Reorder according to global uid
+        renderer.cameras = sorted(renderer.cameras, key=lambda x: x.uid)
+        # Test: this should give as all cameras sorted and with the right 4x4 positions we also have in w2c_all
+        rnd_w2c_all = get_poses_from_cameras(renderer.cameras)
+        rnd_w2c_all = rnd_w2c_all[: int(last_kf) + 1]  # Only look at interpolated poses until last keyframe
+        # 3. Compare -> Same
 
     def run(self, stream):
         """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
@@ -409,10 +493,15 @@ class SlamTestbed(SLAM):
         render_freq = 5  # Run rendering every k frontends
         backend_freq = 10  # Run backend every 5 frontends
 
-        # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200)
-        # self.test_tracking(stream, backend_freq=backend_freq)
-        # self.test_rendering(stream, render_freq=render_freq)
-        self.run_track_render(stream, backend_freq=backend_freq, render_freq=render_freq)
+        # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200) # Check how much Rendering can overfit, when initialized correctly
+        # self.test_tracking(stream, backend_freq=backend_freq) # Check how tracking works sequentially
+        # self.test_rendering(stream, render_freq=render_freq) # Check how Renderer works on top of Tracker sequentially
+        # Check the add_nonkeyframe functionality and trajectory interpolation in GaussianMapper
+        # self.test_nonkeyframes_mapping(stream)
+
+        self.run_track_render(
+            stream, backend_freq=backend_freq, render_freq=render_freq
+        )  # Check how Renderer works on top of all Tracker components sequentially
         ipdb.set_trace()
 
         self.terminate(processes, stream, None)

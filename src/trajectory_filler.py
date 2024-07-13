@@ -61,8 +61,7 @@ class PoseTrajectoryFiller:
         t0 = torch.tensor([ts[ts <= t].shape[0] - 1 for t in timestamps])
         t1 = torch.where(t0 < N - 1, t0 + 1, t0)
 
-        # time interval between nearby keyframes
-        dt = ts[t1] - ts[t0] + 1e-3
+        dt = ts[t1] - ts[t0] + 1e-5  # time interval between nearby keyframes
         dP = Ps[t1] * Ps[t0].inv()  # Get relative pose
         # Do Linear Interpolation in between segments
         v = dP.log() / dt.unsqueeze(dim=-1)
@@ -111,8 +110,10 @@ class PoseTrajectoryFiller:
     @torch.no_grad()
     def __call__(self, image_stream, batch_size: int = 32, return_tstamps: bool = False):
         """fill in poses of non-keyframe images in batch mode. This works by first linear interpolating the
-        poses in between the keyframes, then computing the optical flow between these frames and doing a motion only BA
-        refinement
+        poses in between the keyframes, then computing the optical flow between these frames and doing a
+        motion only BA refinement.
+        NOTE: Usually there is ~10-15 frames between keyframes in a normal video. We therefore set the batch size to be higher, so
+        that we have more keyframes in a single batch.
 
         Returns:
         ---
@@ -140,6 +141,13 @@ class PoseTrajectoryFiller:
                 timestamp, image, depth, intrinsic, _ = frame
                 static_mask = None
 
+            # Ignore the first frame, as this one is fixed to identity!
+            # Since we use a slack mini-buffer at the end of the video buffer for interpolation,
+            # bundle adjustment will not fix the first frame (t0 will never be 0)!
+            if timestamp == 0:
+                first_pose = SE3(self.video.poses[0].clone())
+                continue
+
             # When optimizing intrinsics as well, choose the optimized ones instead of the ones from the dataset!
             if self.video.opt_intr:
                 intrinsic = self.video.intrinsics[0] * self.video.scale_factor
@@ -162,12 +170,14 @@ class PoseTrajectoryFiller:
                 pose_list += self.__fill(timestamps, images, depths, intrinsics, static_masks=masks)
                 timestamps, images, depths, intrinsics, masks = [], [], [], [], []
 
+        # Take care of last rest batch < batch_size
         if len(timestamps) > 0:
             depths = depths if len(depths) > 0 else None
             pose_list += self.__fill(timestamps, images, depths, intrinsics)
 
         if return_tstamps:
-            return lietorch.cat(pose_list, dim=0), all_timestamps
+            all_timestamps = [0] + all_timestamps
+            return lietorch.cat([first_pose[None]] + pose_list, dim=0), all_timestamps
         else:
             # stitch pose segments together
-            return lietorch.cat(pose_list, dim=0)
+            return lietorch.cat([first_pose[None]] + pose_list, dim=0)
