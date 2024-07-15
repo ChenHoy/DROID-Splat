@@ -13,7 +13,7 @@ opt_intr: False
 
 tracking:
   frontend:
-    optimize_scales: False
+    optimize_scales: True
 
 
 mapping:

@@ -877,7 +877,7 @@ class GaussianMapper(object):
                 print(len(low_opacity_frames), "frames with low opacity")
                 ng_before = len(self.gaussians)
                 for view, mask in low_opacity_frames:
-                    self.gaussians.densify_w_mask(view, mask)
+                    self.gaussians.densify_from_mask(view, mask)
                 if (len(self.gaussians) - ng_before) > 0:
                     self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity/error")
 
@@ -1216,13 +1216,13 @@ class GaussianMapper(object):
 
         # Dont update when we get no new frames
         if not the_end and self.last_idx + self.delay < (self.cur_idx + 1) and (self.cur_idx + 1) > self.warmup:
-            self._update(iters=self.mapping_iters)
+            self._update(iters=self.mapping_iters, delay_to_tracking=True)
             self.count += 1  # Count how many times we ran the Renderer
             return False
 
         # We reached the end of the video, but we still have to process some keyframes before last call
         elif the_end and self.last_idx + self.delay < self.cur_idx and (self.cur_idx + 1) > self.warmup:
-            self._update(iters=self.mapping_iters)
+            self._update(iters=self.mapping_iters, delay_to_tracking=False)
             self.count += 1  # Count how many times we ran the Renderer
             return False
 

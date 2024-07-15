@@ -391,6 +391,8 @@ class SLAM:
             self.backend.count = count_to_set  # Reset with memoized count
             self.backend.to(self.device)
 
+        return count_to_set
+
     def get_potential_loop_update(self, loop_queue: mp.Queue):
         try:
             new_loops = get_all_queue(loop_queue)  # Empty the whole Queue at once

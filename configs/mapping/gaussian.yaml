@@ -16,7 +16,7 @@ feedback:
 # Online Optimization
 online_opt:
   ## Local sliding optimization window
-  iters: 35 # Optimization iterations for selected views
+  iters: 30 # Optimization iterations for selected views
   n_last_frames: 10 # Always optimize the last n frames
   n_rand_frames: 5 # Optimize random global frames on top
   batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
@@ -47,7 +47,7 @@ online_opt:
 
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
-      max_grad: 0.0005 # Gaussians with gradients above this are split (smaller -> denser)
+      max_grad: 0.005 # Gaussians with gradients above this are split (smaller -> denser)
       extent: 5  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
       min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
       max_screen_size: 20 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
@@ -74,7 +74,7 @@ opt_params:
   position_lr_max_steps: 50 # Default MonoGS: 30000
   feature_lr: 1e-3 # Default MonoGS: 0.0025
   opacity_lr: 2e-2 # Default MonoGS: 0.05
-  scaling_lr: 3e-3 # Default MonoGS: 0.001
+  scaling_lr: 1e-3 # Default MonoGS: 0.001
   rotation_lr: 4e-4
   percent_dense: 0.01 # default 0.01, this affects the densification of the Gaussians (lower -> more Gaussians)
   refinement_lr_factor: 0.1 # Change the learning rate for refinement
@@ -115,6 +115,7 @@ refinement:
 
   densify:
     use_opacity: True # Use opacity based densification
+
     # Densify Gaussians based on opacity only after k Mapper updates
     opacity:
       after: 10  # NOTE we usually run the Mapper ~30-40 times on normal videos
@@ -124,7 +125,7 @@ refinement:
 
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
-      max_grad: 0.0005 # Gaussians with gradients above this are split (smaller -> denser)
+      max_grad: 0.001 # Gaussians with gradients above this are split (smaller -> denser)
       extent: 1  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
       min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
       max_screen_size: 15 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
