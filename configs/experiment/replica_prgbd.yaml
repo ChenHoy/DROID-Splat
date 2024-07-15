@@ -17,7 +17,7 @@ tracking:
 
 
 mapping:
-  mapping_iters: 50
+  mapping_iters: 30
   refinement_iters: 50 # Final Optimization iterations for all views
   use_prior_for_supervision: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
 

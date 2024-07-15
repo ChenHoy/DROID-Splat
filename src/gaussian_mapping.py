@@ -550,6 +550,9 @@ class GaussianMapper(object):
                 Will ignore the importance weights ..."""
             )
 
+        self.covisibility_pruning(n_last_frames=self.n_last_frames, **self.update_params.pruning)
+
+
         # Update GUI
         if self.use_gui:
             self.q_main2vis.put_nowait(
@@ -819,8 +822,8 @@ class GaussianMapper(object):
 
             loss += current_loss
 
-            low_opacity_mask = opacity.squeeze() < 0.1
-            if low_opacity_mask.sum() / n_pixel > 0.1:
+            low_opacity_mask = opacity.squeeze() < self.update_params.densify.opacity.th
+            if low_opacity_mask.sum() / n_pixel > self.update_params.densify.opacity.ratio:
                 low_opacity_frames.append((view, low_opacity_mask))
 
         # Scale the loss with the number of frames so we adjust the learning rate dependent on batch size,
@@ -860,7 +863,6 @@ class GaussianMapper(object):
             # Prune and Densify
             if (
                 self.last_idx > self.n_last_frames
-                and (iter + 1) % self.update_params.prune_densify_every == 0
                 and prune_densify
             ):
                 # General pruning based on opacity and size + densification (from original 3DGS)
@@ -868,9 +870,7 @@ class GaussianMapper(object):
 
             # Densify in low opacity regions only after the map is stable already
             # (else we waste compute, because densify_and_prune will fill initial holes quickly)
-            if (
-                (iter + 1) % self.update_params.prune_densify_every == 0
-                and opacity_densify
+            if (opacity_densify and prune_densify
                 and self.count > self.update_params.densify.opacity.after
             ):
 
@@ -1154,16 +1154,16 @@ class GaussianMapper(object):
             return
 
         ### Optimize gaussians
-        do_densify = len(self.iteration_info) % self.update_params.densify_every == 0
-        opacity_densify = do_densify and self.update_params.densify.use_opacity
+        #opacity_densify = do_densify and self.update_params.densify.use_opacity
         for iter in tqdm(range(iters), desc=colored("Gaussian Optimization", "magenta"), colour="magenta"):
+            do_densify = iter % self.update_params.prune_densify_every == 0
             frames = self.select_keyframes()[0] + self.new_cameras
             loss = self.mapping_step(
                 iter,
                 frames,
                 self.update_params.densify.vanilla,
                 prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
-                opacity_densify=opacity_densify,  # Densify based on low opacity regions
+                opacity_densify=self.update_params.densify.use_opacity,  # Densify based on low opacity regions
                 optimize_poses=self.update_params.optimize_poses,
             )
             self.loss_list.append(loss)

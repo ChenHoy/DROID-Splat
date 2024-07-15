@@ -1,5 +1,5 @@
 dataset: 'replica'
-input_folder: "/media/data/Replica/office1"
+input_folder: "/media/data/Replica/office0"
 png_depth_scale: 6553.5 #for depth image in png format
 
 ### camera parameters
