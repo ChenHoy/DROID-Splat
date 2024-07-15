@@ -50,7 +50,7 @@ why all matmul / einsum operations are cast to float32 afterwards.
 
 NOTE DO NOT USE THESE FUNCTIONS FOR LARGE-SCLAE SYSTEMS!
 The dense Cholesky decomposition solver is numerically unstable for very sparse systems.
-Example: These work fine in the frontend until we hit a loop-closure, which suddenly creates a very 
+Example: These work fine until we hit a loop-closure, which suddenly creates a very 
 large window [t0, t1] with a lot of sparse entries. The dense solver will then result in nan's.
 
 NOTE Hessian H needs to be positive definite, the Schur complement S should also be positive definite!
@@ -61,9 +61,20 @@ DROID-SLAM uses the same formulation like DSO does, so this is normal
 
 NOTE Introducing additional scale/shift parameters for a prior can destabilize the optimization when also optimizing the poses. 
 This creats an ambiguity, where we could scale the disparities and poses with a different scale. This usually diverges!
+The same is true for when we optimize intrinsics and scales, that is a bad idea!
 
 NOTE we change tensors in place similar to the CUDA kernel API, so be cautious what you pass to these functions
+
+NOTE very large problems require float64 precision to be numerically stable (else we overflow -> inf/-inf), the reason for this is simply the large number of 
+variables due to computing dense and pixel wise. We dont observe this problem in the CUDA kernels, since computations can be run elementwise in parallel and not vectorized 
+over very large system matrices. 
+However, the main system runs in float32 in order to achieve a medium memory footprint (< 24GB) and run on high resolution images.
+Since we have a multi-threaded system, we store tensors in shared_memory in order to have quick read/write access. Therefore all tensors must have 
+the same datatype like the rest of the system! For this reason we provide the option to run the system in a given precision (Input is always float32).
+In case we detect an overflow, we simply clip the Jacobians / Gradients, which effectively limits the step size of the optimizer.
 """
+
+# TODO we can use unsqueeze and squeeze! correct again for better readability
 
 
 def safe_scatter_add_mat(A: torch.Tensor, ii, jj, n: int, m: int) -> torch.Tensor:
@@ -167,6 +178,7 @@ def bundle_adjustment(
     motion_only: bool = False,
     scale_prior: bool = False,
     alpha: float = 0.01,
+    use_double: bool = True,
 ) -> None:
     """Wrapper function around different bundle adjustment methods."""
 
@@ -174,13 +186,15 @@ def bundle_adjustment(
 
     # Convert and batch up the tensors to work with the pure Python code
     Gs = lietorch.SE3(poses[None, ...])
-    disps, weight = disps.unsqueeze(0), weight.unsqueeze(0)
-    target, intrinsics = target.unsqueeze(0), intrinsics.unsqueeze(0)
+
+    # Batch up tensors without copying out of shared memory (in-place)
+    disps, weight = disps.reshape((1,) + disps.shape), weight.reshape((1,) + weight.shape)
+    target, intrinsics = target.reshape((1,) + target.shape), intrinsics.reshape((1,) + intrinsics.shape)
     if disps_sens is not None:
-        disps_sens = disps_sens.unsqueeze(0)
+        disps_sens = disps_sens.reshape((1,) + disps_sens.shape)
     if scale_prior:
         assert disps_sens is not None, "You need to provide prior disparities to optimize with scales!"
-        scales, shifts = scales.unsqueeze(0), shifts.unsqueeze(0)
+        scales, shifts = scales.reshape((1,) + scales.shape), shifts.reshape((1,) + shifts.shape)
 
     # Prepare arguments for bundle adjustment
     args = (target, weight, Gs, disps, intrinsics, ii, jj, t0, t1)
@@ -201,18 +215,18 @@ def bundle_adjustment(
             ba_function = BA
 
     #### Bundle Adjustment Loop
-    disps.clamp_(min=0.001), disps_sens.clamp_(min=0.001)
+    disps.clamp_(min=1e-3)
     for i in range(iters):
-        ba_function(*args, **skwargs, ep=ep, lm=lm)
-        disps.clamp_(min=0.001)  # Disparities should never be negative
+        ba_function(*args, **skwargs, ep=ep, lm=lm, use_double=use_double)
+        disps.clamp_(min=1e-3)  # Disparities should never be negative
 
     #### Update data structure
     # Remove the batch dimension again
-    poses = Gs.data[0]
-    disps = disps[0]
+    poses, disps = Gs.data[0], disps[0]
+    if disps_sens is not None:
+        disps_sens = disps_sens[0]
     if scale_prior:
-        scales = scales[0]
-        shifts = shifts[0]
+        scales, shifts = scales[0], shifts[0]
 
 
 def get_hessian_and_rhs(
@@ -224,29 +238,37 @@ def get_hessian_and_rhs(
     coords: torch.Tensor,
     valid: torch.Tensor,
     with_structure: bool = True,
+    use_double: bool = False,
 ):
     """Get mixed terms of Jacobian and Hessian for constructing the linear system"""
+    if use_double:
+        dtype = torch.float64
+    else:
+        dtype = torch.float32
+
     B, N, _, ht, wd = target.shape
     # Reshape to residuals vector
     r = rearrange(target, "b n xy h w -> b n h w xy") - coords
     # Filter out super large residuals
-    valid *= (r.norm(dim=-1) < 250.0).float().unsqueeze(-1)
-    r = rearrange(r.double(), "b n h w xy -> b n (h w xy)")
+    low_resid = (r.norm(dim=-1) < 250.0).to(dtype)
+    valid *= low_resid.reshape(low_resid.shape + (1,))  # Unsqueeze without copy by using reshape
+
+    r = rearrange(r.to(dtype), "b n h w xy -> b n (h w xy)")
     w = 0.001 * (valid * rearrange(weight, "b n xy h w -> b n h w xy"))
-    w = rearrange(w.double(), "b n h w xy -> b n (h w xy) 1")
+    w = rearrange(w.to(dtype), "b n h w xy -> b n (h w xy) 1")
 
     Ji = rearrange(Ji, "b n h w xy D -> b n (h w xy) D")
     Jj = rearrange(Jj, "b n h w xy D -> b n (h w xy) D")
     wJiT, wJjT = (w * Ji).mT, (w * Jj).mT
 
     # Each block is B x N x D x D
-    Hii = einsum(wJiT, Ji, "b n i j , b n j k -> b n i k").double()
-    Hij = einsum(wJiT, Jj, "b n i j , b n j k -> b n i k").double()
-    Hji = einsum(wJjT, Ji, "b n i j , b n j k -> b n i k").double()
-    Hjj = einsum(wJjT, Jj, "b n i j , b n j k -> b n i k").double()
+    Hii = einsum(wJiT, Ji, "b n i j , b n j k -> b n i k").to(dtype)
+    Hij = einsum(wJiT, Jj, "b n i j , b n j k -> b n i k").to(dtype)
+    Hji = einsum(wJjT, Ji, "b n i j , b n j k -> b n i k").to(dtype)
+    Hjj = einsum(wJjT, Jj, "b n i j , b n j k -> b n i k").to(dtype)
     # Each rhs term is B x N x D x 1
-    vi = einsum(-wJiT, r, "b n D hwxy, b n hwxy -> b n D").double()
-    vj = einsum(-wJjT, r, "b n D hwxy, b n hwxy -> b n D").double()
+    vi = einsum(-wJiT, r, "b n D hwxy, b n hwxy -> b n D").to(dtype)
+    vj = einsum(-wJjT, r, "b n D hwxy, b n hwxy -> b n D").to(dtype)
 
     if not with_structure:
         return Hii, Hij, Hji, Hjj, vi, vj
@@ -256,27 +278,33 @@ def get_hessian_and_rhs(
     Jz = rearrange(Jz, "b n h w xy 1 -> b n (h w) xy 1")
     wJiT = rearrange(wJiT, "b n D (hw xy) -> b n hw D xy", hw=ht * wd, xy=2)
     wJjT = rearrange(wJjT, "b n D (hw xy) -> b n hw D xy", hw=ht * wd, xy=2)
-    Eik = torch.matmul(wJiT, Jz).squeeze(-1).double()
-    Ejk = torch.matmul(wJjT, Jz).squeeze(-1).double()
+    Eik = torch.matmul(wJiT, Jz).squeeze(-1).to(dtype)
+    Ejk = torch.matmul(wJjT, Jz).squeeze(-1).to(dtype)
 
     # Sparse diagonal block of disparities only
     w = rearrange(w, "b n (hw xy) 1 -> b n hw xy", hw=ht * wd)
     r = rearrange(r, "b n (hw xy) -> b n hw xy", hw=ht * wd)
     wJzT = (w[..., None] * Jz).mT  # (B N HW 1 XY)
-    wk = einsum(-wJzT.squeeze(-2), r, "b n hw xy, b n hw xy -> b n hw").double()
-    Ck = einsum(wJzT.squeeze(-2), Jz.squeeze(-1), "b n hw xy, b n hw xy -> b n hw")
-    Ck = Ck.double()
+    wk = einsum(-wJzT.squeeze(-2), r, "b n hw xy, b n hw xy -> b n hw").to(dtype)
+    Ck = einsum(wJzT.squeeze(-2), Jz.squeeze(-1), "b n hw xy, b n hw xy -> b n hw").to(dtype)
 
     return Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk
 
 
-def scatter_pose_structure(Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk, ii, jj, kk, bs, m, n, d):
+def scatter_pose_structure(
+    Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk, ii, jj, kk, bs, m, n, d, use_double: bool = False
+):
     """Scatter the pose and structure hessians.
     This creates a sparse system out of dense blocks.
     """
+    if use_double:
+        dtype = torch.float64
+    else:
+        dtype = torch.float32
+
     # Scatter add all edges and assemble full Hessian
     # 4 x (B, N, 6, 6) -> (B, M x M, 6, 6)
-    H = torch.zeros(bs, m * m, d, d, device=Hii.device, dtype=torch.float64)
+    H = torch.zeros(bs, m * m, d, d, device=Hii.device, dtype=dtype)
     safe_scatter_add_mat_inplace(H, Hii, ii, ii, bs, m, d)
     safe_scatter_add_mat_inplace(H, Hij, ii, jj, bs, m, d)
     safe_scatter_add_mat_inplace(H, Hji, jj, ii, bs, m, d)
@@ -310,19 +338,20 @@ def MoBA(
     ep: float = 0.1,
     lm: float = 1e-4,
     rig: int = 1,
+    use_double: bool = False,
 ) -> None:
     """Motion only bundle adjustment for optimizing pose nodes inside a window [t0, t1].
     The factor graph is defined by ii, jj.
 
     NOTE This always builds the system for poses 0:t1, but then excludes all poses as fixed before t0.
     """
-    # Select keyframe window to optimize over!
-    disps, poses, intrinsics = (
-        all_disps[:, :t1],
-        all_poses[:, :t1],
-        all_intrinsics[:, :t1],
-    )
+    if use_double:
+        dtype = torch.float64
+    else:
+        dtype = torch.float32
 
+    # Select keyframe window to optimize over!
+    disps, poses, intrinsics = all_disps[:, :t1], all_poses[:, :t1], all_intrinsics[:, :t1]
     # Always fix at least the first keyframe!
     fixedp = max(t0, 1)
 
@@ -331,11 +360,16 @@ def MoBA(
     d = poses.manifold_dim  # 6 for SE3, 7 for SIM3
 
     ### 1: compute jacobians and residuals ###
-    coords, valid, (Ji, Jj, Jz) = projective_transform(poses, disps, intrinsics, ii, jj, jacobian=True)
+    coords, valid, (Ji, Jj, Jz) = projective_transform(
+        poses, disps, intrinsics, ii, jj, jacobian=True, use_double=use_double
+    )
     # NOTE normally this should be -Ji / -Jj and then vi / vj = -J^T @ r
-    Ji, Jj, Jz = -Ji.double(), -Jj.double(), -Jz.double()
+    Ji, Jj, Jz = -Ji.to(dtype), -Jj.to(dtype), -Jz.to(dtype)
+
     ### 2: Construct linear system
-    Hii, Hij, Hji, Hjj, vi, vj = get_hessian_and_rhs(Jz, Ji, Jj, target, weight, coords, valid, with_structure=False)
+    Hii, Hij, Hji, Hjj, vi, vj = get_hessian_and_rhs(
+        Jz, Ji, Jj, target, weight, coords, valid, with_structure=False, use_double=use_double
+    )
 
     # only optimize keyframe poses
     m = m - fixedp
@@ -344,19 +378,19 @@ def MoBA(
     ii, jj = ii.to(torch.int64), jj.to(torch.int64)
 
     # Assemble larger sparse system for optimization window
-    H = torch.zeros(bs, m * m, d, d, device=target.device, dtype=torch.float64)
+    H = torch.zeros(bs, m * m, d, d, device=target.device, dtype=dtype)
     safe_scatter_add_mat_inplace(H, Hii, ii, ii, bs, m, d)
     safe_scatter_add_mat_inplace(H, Hij, ii, jj, bs, m, d)
     safe_scatter_add_mat_inplace(H, Hji, jj, ii, bs, m, d)
     safe_scatter_add_mat_inplace(H, Hjj, jj, jj, bs, m, d)
     H = H.reshape(bs, m, m, d, d)
 
-    v = torch.zeros(bs, m, d, device=target.device, dtype=torch.float64)
+    v = torch.zeros(bs, m, d, device=target.device, dtype=dtype)
     safe_scatter_add_vec_inplace(v, vi, ii, bs, m, d)
     safe_scatter_add_vec_inplace(v, vj, jj, bs, m, d)
 
     H = rearrange(H, "b n1 n2 d1 d2 -> b (n1 d1) (n2 d2)")
-    H = H + (ep + lm * H) * torch.eye(H.shape[1], device=H.device)  # Damping
+    H = H + (ep + lm * H) * torch.eye(H.shape[1], device=H.device, dtype=dtype)  # Damping
     v = rearrange(v, "b n d -> b (n d) 1")
 
     ### 3: solve the system + apply retraction ###
@@ -369,7 +403,8 @@ def MoBA(
         if torch.isnan(dx).any():
             print("LU decomposition failed, using 0 update ...")
             dx = torch.zeros_like(dx)
-    dx = rearrange(dx, "b (n1 d1) 1 -> b n1 d1", n1=m, d1=d).float()
+
+    dx = rearrange(dx, "b (n1 d1) 1 -> b n1 d1", n1=m, d1=d).float() # Always convert to system precision at float32
 
     # Update only un-fixed poses
     poses1, poses2 = poses[:, :fixedp], poses[:, fixedp:]
@@ -396,6 +431,7 @@ def BA(
     lm: float = 1e-4,
     structure_only: bool = False,
     rig: int = 1,
+    use_double: bool = False,
 ) -> None:
     """Bundle Adjustment for optimizing both poses and disparities.
 
@@ -416,8 +452,13 @@ def BA(
         jj: Timesteps of incoming edges of shape (|E|)
         t0, t1: Optimization window
     """
+    if use_double:
+        dtype = torch.float64
+    else:
+        dtype = torch.float32
+
     # Select keyframe window to optimize over!
-    disps, poses, intrinsics = get_keyframe_window(all_disps, all_poses, all_intrinsics, t1)
+    disps, poses, intrinsics = get_keyframe_window(all_poses, all_intrinsics, all_disps, t1)
     if all_disps_sens is not None:
         disps_sens = all_disps_sens[:, :t1]
     else:
@@ -431,11 +472,15 @@ def BA(
     d = poses.manifold_dim  # 6 for SE3, 7 for SIM3
 
     ### 1: compute jacobians and residuals ###
-    coords, valid, (Ji, Jj, Jz) = projective_transform(poses, disps, intrinsics, ii, jj, jacobian=True)
-    Jz, Ji, Jj = -Jz.double(), -Ji.double(), -Jj.double()
+    coords, valid, (Ji, Jj, Jz) = projective_transform(
+        poses, disps, intrinsics, ii, jj, jacobian=True, use_double=use_double
+    )
+    Jz, Ji, Jj = -Jz.to(dtype), -Ji.to(dtype), -Jj.to(dtype)
 
     ### 2: Assemble linear system ###
-    Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk = get_hessian_and_rhs(Jz, Ji, Jj, target, weight, coords, valid)
+    Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk = get_hessian_and_rhs(
+        Jz, Ji, Jj, target, weight, coords, valid, use_double
+    )
 
     # Construct larger sparse system
     kx, kk = torch.unique(ii, return_inverse=True)
@@ -451,7 +496,9 @@ def BA(
     ii = ii // rig - fixedp
     jj = jj // rig - fixedp
 
-    H, E, C, v, w = scatter_pose_structure(Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk, ii, jj, kk, bs, m, n, d)
+    H, E, C, v, w = scatter_pose_structure(
+        Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk, ii, jj, kk, bs, m, n, d, use_double=use_double
+    )
     eta = rearrange(eta, "n h w -> 1 n (h w)")
 
     if disps_sens is not None:
@@ -467,13 +514,15 @@ def BA(
 
     ### 3: solve the system ###
     if structure_only:
-        dz = schur_block_solve(H, E, C, v, w, ep=ep, lm=lm, structure_only=True)
+        dz = schur_block_solve(H, E, C, v, w, ep=ep, lm=lm, structure_only=True, use_double=use_double)
+        dz = dz.float  # Finally always convert to system precision in float32
         dz = rearrange(dz, "b (n h w) 1 1 -> b n h w", n=n, h=ht, w=wd)
         ### 4: apply retraction ###
         all_disps[:, :t1] = additive_retr(disps, dz, kx)
 
     else:
-        dx, dz = schur_block_solve(H, E, C, v, w, ep=ep, lm=lm)
+        dx, dz = schur_block_solve(H, E, C, v, w, ep=ep, lm=lm, use_double=use_double)
+        dx, dz = dx.float(), dz.float()  # Finally always convert to system precision in float32
         dz = rearrange(dz, "b (n h w) 1 1 -> b n h w", n=n, h=ht, w=wd)
         ### 4: apply retraction ###
         # Update only un-fixed poses
@@ -485,7 +534,7 @@ def BA(
         all_disps[:, :t1] = additive_retr(disps, dz, kx)
 
 
-def get_augmented_hessian_and_rhs_full(H, E, C, D, G, F, L, K, v, w, vs, vo):
+def get_augmented_hessian_and_rhs_full(H, E, C, D, G, F, L, K, v, w, vs, vo, use_double: bool = False):
     """Create augmented larger system with prior optimization variables
     for solving with single Schur complement.
 
@@ -504,9 +553,13 @@ def get_augmented_hessian_and_rhs_full(H, E, C, D, G, F, L, K, v, w, vs, vo):
     """
     bs, m, m, d, d = H.shape
     bs, n, n = D.shape
+    if use_double:
+        dtype = torch.float64
+    else:
+        dtype = torch.float32
 
     # There is no coupling between pose graph and scale, shift parameters -> We have to zero pad the augmented hessian
-    zeros_pose_so = torch.zeros((bs, d * m, 2 * n), device=H.device, dtype=torch.float64)
+    zeros_pose_so = torch.zeros((bs, d * m, 2 * n), device=H.device, dtype=dtype)
 
     H = rearrange(H, "b m1 m2 d1 d2 -> b (m1 d1) (m2 d2)")
     H_top = torch.cat([H, zeros_pose_so], dim=2)
@@ -526,7 +579,9 @@ def get_augmented_hessian_and_rhs_full(H, E, C, D, G, F, L, K, v, w, vs, vo):
     return H_aug, E_aug, C, v_aug, w
 
 
-def get_regularizor_jacobians(disps_sens: torch.Tensor, weights: torch.Tensor, bs: int, n: int, ht: int, wd: int):
+def get_regularizor_jacobians(
+    disps_sens: torch.Tensor, weights: torch.Tensor, bs: int, n: int, ht: int, wd: int, use_double: bool = False
+):
     """Get Jacobians of second residual || d_i - (s * dprior_i + o) ||^2 w.r.t s and o."""
 
     def scatter_jacobian(A, ii, jj, n, m):
@@ -534,8 +589,13 @@ def get_regularizor_jacobians(disps_sens: torch.Tensor, weights: torch.Tensor, b
         B = rearrange(B, "b (n1 n2) 1 1 -> b n1 n2", n1=n, n2=m)
         return B
 
-    Jsi = -disps_sens.view(bs, n * ht * wd, 1, 1) * torch.ones(bs, n * ht * wd, 1, 1, device=disps_sens.device)
-    Joi = -torch.ones(bs, n * ht * wd, 1, 1, device=disps_sens.device)
+    if use_double:
+        dtype = torch.float64
+    else:
+        dtype = torch.float32
+
+    Jsi = -disps_sens.view(bs, n * ht * wd, 1, 1) * torch.ones(bs, n * ht * wd, 1, 1, device=disps_sens.device, dtype=dtype)
+    Joi = -torch.ones(bs, n * ht * wd, 1, 1, device=disps_sens.device, dtype=dtype)
     wJsi = weights.view(bs, n * ht * wd, 1, 1) * Jsi
     wJoi = weights.view(bs, n * ht * wd, 1, 1) * Joi
 
@@ -546,10 +606,12 @@ def get_regularizor_jacobians(disps_sens: torch.Tensor, weights: torch.Tensor, b
     jsjj = jsjj + jjk
 
     # Jacobians: (B x N x NHW) for Js, Jo and (B x NHW x NHW) for Jd
-    Js = scatter_jacobian(Jsi, jsjj, jsii, n * ht * wd, n).double()
-    wJs = scatter_jacobian(wJsi, jsjj, jsii, n * ht * wd, n).double()
-    Jo = scatter_jacobian(Joi, jsjj, jsii, n * ht * wd, n).double()
-    wJo = scatter_jacobian(wJoi, jsjj, jsii, n * ht * wd, n).double()
+    Js = scatter_jacobian(Jsi, jsjj, jsii, n * ht * wd, n)
+    wJs = scatter_jacobian(wJsi, jsjj, jsii, n * ht * wd, n)
+    Jo = scatter_jacobian(Joi, jsjj, jsii, n * ht * wd, n)
+    wJo = scatter_jacobian(wJoi, jsjj, jsii, n * ht * wd, n)
+    Js, wJs, Jo, wJo = Js.to(dtype), wJs.to(dtype), Jo.to(dtype), wJo.to(dtype)
+
     return Js, Jo, wJs, wJo
 
 
@@ -564,17 +626,23 @@ def get_regularizor_hessians(
     n: int,
     ht: int,
     wd: int,
+    use_double: bool = False,
 ):
     """Get Hessian blocks for the regularizor term
     res = || d_i - (s * dprior_i + o) ||^2."""
-    F = alpha * wJs.mT  # torch.matmul(Js.mT, Jd) # Multiplication with diagonal is the same
-    K = alpha * wJo.mT  # torch.matmul(Jo.mT, Jd) # Multiplication with diagonal is the same
-    D = alpha * torch.matmul(wJs.mT, Js)
-    G = alpha * torch.matmul(wJo.mT, Jo)
-    L = alpha * torch.matmul(wJs.mT, Jo)
+    if use_double:
+        dtype = torch.float64
+    else:
+        dtype = torch.float32
 
-    vs = torch.matmul(-alpha * wJs.mT, res.view(bs, n * ht * wd, 1))
-    vo = torch.matmul(-alpha * wJo.mT, res.view(bs, n * ht * wd, 1))
+    F = alpha * wJs.mT.to(dtype)  # torch.matmul(Js.mT, Jd) # Multiplication with diagonal is the same
+    K = alpha * wJo.mT.to(dtype)  # torch.matmul(Jo.mT, Jd) # Multiplication with diagonal is the same
+    D = alpha * torch.matmul(wJs.mT.to(dtype), Js.to(dtype)).to(dtype)
+    G = alpha * torch.matmul(wJo.mT.to(dtype), Jo.to(dtype)).to(dtype)
+    L = alpha * torch.matmul(wJs.mT.to(dtype), Jo.to(dtype)).to(dtype)
+
+    vs = torch.matmul(-alpha * wJs.mT.to(dtype), res.view(bs, n * ht * wd, 1).to(dtype)).to(dtype)
+    vo = torch.matmul(-alpha * wJo.mT.to(dtype), res.view(bs, n * ht * wd, 1).to(dtype)).to(dtype)
 
     return F, K, D, G, L, vs, vo
 
@@ -600,6 +668,7 @@ def BA_prior(
     lm: float = 1e-4,
     alpha: float = 0.01,
     reweight_prior: bool = False,
+    use_double: bool = False,
 ):
     """Bundle Adjustment for optimizing with a depth prior.
     Monocular depth can only be estimated up to an unknown global scale.
@@ -608,6 +677,11 @@ def BA_prior(
     This function optimizes unknown scale and shift parameters of each key frame of the prior on top of
     camera pose graph and disparities.
     """
+    if use_double:
+        dtype = torch.float64
+    else:
+        dtype = torch.float32
+
     # Select keyframe window to optimize over!
     disps, poses, intrinsics, disps_sens, scales, shifts = get_keyframe_window(
         all_poses, all_intrinsics, all_disps, t1, all_disps_sens, all_scales, all_shifts
@@ -618,11 +692,15 @@ def BA_prior(
     d = poses.manifold_dim  # 6 for SE3, 7 for SIM3
 
     ### 1: compute jacobians and residuals ###
-    coords, valid, (Ji, Jj, Jz) = projective_transform(poses, disps, intrinsics, ii, jj, jacobian=True)
-    Jz, Ji, Jj = -Jz.double(), -Ji.double(), -Jj.double()
+    coords, valid, (Ji, Jj, Jz) = projective_transform(
+        poses, disps, intrinsics, ii, jj, jacobian=True, use_double=use_double
+    )
+    Jz, Ji, Jj = -Jz.to(dtype), -Ji.to(dtype), -Jj.to(dtype)
 
     ### 2: Assemble linear system ###
-    Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk = get_hessian_and_rhs(Jz, Ji, Jj, target, weight, coords, valid)
+    Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk = get_hessian_and_rhs(
+        Jz, Ji, Jj, target, weight, coords, valid, use_double=use_double
+    )
 
     # Construct larger sparse system
     kx, kk = torch.unique(ii, return_inverse=True)
@@ -638,9 +716,11 @@ def BA_prior(
     ii = ii - fixedp
     jj = jj - fixedp
 
-    H, E, C, v, w = scatter_pose_structure(Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk, ii, jj, kk, bs, m, n, d)
-    C_exp = torch.zeros((bs, n_exp, ht * wd), device=C.device, dtype=torch.float64)
-    w_exp = torch.zeros((bs, n_exp, ht * wd), device=w.device, dtype=torch.float64)
+    H, E, C, v, w = scatter_pose_structure(
+        Hii, Hij, Hji, Hjj, Eik, Ejk, Ck, vi, vj, wk, ii, jj, kk, bs, m, n, d, use_double=use_double
+    )
+    C_exp = torch.zeros((bs, n_exp, ht * wd), device=C.device, dtype=dtype)
+    w_exp = torch.zeros((bs, n_exp, ht * wd), device=w.device, dtype=dtype)
     C_exp[:, non_empty_nodes] = C
     w_exp[:, non_empty_nodes] = w
     eta = rearrange(eta, "n h w -> 1 n (h w)")
@@ -655,28 +735,28 @@ def BA_prior(
     # Residuals for r2(disps, s, o) (B, N, HW)
     scaled_prior = disps_sens[:, kx_exp].view(bs, -1, ht * wd) * scales[:, kx_exp, None] + shifts[:, kx_exp, None]
     # Prior should never be negative, i.e. clip this if s and o are diverging
-    scaled_prior.clamp_(min=0.001)
+    scaled_prior.clamp_(min=1e-5)
 
     ## Rescale the prior residuals according to estimated uncertainty
     # NOTE this gets rid of strong outliers like the sky or dynamic objects for scale adjustment
     # Get uncertainty weights for each edge and reduce for node
     if reweight_prior:
         # NOTE if you use this, the 2nd prior term will have much less weight in the overall objective -> Use a higher alpha value!
-        confidence = reduce_edge_weights(weight, ii, strategy="min").double()
+        confidence = reduce_edge_weights(weight, ii, strategy="min").to(dtype)
         # Take norm over xy axis to get single scalar
         confidence = torch.linalg.norm(confidence, dim=2).view(bs, -1, ht * wd)
         # Rescale to [0, 1]
         confidence = confidence / confidence.max()
-        all_conf = torch.zeros((bs, n_exp, ht * wd), device=weight.device, dtype=torch.float64)
+        all_conf = torch.zeros((bs, n_exp, ht * wd), device=weight.device, dtype=dtype)
         all_conf[:, non_empty_nodes] = confidence
         # always ensure to have enough residuals to actually optimize over
         # NOTE this is just a drastic measure to ensure a positive definite system matrix
         # if confidence.sum() < 0.1 * n * ht * wd:
-        #     all_conf = torch.ones_like(all_conf, device=confidence.device, dtype=torch.float64)
+        #     all_conf = torch.ones_like(all_conf, device=confidence.device, dtype=dtype)
     else:
-        all_conf = torch.ones((bs, n_exp, ht * wd), device=weight.device, dtype=torch.float64)
+        all_conf = torch.ones((bs, n_exp, ht * wd), device=weight.device, dtype=dtype)
 
-    r2 = (disps[:, kx_exp].view(bs, -1, ht * wd) - scaled_prior).double()
+    r2 = (disps[:, kx_exp].view(bs, -1, ht * wd) - scaled_prior).to(dtype)
     w_exp[:, non_empty_nodes] = (
         w_exp[:, non_empty_nodes] - alpha * all_conf[:, non_empty_nodes] * r2[:, non_empty_nodes]
     )
@@ -687,28 +767,31 @@ def BA_prior(
     # Manually set non-contributing nodes to zero gradients so we dont update these
     if empty_nodes > 0:
         Js_exp[:, :, ~non_empty_nodes] = torch.zeros(
-            (bs, n_exp * ht * wd, empty_nodes), device=Js_exp.device, dtype=torch.float64
+            (bs, n_exp * ht * wd, empty_nodes), device=Js_exp.device, dtype=dtype
         )
         Jo_exp[:, :, ~non_empty_nodes] = torch.zeros(
-            (bs, n_exp * ht * wd, empty_nodes), device=Jo_exp.device, dtype=torch.float64
+            (bs, n_exp * ht * wd, empty_nodes), device=Jo_exp.device, dtype=dtype
         )
         wJs_exp[:, :, ~non_empty_nodes] = torch.zeros(
-            (bs, n_exp * ht * wd, empty_nodes), device=Js_exp.device, dtype=torch.float64
+            (bs, n_exp * ht * wd, empty_nodes), device=Js_exp.device, dtype=dtype
         )
         wJo_exp[:, :, ~non_empty_nodes] = torch.zeros(
-            (bs, n_exp * ht * wd, empty_nodes), device=Jo_exp.device, dtype=torch.float64
+            (bs, n_exp * ht * wd, empty_nodes), device=Jo_exp.device, dtype=dtype
         )
-    F, K, D, G, L, vs, vo = get_regularizor_hessians(Js_exp, wJs_exp, Jo_exp, wJo_exp, r2, alpha, bs, n_exp, ht, wd)
+    F, K, D, G, L, vs, vo = get_regularizor_hessians(
+        Js_exp, wJs_exp, Jo_exp, wJo_exp, r2, alpha, bs, n_exp, ht, wd, use_double=use_double
+    )
     H_aug, E_aug, C_exp, v_aug, w_exp = get_augmented_hessian_and_rhs_full(
-        H, E, C_exp, D, G, F, L, K, v, w_exp, vs, vo
+        H, E, C_exp, D, G, F, L, K, v, w_exp, vs, vo, use_double=use_double
     )
     w_exp = rearrange(w_exp, "b n hw -> b (n hw) 1 1")
 
     ### 4: Solve whole system with dX, ds, do, dZ ###
     # NOTE this needs to be solve with LU decomposition since because of E,
     # the resulting Schur complement S is not positive definite
-    dxso, dz = schur_solve(H_aug, E_aug, C_exp, v_aug, w_exp, ep=ep, lm=lm, solver="lu")
+    dxso, dz = schur_solve(H_aug, E_aug, C_exp, v_aug, w_exp, ep=ep, lm=lm, solver="lu", use_double=use_double)
     dx, ds, do = dxso[:, : d * m], dxso[:, d * m : d * m + n], dxso[:, d * m + n :]
+    dxso, dz = dxso.float(), dz.float()  # Finally always convert to float32 like system!
     dz = rearrange(dz, "b (n h w) -> b n h w", n=n, h=ht, w=wd)
     dx = rearrange(dx, "b (m d) 1 -> b m d", m=m, d=d)
 
@@ -780,12 +863,18 @@ def BA_prior_no_motion(
     lm: float = 1e-4,
     alpha: float = 0.01,
     reweight_prior: bool = False,
+    use_double: bool = False,
 ):
     """Optimize the geometry of the scene with a depth prior. The prior is scale ambiguous, i.e. we add scale and shift
     parameters in the regularior term to optimize the depth of the scene. This is useful in combination with monocular depth estimation.
 
     NOTE: we fix the camera poses in order to not make the problem ill-posed
     """
+    if use_double:
+        dtype = torch.float64
+    else:
+        dtype = torch.float32
+
     disps, poses, intrinsics, disps_sens, scales, shifts = get_keyframe_window(
         all_poses, all_intrinsics, all_disps, t1, all_disps_sens, all_scales, all_shifts
     )
@@ -794,11 +883,15 @@ def BA_prior_no_motion(
     bs, m, ht, wd = disps.shape
 
     ### 1: compute jacobians and residuals ###
-    coords, valid, (Ji, Jj, Jz) = projective_transform(poses, disps, intrinsics, ii, jj, jacobian=True)
-    Jz, Ji, Jj = -Jz.double(), -Ji.double(), -Jj.double()
+    coords, valid, (Ji, Jj, Jz) = projective_transform(
+        poses, disps, intrinsics, ii, jj, jacobian=True, use_double=use_double
+    )
+    Jz, Ji, Jj = -Jz.to(dtype), -Ji.to(dtype), -Jj.to(dtype)
 
     ### 2: Assemble linear system ###
-    _, _, _, _, _, _, Ck, _, _, wk = get_hessian_and_rhs(Jz, Ji, Jj, target, weight, coords, valid)
+    _, _, _, _, _, _, Ck, _, _, wk = get_hessian_and_rhs(
+        Jz, Ji, Jj, target, weight, coords, valid, use_double=use_double
+    )
 
     ## Construct larger sparse system
     # What the CUDA kernel does:
@@ -818,8 +911,8 @@ def BA_prior_no_motion(
 
     C = safe_scatter_add_vec(Ck, kk, n)
     w = safe_scatter_add_vec(wk, kk, n)
-    C_exp = torch.zeros((bs, n_exp, ht * wd), device=C.device, dtype=torch.float64)
-    w_exp = torch.zeros((bs, n_exp, ht * wd), device=w.device, dtype=torch.float64)
+    C_exp = torch.zeros((bs, n_exp, ht * wd), device=C.device, dtype=dtype)
+    w_exp = torch.zeros((bs, n_exp, ht * wd), device=w.device, dtype=dtype)
     C_exp[:, non_empty_nodes] = C
     w_exp[:, non_empty_nodes] = w
 
@@ -829,49 +922,53 @@ def BA_prior_no_motion(
 
     scaled_prior = disps_sens[:, kx_exp].view(bs, -1, ht * wd) * scales[:, kx_exp, None] + shifts[:, kx_exp, None]
     # Prior should never be negative, i.e. clip this if s and o are diverging
-    scaled_prior.clamp_(min=0.001)
+    scaled_prior.clamp_(min=1e-5)
 
     ## Rescale the prior residuals according to estimated uncertainty
     # NOTE this gets rid of strong outliers like the sky or dynamic objects for scale adjustment
     # Get uncertainty weights for each edge and reduce for node
     if reweight_prior:
         # NOTE if you use this, the 2nd prior term will have much less weight in the overall objective -> Use a higher alpha value!
-        confidence = reduce_edge_weights(weight, ii, strategy="min").double()
+        confidence = reduce_edge_weights(weight, ii, strategy="min").to(dtype)
         # Take norm over xy axis to get single scalar
-        confidence = torch.linalg.norm(confidence, dim=2).view(bs, -1, ht * wd)
+        confidence = torch.linalg.norm(confidence, dim=2).reshape(bs, len(kx_exp), ht * wd)
         # Rescale to [0, 1]
         confidence = confidence / confidence.max()
-        all_conf = torch.zeros((bs, n_exp, ht * wd), device=weight.device, dtype=torch.float64)
+        all_conf = torch.zeros((bs, n_exp, ht * wd), device=weight.device, dtype=dtype)
         all_conf[:, non_empty_nodes] = confidence
         # always ensure to have enough residuals to actually optimize over
         # NOTE this is just a drastic measure to stabilize the system in case there are no confident matches
         if confidence.sum() < 0.15 * n * ht * wd:
-            all_conf = torch.ones_like(all_conf, device=confidence.device, dtype=torch.float64)
+            all_conf = torch.ones_like(all_conf, device=confidence.device, dtype=dtype)
     else:
-        all_conf = torch.ones((bs, n_exp, ht * wd), device=weight.device, dtype=torch.float64)
+        all_conf = torch.ones((bs, n_exp, ht * wd), device=weight.device, dtype=dtype)
 
-    r2 = (disps[:, kx_exp].view(bs, -1, ht * wd) - scaled_prior).double()
+    r2 = (disps[:, kx_exp].view(bs, -1, ht * wd) - scaled_prior).to(dtype)
     w_exp[:, non_empty_nodes] = (
         w_exp[:, non_empty_nodes] - alpha * all_conf[:, non_empty_nodes] * r2[:, non_empty_nodes]
     )
     w_exp = rearrange(w_exp, "b n hw -> b (n hw) 1 1")
 
     ### 3: Create augmented system
-    Js_exp, Jo_exp, wJs_exp, wJo_exp = get_regularizor_jacobians(disps_sens[:, kx_exp], all_conf, bs, n_exp, ht, wd)
+    Js_exp, Jo_exp, wJs_exp, wJo_exp = get_regularizor_jacobians(
+        disps_sens[:, kx_exp], all_conf, bs, n_exp, ht, wd, use_double=use_double
+    )
     if empty_nodes > 0:
         Js_exp[:, :, ~non_empty_nodes] = torch.zeros(
-            (bs, n_exp * ht * wd, empty_nodes), device=Js_exp.device, dtype=torch.float64
+            (bs, n_exp * ht * wd, empty_nodes), device=Js_exp.device, dtype=dtype
         )
         Jo_exp[:, :, ~non_empty_nodes] = torch.zeros(
-            (bs, n_exp * ht * wd, empty_nodes), device=Jo_exp.device, dtype=torch.float64
+            (bs, n_exp * ht * wd, empty_nodes), device=Jo_exp.device, dtype=dtype
         )
         wJs_exp[:, :, ~non_empty_nodes] = torch.zeros(
-            (bs, n_exp * ht * wd, empty_nodes), device=Js_exp.device, dtype=torch.float64
+            (bs, n_exp * ht * wd, empty_nodes), device=Js_exp.device, dtype=dtype
         )
         wJo_exp[:, :, ~non_empty_nodes] = torch.zeros(
-            (bs, n_exp * ht * wd, empty_nodes), device=Jo_exp.device, dtype=torch.float64
+            (bs, n_exp * ht * wd, empty_nodes), device=Jo_exp.device, dtype=dtype
         )
-    F, K, D, G, L, vs, vo = get_regularizor_hessians(Js_exp, wJs_exp, Jo_exp, wJo_exp, r2, alpha, bs, n_exp, ht, wd)
+    F, K, D, G, L, vs, vo = get_regularizor_hessians(
+        Js_exp, wJs_exp, Jo_exp, wJo_exp, r2, alpha, bs, n_exp, ht, wd, use_double=use_double
+    )
 
     # Define new H and E block
     DL = torch.cat([D, L], dim=2)
@@ -881,11 +978,13 @@ def BA_prior_no_motion(
     v = torch.cat([vs, vo], dim=1)
 
     ### 4: Solve whole system with dX, ds, do, dZ ###
-    dso, dz, was_success = schur_solve(H, E, C_exp, v, w_exp, ep=ep, lm=lm, return_state=True)
+    dso, dz, was_success = schur_solve(H, E, C_exp, v, w_exp, ep=ep, lm=lm, return_state=True, use_double=use_double)
     if not was_success:
-        # print(colored("Entering debug mode ...", "red"))
-        # ipdb.set_trace()
-        dso, dz = schur_solve(H, E, C_exp, v, w_exp, ep=ep, lm=lm, solver="lu")
+        print(colored("Entering debug mode ...", "red"))
+        ipdb.set_trace()
+        dso, dz = schur_solve(H, E, C_exp, v, w_exp, ep=ep, lm=lm, solver="lu", use_double=use_double)
+
+    dso, dz = dso.float(), dz.float()  # Finally always work in float32 like main system!
     ds, do = dso[:, :n_exp], dso[:, n_exp:]
     dz = rearrange(dz, "b (n h w) -> b n h w", n=n_exp, h=ht, w=wd)
 

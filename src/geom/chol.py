@@ -10,6 +10,14 @@ We adapted Zachary Teed's code using einops, double precision and smarter indexi
 The precision is crucial when solving large systems, but results in a bigger memory footprint!
 The indexing turned out to be very important because the CUDA kernel uses a Sparse Cholesky solver, while 
 torch relies on a dense Cholesky decomposition. For very sparse systems, the dense solver will be numerically unstable :/
+
+NOTE very large problems require float64 precision to be numerically stable (else we overflow -> inf/-inf), the reason for this is simply the large number of 
+variables due to computing dense and pixel wise. We dont observe this problem in the CUDA kernels, since computations can be run elementwise in parallel and not vectorized 
+over very large system matrices. 
+However, the main system runs in float32 in order to achieve a medium memory footprint (< 24GB) and run on high resolution images.
+Since we have a multi-threaded system, we store tensors in shared_memory in order to have quick read/write access. Therefore all tensors must have 
+the same datatype like the rest of the system! For this reason we provide the option to run the system in a given precision (Input is always float32).
+In case we detect an overflow, we simply clip the Jacobians / Gradients, which effectively limits the step size of the optimizer.
 """
 
 
@@ -49,7 +57,7 @@ class LUSolver(torch.autograd.Function):
         lu, pivots, xs = ctx.saved_tensors
         # P * H = LU with P being the pivots
         dz = torch.linalg.lu_solve(lu, pivots, grad_x)
-        dH = -torch.matmul(xs, dz.transpose(-1, -2))
+        dH = -torch.matmul(xs, dz.transpose(-1, -2)).to(lu.dtype)
 
         return dH, dz
 
@@ -79,7 +87,7 @@ class CholeskySolver(torch.autograd.Function):
 
         U, xs = ctx.saved_tensors
         dz = torch.cholesky_solve(grad_x, U)
-        dH = -torch.matmul(xs, dz.transpose(-1, -2))
+        dH = -torch.matmul(xs, dz.transpose(-1, -2)).to(xs.dtype)
 
         return dH, dz
 
@@ -114,23 +122,29 @@ def block_matmul(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     b, n2, m2, p2, q2 = B.shape
     A = rearrange(A, "b n1 m1 p1 q1 -> b (n1 p1) (m1 q1)")
     B = rearrange(B, "b n2 m2 p2 q2 -> b (n2 p2) (m2 q2)")
-    C = torch.matmul(A, B)
+    C = torch.matmul(A, B).to(A.dtype)
     C = rearrange(C, "b (n1 p1) (m2 q2) -> b n1 m2 p1 q2", n1=n1, m2=m2, p1=p1, q2=q2)
     return C
 
 
-def cholesky_block_solve(H: torch.Tensor, b: torch.Tensor, ep: float = 0.1, lm: float = 1e-4) -> torch.Tensor:
+def cholesky_block_solve(
+    H: torch.Tensor, b: torch.Tensor, ep: float = 0.1, lm: float = 1e-4, use_double: bool = False
+) -> torch.Tensor:
     """solve normal equations for block structure matrices of shape (n1 n2 d1 d2)"""
-    bs, n, _, d, _ = H.shape
+    if use_double:
+        dtype = torch.float64
+    else:
+        dtype = torch.float32
 
-    I = torch.eye(d, dtype=torch.float64).to(H.device)
-    H = H.double() + (ep + lm * H.double()) * I  # Damp H
+    bs, n, _, d, _ = H.shape
+    I = torch.eye(d, dtype=dtype).to(H.device)
+    H = H.to(dtype) + (ep + lm * H.to(dtype)) * I  # Damp H
 
     H = rearrange(H, "b n1 n2 d1 d2 -> b (n1 d1) (n2 d2)")
     b = rearrange(b, "b n d -> b (n d) 1")
 
     x = CholeskySolver.apply(H, b)
-    return rearrange(x, "b (n1 d1) 1 -> b n1 d1", n1=n, d1=d).float()
+    return rearrange(x, "b (n1 d1) 1 -> b n1 d1", n1=n, d1=d)
 
 
 def schur_block_solve(
@@ -144,6 +158,7 @@ def schur_block_solve(
     structure_only: bool = False,
     motion_only: bool = False,
     return_state: bool = False,
+    use_double: bool = False,
 ):
     """Solve the sparse block-structured linear system Hx = v using the Schur complement,
     i.e. instead of solving a larger M*N x M*N system, we solve a smaller M x M system and N x N system,
@@ -160,29 +175,29 @@ def schur_block_solve(
     if structure_only:
         dZ = (Q * w).view(b, -1, 1, 1)
         if return_state:
-            return dZ.float(), success
+            return dZ, success
         else:
-            return dZ.float()
+            return dZ
 
     else:
         S = H - block_matmul(EQ, Et)
         y = v - block_matmul(EQ, w.unsqueeze(dim=2))
-        dX, success = cholesky_block_solve(S, y, ep=ep, lm=lm)
+        dX, success = cholesky_block_solve(S, y, ep=ep, lm=lm, use_double=use_double)
 
         if motion_only:
             if return_state:
-                return dX.float(), success
+                return dX, success
             else:
-                return dX.float()
+                return dX
 
         dZ = Q * (w - block_matmul(Et, dX).squeeze(dim=-1))
         dX = dX.view(b, -1, 6)
         dZ = dZ.view(b, -1, 1, 1)
 
         if return_state:
-            return dX.float(), dZ.float(), success
+            return dX, dZ, success
         else:
-            return dX.float(), dZ.float()
+            return dX, dZ
 
 
 def schur_solve(
@@ -197,6 +212,7 @@ def schur_solve(
     motion_only: bool = False,
     solver: str = "cholesky",
     return_state: bool = False,
+    use_double: bool = False,
 ):
     """Solve the linear system Hx = v by the Schur complement,
     i.e. instead of solving a larger M*N x M*N system, we solve a smaller M x M system and N x N system,
@@ -210,6 +226,10 @@ def schur_solve(
         Solver = CholeskySolver
     else:
         Solver = LUSolver
+    if use_double:
+        dtype = torch.float64
+    else:
+        dtype = torch.float32
 
     bs = C.shape[0]
     C = C.view(bs, -1)
@@ -220,20 +240,20 @@ def schur_solve(
         return dZ.float()
 
     EQ = E * Q[:, None]
-    S = H - torch.matmul(EQ, E.mT)
-    y = v - torch.matmul(EQ, w.squeeze(dim=-1))
+    S = H - torch.matmul(EQ, E.mT).to(dtype)
+    y = v - torch.matmul(EQ, w.squeeze(dim=-1)).to(dtype)
 
-    A = S + (ep + lm * S) * torch.eye(S.shape[1], device=S.device)  # Damping
+    A = S + (ep + lm * S) * torch.eye(S.shape[1], device=S.device, dtype=dtype)  # Damping
     dX, success = Solver.apply(A, y)
 
     if motion_only:
         if return_state:
-            return dX.squeeze(-1).float(), success
+            return dX.squeeze(-1), success
         else:
-            return dX.squeeze(-1).float()
+            return dX.squeeze(-1)
 
-    dZ = Q * (w.view(bs, -1) - torch.matmul(E.mT, dX).view(bs, -1))
+    dZ = Q * (w.view(bs, -1) - torch.matmul(E.mT, dX).view(bs, -1)).to(dtype)
     if return_state:
-        return dX.float(), dZ.float(), success
+        return dX, dZ, success
     else:
-        return dX.float(), dZ.float()
+        return dX, dZ
