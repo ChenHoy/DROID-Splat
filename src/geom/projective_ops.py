@@ -168,7 +168,16 @@ def proj(Xs, intrinsics, jacobian=False, return_depth=False):
     return coords, proj_jac
 
 
-def projective_transform(poses, depths, intrinsics, ii, jj, jacobian=False, return_depth=False):
+def projective_transform(
+    poses: SE3,
+    depths: torch.Tensor,
+    intrinsics: torch.Tensor,
+    ii: torch.Tensor,
+    jj: torch.Tensor,
+    jacobian: bool = False,
+    return_depth: bool = False,
+    use_double: bool = False,
+):
     """map points from ii -> jj"""
 
     # inverse project (pinhole)
@@ -191,10 +200,16 @@ def projective_transform(poses, depths, intrinsics, ii, jj, jacobian=False, retu
     if jacobian:
         # Ji transforms according to dual adjoint
         # NOTE chen: using double here saves us sometimes from inf/nan
-        Jj = torch.matmul(Jp.double(), Ja.double()).float()  # [batch, N, h, w, 2, 6]
-        Ji = -Gij[:, :, None, None, None].adjT(Jj)
-        Jz = Gij[:, :, None, None] * Jz
-        Jz = torch.matmul(Jp.double(), Jz.double().unsqueeze(dim=-1)).float()
+        if use_double:
+            Jj = torch.matmul(Jp.double(), Ja.double()).float()  # [batch, N, h, w, 2, 6]
+            Ji = -Gij[:, :, None, None, None].adjT(Jj)
+            Jz = Gij[:, :, None, None] * Jz
+            Jz = torch.matmul(Jp.double(), Jz.double().unsqueeze(dim=-1)).float()
+        else:
+            Jj = torch.matmul(Jp, Ja).float()  # [batch, N, h, w, 2, 6]
+            Ji = -Gij[:, :, None, None, None].adjT(Jj)
+            Jz = Gij[:, :, None, None] * Jz
+            Jz = torch.matmul(Jp, Jz.unsqueeze(dim=-1)).float()
 
         return x1, valid, (Ji, Jj, Jz)
 
