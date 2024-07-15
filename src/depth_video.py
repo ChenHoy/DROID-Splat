@@ -130,7 +130,7 @@ class DepthVideo:
             self.disps_sens_up[index] = torch.where(depth_up > 0, 1.0 / depth_up, depth_up)
             self.disps_sens[index] = self.disps_sens_up[index][..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
             if self.cfg.mode != "prgbd" and not self.optimize_scales:
-                self.disps[index] = self.disps_sens[index].clone()
+                self.disps[index] = self.disps_sens[index]
 
         if item[5] is not None:
             # NOTE chen: we always work with the downscaled images/disps for optimization so store intrinsics at that scale
@@ -481,12 +481,14 @@ class DepthVideo:
         This makes it possible to continue to optimize them, but still provide the correct disps_sens to the
         CUDA kernel for global BA in the backend.
         """
-        # Rescale the external disparities
-        self.disps_sens = self.disps_sens * self.scales[:, None, None] + self.shifts[:, None, None]
-        self.disps_sens_up = self.disps_sens_up * self.scales[:, None, None] + self.shifts[:, None, None]
-        # Reset the scale and shift parameters to initial state
-        self.scales = torch.ones_like(self.scales, device=self.device)
-        self.shifts = torch.zeros_like(self.shifts, device=self.device)
+        with self.get_lock():
+
+            # Rescale the external disparities
+            self.disps_sens *= self.scales[:, None, None]
+            self.disps_sens += self.shifts[:, None, None]
+            # Reset the scale and shift parameters to initial state
+            self.scales = self.scales / self.scales  # Normalize again to 1.0
+            self.shifts = self.shifts - self.shifts  # Reset to 0.0
 
     def distance(self, ii=None, jj=None, beta=0.3, bidirectional=True):
         """frame distance metric, where distance = sqrt((u(ii) - u(jj->ii))^2 + (v(ii) - v(jj->ii))^2)"""
@@ -577,42 +579,45 @@ class DepthVideo:
         NOTE chen: This is a very different objective than the optical flow one, i.e. there is no guarantee that this helps to converge to the right monocular scale!
         This also can lead to changes, that the BA optimization has to correct back again, thus wasting compute.
         """
-        # Filter the map, but use self.disps for scale_optimization
-        valid_d = self.filter_map(
-            idx=torch.arange(self.counter.value - 1, device=self.device),
-            radius=1,
-            multiview=True,
-            bin_th=0.01,
-            mv_count_th=2,
-            return_mask=True,
-        )
-        if valid_d.sum() < min_num_points:
-            print(
-                colored(
-                    f"Could not find enough valid points for linear scale alignment, continuing without initial scale alignment ...",
-                    "red",
-                )
+        with self.get_lock():
+            # Filter the map, but use self.disps for scale_optimization
+            valid_d = self.filter_map(
+                idx=torch.arange(self.counter.value - 1, device=self.device),
+                radius=1,
+                multiview=True,
+                bin_th=0.01,
+                mv_count_th=2,
+                return_mask=True,
             )
-            return
+            if valid_d.sum() < min_num_points:
+                print(
+                    colored(
+                        f"Could not find enough valid points for linear scale alignment, continuing without initial scale alignment ...",
+                        "red",
+                    )
+                )
+                return
 
-        if self.upsampled:
-            # Map gets filtered at highest resolution, but scale optimization always uses self.disps_sens not self.disps_sens_up
-            s = self.scale_factor
-            valid_d = valid_d[..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
+            if self.upsampled:
+                # Map gets filtered at highest resolution, but scale optimization always uses self.disps_sens not self.disps_sens_up
+                s = self.scale_factor
+                valid_d = valid_d[..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
 
-        scale_t, shift_t, error_t = align_scale_and_shift(
-            self.disps_sens[: self.counter.value - 1].clone(), self.disps[: self.counter.value - 1].clone(), valid_d
-        )
-        # NOTE chen: double safeguard against accidental degenerate cases
-        scale_t[torch.isnan(scale_t)], shift_t[torch.isnan(shift_t)] = 1.0, 0.0
-        scale_t[torch.isinf(scale_t)], shift_t[torch.isinf(shift_t)] = 1.0, 0.0
+            scale_t, shift_t, error_t = align_scale_and_shift(
+                self.disps_sens[: self.counter.value - 1],
+                self.disps[: self.counter.value - 1],
+                valid_d,
+            )
+            # NOTE chen: double safeguard against accidental degenerate cases
+            scale_t[torch.isnan(scale_t)], shift_t[torch.isnan(shift_t)] = 1.0, 0.0
+            scale_t[torch.isinf(scale_t)], shift_t[torch.isinf(shift_t)] = 1.0, 0.0
 
-        valid_scale = scale_t > eps  # Safeguard against 0.0 scales which would decimate the disps_sens
-        if ~valid_scale.sum().item() > 0:
-            scale_t[~valid_scale] = 1.0
+            valid_scale = scale_t > eps  # Safeguard against 0.0 scales which would decimate the disps_sens
+            if ~valid_scale.sum().item() > 0:
+                scale_t[~valid_scale] = 1.0
 
-        self.scales[: self.counter.value - 1], self.shifts[: self.counter.value - 1] = scale_t, shift_t
-        self.reset_prior()  # Reset the prior and update disps_sens to fit the map
+            self.scales[: self.counter.value - 1], self.shifts[: self.counter.value - 1] = scale_t, shift_t
+            self.reset_prior()  # Reset the prior and update disps_sens to fit the map
 
     def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 5e-3):
         """Bundle adjustment over structure with a scalable prior.
@@ -632,11 +637,12 @@ class DepthVideo:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
             # Precondition
-            self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
+            # self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
 
             # Block coordinate descent optimization
             for i in range(iters):
                 # Sanity check for non-negative disparities
+                # FIXME clamp disps_sens as well after fix
                 self.disps.clamp_(min=1e-5)
 
                 # Motion only Bundle Adjustment (MoBA)
@@ -682,8 +688,52 @@ class DepthVideo:
                     alpha=alpha,
                 )
 
-                # After optimizing the prior, we need to update the disps_sens and reset the scales
-                # only then can we use global BA and intrinsics optimization with the CUDA kernel later
+                # # After optimizing the prior, we need to update the disps_sens and reset the scales
+                # # only then can we use global BA and intrinsics optimization with the CUDA kernel later
                 self.reset_prior()
 
                 self.mapping_dirty[t0:t1] = True
+
+            # Increment tensor here -> Works!
+            # self.disps_test += torch.ones_like(self.disps_test, device=self.device, dtype=self.disps_test.dtype)
+            # Double increment -> works
+            # self.disps_test += torch.ones_like(self.disps_test, device=self.device, dtype=self.disps_test.dtype)
+
+            # Unsqueeze and Squeeze -> Works!
+            # self.disps_test = self.disps_test.unsqueeze(0).squeeze(0)
+
+            # Dtype change back and forth -> Breaks!
+            # test = self.disps_test.clone().double()
+            # test2 = test.float()
+            # self.disps_test = test
+
+            # Use intermediate instead of direct operation -> Breaks! WTF
+            # NOTE variable += test works, but variable = variable + test breaks!
+            # dummy = torch.ones_like(self.disps_test, device=self.device, dtype=self.disps_test.dtype)
+            # self.disps_test = self.disps_test + dummy
+
+            # Mixed dtypes with external variables -> Breaks! Dont mix datatypes for thread-safety!!!
+            # dummy = torch.ones_like(self.disps_test, device=self.device, dtype=self.disps_test.dtype)
+            # dummy2 = torch.zeros_like(self.disps_test, device=self.device, dtype=torch.float32)
+            # self.disps_test = self.disps_test + dummy + dummy2.to(self.disps_test.dtype)
+
+            # Assign value directly -> Works!
+            # dummy = torch.tensor([1.0, 2.0, 3.0, 4.0], device=self.device, dtype=self.disps_test.dtype)
+            # test = dummy + 1.0
+            # idx = torch.arange(0, 4)
+            # self.disps_test[idx] = test[:, None, None].clone()
+
+            # Clone operation and reassign -> Breaks!
+            # test = self.disps_test.clone()
+            # test2 = 2.0 * test
+            # self.disps_test = test2
+
+            # Clone, but then assign any other tensor -> Breaks!
+            # test = self.disps_test.clone()
+            # test2 = 2.0 * test
+            # self.disps_test = test2
+            # self.disps_test += torch.ones_like(self.disps_test, device=self.device, dtype=self.disps_test.dtype)
+
+            # Get a cloned slice -> Works!
+            # test = self.disps_test.clone()
+            # dummy = torch.index_select(test, 0, torch.arange(0, 4, device=self.device))

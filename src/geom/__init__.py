@@ -157,6 +157,7 @@ def check_and_correct_transform(g1: lietorch.SE3 | torch.Tensor, g2: lietorch.SE
         return g1.squeeze(0)
 
 
+# TODO make thread-safe by avoiding unsqueze for artificial batch dimensions of 1
 @torch.no_grad()
 def align_scale_and_shift(
     prediction: torch.Tensor, target: torch.Tensor, weights: torch.Tensor
@@ -175,7 +176,8 @@ def align_scale_and_shift(
 
     if weights is None:
         weights = torch.ones_like(prediction).to(prediction.device)
-    if len(prediction.shape) < 3:
+
+    if prediction.ndim < 3:
         prediction = prediction.unsqueeze(0)
         target = target.unsqueeze(0)
         weights = weights.unsqueeze(0)
