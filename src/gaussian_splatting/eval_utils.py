@@ -334,6 +334,27 @@ def create_comparison_figure(
     return fig
 
 
+def plot_metric_statistics(psnr_array, ssim_array, lpips_array, plot_dir: str):
+    """1 bar plot per metric"""
+
+    frames = np.arange(len(psnr_array))
+
+    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+    ax[0].bar(frames, psnr_array, color="blue")
+    ax[0].set_title("PSNR")
+    ax[0].set_ylim([0.0, psnr_array.max() + 1])
+
+    ax[1].bar(frames, ssim_array, color="green")
+    ax[1].set_ylim([0.95, 1.0])
+    ax[1].set_title("SSIM")
+
+    ax[2].bar(frames, lpips_array, color="red")
+    ax[2].set_title("LPIPS")
+    ax[2].set_ylim([0.0, lpips_array.max() + 0.005])
+
+    plt.savefig(os.path.join(plot_dir, "metrics_per_frame.pdf"))
+
+
 def save_gaussians(gaussians: GaussianModel, save_dir: str, iteration: Optional[int] = None) -> None:
     if iteration is not None:
         point_cloud_path = os.path.join(save_dir, "point_cloud/iteration_{}".format(str(iteration)))
@@ -480,16 +501,7 @@ def eval_rendering(
             depth_loss = loss_func(depth_est, gt_depth, valid_depth)
             depth_l1.append(depth_loss.item())
 
-    # 1 bar plot per metric
-    frames = np.arange(len(psnr_array))
-    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
-    ax[0].bar(frames, psnr_array, color="blue")
-    ax[0].set_title("PSNR")
-    ax[1].bar(frames, ssim_array, color="green")
-    ax[1].set_title("SSIM")
-    ax[2].bar(frames, lpips_array, color="red")
-    ax[2].set_title("LPIPS")
-    plt.savefig(os.path.join(plot_dir, "metrics_per_frame.png"))
+    plot_metric_statistics(psnr_array, ssim_array, lpips_array, plot_dir)
 
     output = dict()
     output["mean_psnr"] = float(np.mean(psnr_array))

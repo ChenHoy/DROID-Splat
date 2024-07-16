@@ -181,8 +181,7 @@ class GaussianModel:
                 if cam.uid == 0:
                     # Introduce random Gaussians, this is how MonoGS works in monocular mode
                     depth_raw = (
-                        np.ones_like(depth_raw)
-                        + (np.random.randn(depth_raw.shape[0], depth_raw.shape[1]) - 0.5) * 0.05
+                        np.ones(rgb_raw.shape[:2]) + (np.random.randn(rgb_raw.shape[:2]) - 0.5) * 0.05
                     ) * scale
                 else:
                     # Take the depth of a small neighborhood of Gaussian keyframes

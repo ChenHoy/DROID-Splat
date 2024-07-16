@@ -221,32 +221,14 @@ class DepthVideo:
         padded_indices = torch.cat(padded_indices)
         return torch.unique(padded_indices)
 
-    def dummy_filter(self, idx: Optional[torch.Tensor] = None):
-        with self.get_lock():
-            if idx is None:
-                (dirty_index,) = torch.where(self.mapping_dirty.clone())
-                dirty_index = dirty_index
-            else:
-                dirty_index = idx
-
-            if len(dirty_index) == 0:
-                return
-
-            if self.upsampled:
-                disps = torch.index_select(self.disps_up, 0, dirty_index).clone()
-            else:
-                disps = torch.index_select(self.disps, 0, dirty_index).clone()
-
-        self.disps_clean[dirty_index] = disps
-        self.filtered_id = max(dirty_index.max().item(), self.filtered_id)
-
     def filter_map(
         self,
         idx: Optional[torch.Tensor] = None,
         radius: int = 2,
         mv_count_th: int = 2,
         bin_th: float = 0.1,
-        min_disp_th: float = 0.01,
+        min_disp_th: float = 0.01,  # Relative to distribution, i.e. reject the lowest 1%
+        hard_disp_th: float = 1e-3,  # Absolute, i.e. reject depth > 1000m
         conf_th: float = 0.1,
         multiview: bool = True,
         uncertainty: bool = True,
@@ -290,12 +272,16 @@ class DepthVideo:
                 count = droid_backends.depth_filter(self.poses, self.disps_up, intrinsics, dirty_index, thresh)
             else:
                 count = droid_backends.depth_filter(self.poses, self.disps, intrinsics, dirty_index, thresh)
-            mv_mask = (count >= mv_count_th) & (disps > min_disp_th * disps.mean(dim=[1, 2], keepdim=True))
+            mv_mask = count >= mv_count_th
             mask = mask & mv_mask
 
         if uncertainty:
             conf_mask = conf > conf_th
             mask = mask & conf_mask
+
+        # Filter away spurious points with very low disparities (relative to distribution and hard threshold)
+        inliers = torch.logical_and(disps > min_disp_th * disps.mean(dim=[1, 2], keepdim=True), disps > hard_disp_th)
+        mask = mask & inliers
 
         disps[~mask] = 0.0  # Filter away invalid points
         self.disps_clean[dirty_index] = disps
@@ -486,6 +472,9 @@ class DepthVideo:
             # Rescale the external disparities
             self.disps_sens *= self.scales[:, None, None]
             self.disps_sens += self.shifts[:, None, None]
+            self.disps_sens_up *= self.scales[:, None, None]
+            self.disps_sens_up += self.shifts[:, None, None]
+
             # Reset the scale and shift parameters to initial state
             self.scales = self.scales / self.scales  # Normalize again to 1.0
             self.shifts = self.shifts - self.shifts  # Reset to 0.0
@@ -540,7 +529,7 @@ class DepthVideo:
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
-            # FIXME chen: I dont understand why the backend cannot use the scaled disps_sens directly as well
+            # Dont use the noisy prior for backend in prgbd -> better results
             if self.optimize_scales:
                 disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
             else:
@@ -609,12 +598,11 @@ class DepthVideo:
                 valid_d,
             )
             # NOTE chen: double safeguard against accidental degenerate cases
-            scale_t[torch.isnan(scale_t)], shift_t[torch.isnan(shift_t)] = 1.0, 0.0
-            scale_t[torch.isinf(scale_t)], shift_t[torch.isinf(shift_t)] = 1.0, 0.0
-
-            valid_scale = scale_t > eps  # Safeguard against 0.0 scales which would decimate the disps_sens
-            if ~valid_scale.sum().item() > 0:
-                scale_t[~valid_scale] = 1.0
+            scale_invalid = torch.logical_or(
+                torch.logical_or(torch.isnan(scale_t), torch.isinf(scale_t)), scale_t < eps
+            )
+            shift_invalid = torch.logical_or(torch.isnan(shift_t), torch.isinf(shift_t))
+            scale_t[scale_invalid], shift_t[shift_invalid] = 1.0, 0.0
 
             self.scales[: self.counter.value - 1], self.shifts[: self.counter.value - 1] = scale_t, shift_t
             self.reset_prior()  # Reset the prior and update disps_sens to fit the map
@@ -637,7 +625,7 @@ class DepthVideo:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
             # Precondition
-            # self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
+            self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
 
             # Block coordinate descent optimization
             for i in range(iters):
@@ -693,47 +681,3 @@ class DepthVideo:
                 self.reset_prior()
 
                 self.mapping_dirty[t0:t1] = True
-
-            # Increment tensor here -> Works!
-            # self.disps_test += torch.ones_like(self.disps_test, device=self.device, dtype=self.disps_test.dtype)
-            # Double increment -> works
-            # self.disps_test += torch.ones_like(self.disps_test, device=self.device, dtype=self.disps_test.dtype)
-
-            # Unsqueeze and Squeeze -> Works!
-            # self.disps_test = self.disps_test.unsqueeze(0).squeeze(0)
-
-            # Dtype change back and forth -> Breaks!
-            # test = self.disps_test.clone().double()
-            # test2 = test.float()
-            # self.disps_test = test
-
-            # Use intermediate instead of direct operation -> Breaks! WTF
-            # NOTE variable += test works, but variable = variable + test breaks!
-            # dummy = torch.ones_like(self.disps_test, device=self.device, dtype=self.disps_test.dtype)
-            # self.disps_test = self.disps_test + dummy
-
-            # Mixed dtypes with external variables -> Breaks! Dont mix datatypes for thread-safety!!!
-            # dummy = torch.ones_like(self.disps_test, device=self.device, dtype=self.disps_test.dtype)
-            # dummy2 = torch.zeros_like(self.disps_test, device=self.device, dtype=torch.float32)
-            # self.disps_test = self.disps_test + dummy + dummy2.to(self.disps_test.dtype)
-
-            # Assign value directly -> Works!
-            # dummy = torch.tensor([1.0, 2.0, 3.0, 4.0], device=self.device, dtype=self.disps_test.dtype)
-            # test = dummy + 1.0
-            # idx = torch.arange(0, 4)
-            # self.disps_test[idx] = test[:, None, None].clone()
-
-            # Clone operation and reassign -> Breaks!
-            # test = self.disps_test.clone()
-            # test2 = 2.0 * test
-            # self.disps_test = test2
-
-            # Clone, but then assign any other tensor -> Breaks!
-            # test = self.disps_test.clone()
-            # test2 = 2.0 * test
-            # self.disps_test = test2
-            # self.disps_test += torch.ones_like(self.disps_test, device=self.device, dtype=self.disps_test.dtype)
-
-            # Get a cloned slice -> Works!
-            # test = self.disps_test.clone()
-            # dummy = torch.index_select(test, 0, torch.arange(0, 4, device=self.device))
