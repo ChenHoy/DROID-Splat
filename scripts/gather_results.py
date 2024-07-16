@@ -77,18 +77,18 @@ def main(args):
                     statistics["rendering_nkf"][key].append(rendering_nkf[key].values[0])
 
     # Calculate mean, median, std for each metric
-    main_print(f"Evaluation statistics for: {data_path}\n")
+    main_print(f"Evaluation statistics for: {data_path}")
+    print("")
     for eval_kind in statistics.keys():
 
-        main_print(f"\n {eval_kind} \n", "red")
+        main_print(f"{eval_kind}", "red")
         for key in statistics[eval_kind].keys():
             if len(statistics[eval_kind][key]) == 0:
                 continue
             metric_print(f"{key}", "green")
             print(f"Mean: {pd.Series(statistics[eval_kind][key]).mean()}")
             print(f"Median: {pd.Series(statistics[eval_kind][key]).median()}")
-            print(f"Std: {pd.Series(statistics[eval_kind][key]).std()}")
-            print("\n")
+            print(f"Std: {pd.Series(statistics[eval_kind][key]).std()}\n")
 
 
 if __name__ == "__main__":
