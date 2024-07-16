@@ -215,10 +215,10 @@ def bundle_adjustment(
             ba_function = BA
 
     #### Bundle Adjustment Loop
-    disps.clamp_(min=1e-3)
+    disps.clamp_(min=1e-5)
     for i in range(iters):
         ba_function(*args, **skwargs, ep=ep, lm=lm, use_double=use_double)
-        disps.clamp_(min=1e-3)  # Disparities should never be negative
+        disps.clamp_(min=1e-5)  # Disparities should never be negative
 
     #### Update data structure
     # Remove the batch dimension again
@@ -404,7 +404,7 @@ def MoBA(
             print("LU decomposition failed, using 0 update ...")
             dx = torch.zeros_like(dx)
 
-    dx = rearrange(dx, "b (n1 d1) 1 -> b n1 d1", n1=m, d1=d).float() # Always convert to system precision at float32
+    dx = rearrange(dx, "b (n1 d1) 1 -> b n1 d1", n1=m, d1=d).float()  # Always convert to system precision at float32
 
     # Update only un-fixed poses
     poses1, poses2 = poses[:, :fixedp], poses[:, fixedp:]
@@ -594,7 +594,9 @@ def get_regularizor_jacobians(
     else:
         dtype = torch.float32
 
-    Jsi = -disps_sens.view(bs, n * ht * wd, 1, 1) * torch.ones(bs, n * ht * wd, 1, 1, device=disps_sens.device, dtype=dtype)
+    Jsi = -disps_sens.view(bs, n * ht * wd, 1, 1) * torch.ones(
+        bs, n * ht * wd, 1, 1, device=disps_sens.device, dtype=dtype
+    )
     Joi = -torch.ones(bs, n * ht * wd, 1, 1, device=disps_sens.device, dtype=dtype)
     wJsi = weights.view(bs, n * ht * wd, 1, 1) * Jsi
     wJoi = weights.view(bs, n * ht * wd, 1, 1) * Joi

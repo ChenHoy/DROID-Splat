@@ -62,7 +62,6 @@ class BackendWrapper(torch.nn.Module):
         else:
             t_start = 0
         t_end = cur_t
-        # NOTE chen: I tried to optimize only the portion before frontend window, but it did not improve things
 
         if self.enable_loop:
             _, n_edges = self.optimizer.loop_ba(
@@ -75,6 +74,7 @@ class BackendWrapper(torch.nn.Module):
             )
             msg = "Full BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
         self.info(msg)
+
         self.last_t = cur_t
         self.count += 1
 
