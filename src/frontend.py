@@ -204,6 +204,7 @@ class Frontend:
         if not self.is_initialized and self.video.counter.value == self.warmup:
 
             # Deactivate scale optimization during initialization!
+            # NOTE chen: changing this attribute does not transmit across Process barriers!
             if self.video.optimize_scales:
                 self.graph.scale_priors = False
 
