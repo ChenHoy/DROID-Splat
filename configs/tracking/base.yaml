@@ -1,15 +1,15 @@
 pretrained: ./pretrained/droid.pth
-buffer: 512
+buffer: 256
 # NOTE chen: I am not entirely certain that beta actually represents this, as this seems to more like a reprojection error!
 beta: 0.7  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
 warmup: 8
 upsample: True
 
 motion_filter:
-  thresh: 3.0  # Consider new keyframe with motion >
+  thresh: 4.0  # Consider new keyframe with motion >
 
 frontend:
-  optimize_scales: False # Whether or not to optimize scale of prgbd prior
+  optimize_scales: True # Whether or not to optimize scale of prgbd prior
   steps1: 4 # 1st outer loop with feature correlation
   steps2: 2 # 2nd loop with feature correlation
   iters: 4 # Actual BA iterations
@@ -18,13 +18,13 @@ frontend:
   max_age: 30 # (default: 25) Max age of a factor, we remove these after optimizing them for so long in the current window
 
   keyframe_thresh: 4.0 # remove keyframe if avg flow < 
-  thresh: 16.0 # Add edges between frames within this distance
+  thresh: 15.0 # Add edges between frames within this distance
   window: 25 # local ba window size
   max_factors: 150 # num of edges within local ba
   radius: 5 # Always build edges between nearby frames
   nms: 1
 
-  release_cache: False # Tradeoff: memory vs. speed, This can save up to ~5GB
+  release_cache: True # Tradeoff: memory vs. speed, This can save up to ~5GB
   
 backend:
   warmup: 15
@@ -37,7 +37,7 @@ backend:
 
   use_loop_closure: False
   loop_window: 75 # NOTE make sure that loop window is not bigger than the general window of the backend
-  loop_thresh: 50.0 # You want this one to be big, so we add enough edges for loops
+  loop_thresh: 60.0 # You want this one to be big, so we add enough edges for loops
   loop_radius: 2
   loop_nms: 3 # default GO-SLAM: 12
   loop_max_factor_mult: 16
