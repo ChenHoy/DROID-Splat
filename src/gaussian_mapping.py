@@ -552,7 +552,7 @@ class GaussianMapper(object):
                 therefore we will uniformly sample from all frames!
                 Will ignore the importance weights ..."""
             )
-        
+
         # FIXME chen: is this really a good idea?
         self.covisibility_pruning(n_last_frames=self.n_last_frames, **self.update_params.pruning)
 

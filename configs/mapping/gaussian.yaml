@@ -22,8 +22,8 @@ feedback:
 # Online Optimization
 online_opt:
   ## Local sliding optimization window
-  iters: 18 # Optimization iterations for selected views
-  n_last_frames: 15 # Always optimize the last n frames
+  iters: 30 # Optimization iterations for selected views
+  n_last_frames: 10 # Always optimize the last n frames
   n_rand_frames: 5 # Optimize random global frames on top
   batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
   batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
@@ -35,7 +35,7 @@ online_opt:
 
   # NOTE: Using the absolute visibility check is more wasteful as we need to count the visiblity of each Gaussian!
   # -> Use 'new' for faster performance
-  prune_every: 2 # Prune Gaussians every k updates
+  prune_every: 2 # Covisibility based pruning
   pruning:
     mode: "new" # ["abs", "new"] How to prune: either check for covisible frames everywhere or just in the last n frames
     last: 5 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
@@ -43,14 +43,14 @@ online_opt:
     visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
 
   ## Densification parameters
-  densify_every: 2 # Densify Gaussians every k updates
   densify:
-    use_opacity: True # Use opacity based densification
+    use_opacity: False # Use opacity based densification
 
     # Densify Gaussians based on opacity only after k Mapper updates
     opacity:
       after: 8 # NOTE we usually run the Mapper ~30-40 times on normal videos
       th: 0.2 # Opacity value below which we densify
+      ratio: 0.1 # Ratio of low opacity points to densify
 
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
@@ -121,6 +121,7 @@ refinement:
 
   densify:
     use_opacity: True # Use opacity based densification
+
     # Densify Gaussians based on opacity only after k Mapper updates
     opacity:
       th: 0.2 # Opacity value below which we densify
