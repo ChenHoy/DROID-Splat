@@ -27,8 +27,8 @@ sleep_delay: 0.01 # Sleep timer to cool off the system sometimtes
 
 run_frontend: True # This should always be True!
 run_backend: True # Global optimization
-run_loop_detection: True # Loop closure detection
-run_mapping: True # Rendering 
+run_loop_detection: False # Loop closure detection
+run_mapping: False # Rendering 
 ## Visualizations / GUIs
 run_visualization: False
 run_mapping_gui: False
@@ -37,9 +37,9 @@ show_stream: False
 # Frequencies for synchronizing the different main parts of the pipeline
 # In an optimal setup, the Frontend would be the bottlenck, which can run at ~20-30FPS
 # Mapping takes ~5-7 iters/s, i.e. with a well tuned system each Render update hits <= 0.4fps
-backend_every: 3 # Run global bundle adjustment only every k Frontend updates
+backend_every: 2 # Run global bundle adjustment only every k Frontend updates
 # NOTE this is a trade-off between accuracy and speed, we can also add more compute to refinement!
-mapper_every: 3  # Run Renderer every k Frontend updates
+mapper_every: 5  # Run Renderer every k Frontend updates
 
 ## Evaluation
-evaluate: False
+evaluate: True

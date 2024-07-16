@@ -552,6 +552,9 @@ class GaussianMapper(object):
                 therefore we will uniformly sample from all frames!
                 Will ignore the importance weights ..."""
             )
+        
+        # FIXME chen: is this really a good idea?
+        self.covisibility_pruning(n_last_frames=self.n_last_frames, **self.update_params.pruning)
 
         # Update GUI
         if self.use_gui:
@@ -817,14 +820,11 @@ class GaussianMapper(object):
                 self.info(f"Skipping view {view.uid} as no gaussians are present ...")
                 continue
 
-            visibility_filter, viewspace_point_tensor = render_pkg["visibility_filter"], render_pkg["viewspace_points"]
-            opacity, radii = render_pkg["opacity"], render_pkg["radii"]
-
             # Accumulate for after loss backpropagation
             opacity_acm.append((view, render_pkg["opacity"]))
-            visibility_filter_acm.append(visibility_filter)
-            viewspace_point_tensor_acm.append(viewspace_point_tensor)
-            radii_acm.append(radii)
+            visibility_filter_acm.append(render_pkg["visibility_filter"])
+            viewspace_point_tensor_acm.append(render_pkg["viewspace_points"])
+            radii_acm.append(render["radii"])
 
             loss += current_loss
 

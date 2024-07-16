@@ -1,30 +1,37 @@
 warmup: 15 # Wait until tracking gets to this frame
 delay: 3 # Delay between tracking and mapping (This should be >= 2, because else )
 # NOTE chen: use MORE ITERATIONS than prune_densify_every! (newly densified Gaussians need to be optimized!)
-batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
 save_renders: False # Store some rendered images for debugging
-
 
 # Backpropagate the Render updates into Tracking system
 feedback:
   warmup: 5 # Only start feeding back into tracking after we ran the Renderer k times
-  only_last_window: False # Dont feedback the random frames, as pose optimization is better conditioned in temporal neighborhood
+  only_last_window: True # Dont feedback the random frames, as pose optimization is better conditioned in temporal neighborhood
+  no_refinement: False # Dont feedback after refinement
   disps: False
-  poses: True
+  poses: False
+
+  kwargs:
+    opacity_threshold: 0.1
+    ignore_frames: [0, 1, 2, 3, 4, 5, 6] # Never feedback the initial frames
+    min_coverage: 0.5 # Min. Density of frame after eliminiating outliers
+    max_lonely_gaussians: 0.6  # A frame should have at most <= x % Gaussians that are only visible in its own frameMin. Density of frame after eliminiating outliers
+    max_diff_to_video: 0.2 # Maximum abs. rel. deviation from the dense video depth
 
 
 # Online Optimization
 online_opt:
   ## Local sliding optimization window
-  iters: 35 # Optimization iterations for selected views
-  n_last_frames: 10 # Always optimize the last n frames
+  iters: 18 # Optimization iterations for selected views
+  n_last_frames: 15 # Always optimize the last n frames
   n_rand_frames: 5 # Optimize random global frames on top
+  batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
   batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
   optimize_poses: False
 
   ## Strategy for adding / pruning Gaussians
   # How often to prune and densify gaussians during optimization
-  prune_densify_every: 7 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
+  prune_densify_every: 5 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
 
   # NOTE: Using the absolute visibility check is more wasteful as we need to count the visiblity of each Gaussian!
   # -> Use 'new' for faster performance
@@ -42,12 +49,12 @@ online_opt:
 
     # Densify Gaussians based on opacity only after k Mapper updates
     opacity:
-      after: 10 # NOTE we usually run the Mapper ~30-40 times on normal videos
+      after: 8 # NOTE we usually run the Mapper ~30-40 times on normal videos
       th: 0.2 # Opacity value below which we densify
 
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
-      max_grad: 0.0005 # Gaussians with gradients above this are split (smaller -> denser)
+      max_grad: 0.0001 # Gaussians with gradients above this are split (smaller -> denser)
       extent: 5  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
       min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
       max_screen_size: 20 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
@@ -77,18 +84,17 @@ opt_params:
   scaling_lr: 1e-3 # Default MonoGS: 0.001
   rotation_lr: 4e-4
   percent_dense: 0.01 # default 0.01, this affects the densification of the Gaussians (lower -> more Gaussians)
-  refinement_lr_factor: 0.1 # Change the learning rate for refinement
 
   # Pose optimization learning rates
-  cam_rot_delta: 1e-4 # Default MonoGS: 0.003
-  cam_trans_delta: 1e-4 # Default MonoGS: 0.001
+  cam_rot_delta: 1e-5 # Default MonoGS: 0.003
+  cam_trans_delta: 1e-5 # Default MonoGS: 0.001
 
 
 loss:
   # Decide which terms to use
   with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
   with_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
-  supervise_with_prior: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
+  supervise_with_prior: False # Use the prior for supervision. If not, then use the current filtered map from SLAM
   with_depth_smoothness: True # Similarity loss between depth and image gradients
   rgb_boundary_threshold: 0.001 # Pixel information in an image needs to be at least higher than this 
 
@@ -103,29 +109,26 @@ loss:
 refinement:
   iters: 50 # Final Optimization iterations for all views
   bs: 20 # Batch size for refinement (Use <= 70 to avoid OOM!)
-  lr_factor: 0.5 # Change the learning rate for refinement
-  optimize_poses: True 
+  lr_factor: 0.1 # Change the learning rate for refinement
+  optimize_poses: False
   random_subset: 0.2 # Always optimize over a random subset of frames with size % of all to save compute
   w_importance_sampling: True # Use importance sampling for the final optimization
-  use_non_keyframes: True # Use non-keyframes during map refinement
-  keyframes_at_least: 0.1 # Always make sure to have > x% keyframes in a batch
+  use_non_keyframes: False # Use non-keyframes during map refinement
+  keyframes_at_least: 0.0 # Always make sure to have > x% keyframes in a batch
 
-  prune_densify_every: 5 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
+  prune_densify_every: 10 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
   densify_until: 20 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
 
   densify:
     use_opacity: True # Use opacity based densification
     # Densify Gaussians based on opacity only after k Mapper updates
     opacity:
-      after: 10  # NOTE we usually run the Mapper ~30-40 times on normal videos
       th: 0.2 # Opacity value below which we densify
-      # TODO chen: when is this used?
-      ratio: 0.1 # Ratio of low opacity points to densify
 
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
       max_grad: 0.0005 # Gaussians with gradients above this are split (smaller -> denser)
-      extent: 1  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
+      extent: 4  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
       min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
       max_screen_size: 15 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
 
@@ -134,7 +137,7 @@ refinement:
 input:
   sensor_type: 'depth'
   pcd_downsample_init: 16 # This is a constant downsampling factor
-  pcd_downsample: 64 # You ideally have ~5-10k points per frame
+  pcd_downsample: 32 # You ideally have ~5-10k points per frame
   adaptive_pointsize: False
   point_size: 0.02
   type: 'replica'
