@@ -22,7 +22,7 @@ from .droid_net import DroidNet
 from .frontend import FrontendWrapper
 from .backend import BackendWrapper
 from .depth_video import DepthVideo
-from .geom import matrix_to_lie, pose_distance
+from .geom import pose_distance
 from .visualization import droid_visualization, depth2rgb, uncertainty2rgb
 from .trajectory_filler import PoseTrajectoryFiller
 from .loop_detection import LoopDetector, merge_candidates
@@ -44,19 +44,31 @@ class SLAM:
             within a local optimization window
         - Backend Bundle Adjustment, which optimizes the map over a global optimization window
         - Loop Detector, which computes visual similarity between the current keyframe and all past keyframes. If suitable candidates are found,
-            this is send as additional edges to the Backend optimization.
-        - Gaussian Mapping, which optimizes the map into multiple 3D Gaussian
-            based on a dense rendering objective
-        - Visualizers for showing the incoming RGB(D) stream, the current pose graph,
-            the 3D point clouds of the map, optimized Gaussians
+            these are send as additional edges to the Backend optimization.
+        - Gaussian Mapping, which optimizes the map into multiple 3D Gaussian based on a dense Rendering objective
+        - Visualizers for showing the incoming RGB(D) stream, the current pose graph, the 3D point clouds of the map, optimized Gaussians
 
-    We combine these building blocks in a multiprocessing environment. By setting frequencies you can synchronize these processes, where
-    the Frontend is the leading Process and everything else follows. The final runtime will be determined by
+    We combine these building blocks in a multi-processing environment. By setting frequencies you can synchronize these processes,
+    where the Frontend is the leading Process and everything else follows.
+
+    The final runtime will be determined by
         i) how many Processes run in parallel
-        ii) Which Process is the slowest and how often it is called
+        ii) Which Process is the slowest and how often it is called.
 
         In general the Frontend should be the fastest Process and act as an upper bound to how fast we can get.
-        You can expect 10 - 25 FPS on normal data with mid resolution.
+        You can expect 15 - 25 FPS on normal data with mid resolution.
+        You can see the final runtime of our system by checking the progressbar of the Frontend Process, since it waits for
+        the Mapper and the Backend runs truly in parallel, it shows the amortized costs really well.
+        NOTE: We usually get a significant slow down only because of the Renderer/Mapper. When configured well, we can still hit ~6 FPS with everything.
+
+    Memory consumption is driven by (many) different building blocks, mainly:
+        - Video buffer in float32 with size 256 - 512 keyframes:
+        - Neural networks for i) DROID optical flow ii) (optional) RAFT optical flow / EIGEN visual place recognition
+        - Local Frontend Pose Graph
+        - Global Backend Pose Graph
+        - Renderer with optimization batch size, number of total Gaussians, resolution of data
+    We usually hit 17 - 22GB with all components together. You have to watch out on outdoor scenes, where the buffer
+    is either longer or the resolution is too high. Running all components can easily result in an OOM if not careful!
     """
 
     def __init__(self, cfg: DictConfig, dataset=None, output_folder: Optional[str] = None):
@@ -189,11 +201,13 @@ class SLAM:
                 "red",
             )
         if self.cfg.run_mapping:
-            if self.cfg.mapping.refinement.use_non_keyframes:
-                assert self.cfg.mapping.refinement.iters > 0, colored(
-                    """If you want to use non-keyframes during Gaussian Rendering Optimization, 
-                    make sure that you actually refine the map after running tracking!""",
-                    "red",
+            if self.cfg.mapping.refinement.use_non_keyframes and self.cfg.mapping.refinement.iters == 0:
+                print(
+                    colored(
+                        """Warning. If you want to use non-keyframes during Gaussian Rendering Optimization, 
+                        make sure that you actually refine the map after running tracking!""",
+                        "red",
+                    )
                 )
         if self.cfg.run_mapping_gui:
             assert self.cfg.run_mapping, colored(
@@ -337,6 +351,10 @@ class SLAM:
             semaMapping.release()
 
     def loop_detection(self, rank: int, loop_queue: mp.Queue, run: bool = False) -> None:
+        """Run a loop detector in parallel, which either measures optical flow between the current frame
+        and all past frames or visual similarity by comparing feature descriptors.
+        When two frames could be the same, we add a bidirectional edge to the backend optimization graph.
+        """
 
         if run:
             assert self.loop_detector is not None, "Loop Detection is not enabled, but we are running it!"
@@ -391,7 +409,10 @@ class SLAM:
             self.backend.count = count_to_set  # Reset with memoized count
             self.backend.to(self.device)
 
+        return count_to_set
+
     def get_potential_loop_update(self, loop_queue: mp.Queue):
+        """Extract the loop candidates from the Queue and merge them into one set of edges."""
         try:
             new_loops = get_all_queue(loop_queue)  # Empty the whole Queue at once
             new_loops = merge_candidates(new_loops)  # In case we had multiple loop updates
@@ -413,6 +434,7 @@ class SLAM:
 
         memoized_backend_count = 0
         all_lc_candidates = []
+        all_loop_ii, all_loop_jj = None, None
 
         while self.tracking_finished < 1 and run:
             if self.backend_can_start < 1:
@@ -424,11 +446,11 @@ class SLAM:
             memoized_backend_count = self.ram_safeguard_backend(
                 max_ram=self.max_ram_usage, count_to_set=memoized_backend_count
             )
+
             if self.backend is None:
                 continue
 
             # If we run an additional loop detector -> Pull in visually similar candidate edges as well
-            all_loop_ii, all_loop_jj = None, None
             loop_ii, loop_jj = None, None
             if self.cfg.run_loop_detection and loop_queue is not None:
                 if not loop_queue.empty():
@@ -436,10 +458,9 @@ class SLAM:
                     # memoize all loop candidates to always give all candidates to the backend as edges!
                     if loop_ii is not None and loop_jj is not None:
                         all_lc_candidates.append((loop_ii, loop_jj))
-                all_loop_ii, all_loop_jj = loop_ii, loop_jj
-                if len(all_lc_candidates) > 0:
-                    all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
+                        all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
 
+            ### Actual Backend call
             if self.backend.enable_loop:
                 self.backend(local_graph=self.frontend.optimizer.graph, add_ii=all_loop_ii, add_jj=all_loop_jj)
             else:
@@ -447,9 +468,11 @@ class SLAM:
             sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
         sleep(self.sleep_time)  # Let other threads finish their last optimization
+        # Try to instantiate again if needed
         memoized_backend_count = self.ram_safeguard_backend(
             max_ram=self.max_ram_usage, count_to_set=memoized_backend_count
-        )  # Try to instantiate again if needed
+        )
+
         if self.backend is not None and run:
             self.info(f"Ran Backend {self.backend.count} times before refinement!")
 
@@ -458,8 +481,6 @@ class SLAM:
             with self.video.get_lock():
                 t_end = self.video.counter.value
 
-            # Reinstantiate in case backend got deleted
-            self.ram_safeguard_backend(max_ram=self.max_ram_usage, count_to_set=memoized_backend_count)
             if self.backend is None:
                 self.info(
                     """Backend Refinement does not fit into memory! Please run the system in a 
@@ -469,18 +490,15 @@ class SLAM:
                 msg = "Optimize full map: [{}, {}]!".format(0, t_end)
                 self.backend.info(msg)
 
-                # If we run an additional loop detector -> Pull in visually similar candidate edges as well
-                all_loop_ii, all_loop_jj = None, None
                 if self.cfg.run_loop_detection and loop_queue is not None:
                     if not loop_queue.empty():
                         loop_ii, loop_jj = self.get_potential_loop_update(loop_queue)
                         # memoize all loop candidates to always give all candidates to the backend as edges!
                         if loop_ii is not None and loop_jj is not None:
                             all_lc_candidates.append((loop_ii, loop_jj))
-                    if len(all_lc_candidates) > 0:
-                        all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
+                            all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
 
-                # Use loop closure BA for refinement if enabled
+                ### 2 Refinement calls
                 if self.backend.enable_loop:
                     _, _ = self.backend.optimizer.loop_ba(
                         t_start=0, t_end=t_end, steps=6, add_ii=all_loop_ii, add_jj=all_loop_jj
@@ -509,7 +527,7 @@ class SLAM:
         self.all_finished += 1
         self.info("Backend done!")
 
-    def maybe_reanchor_gaussians(self, threshold: float = 0.05) -> None:
+    def maybe_reanchor_gaussians(self, threshold: float = 0.02) -> None:
         """Reanchor the Gaussians to follow a big map update.
         For this purpose we simply track the pose changes after a backend optimization."""
         unit = self.video.pose_changes.clone()
@@ -579,6 +597,7 @@ class SLAM:
         self.info("Gaussian Mapping Done!")
 
     def visualizing(self, rank: int, run=True) -> None:
+        """Vanilla Point Cloud Visualizer in Open3D"""
         self.info("Visualization thread started!")
         self.all_trigered += 1
         finished = False
@@ -591,6 +610,7 @@ class SLAM:
         self.info("Visualization done!")
 
     def mapping_gui(self, rank: int, run=True) -> None:
+        """Gaussian Splatting Visualizer in Open3D"""
         self.info("Mapping GUI thread started!")
         self.all_trigered += 1
         finished = False
@@ -614,6 +634,7 @@ class SLAM:
         self.info("Mapping GUI done!")
 
     def show_stream(self, rank, input_queue: mp.Queue, run=True) -> None:
+        """Show the input RGBD stream (+ confidence of network) in separate windows"""
         self.info("OpenCV Image stream thread started!")
         self.all_trigered += 1
 
@@ -633,9 +654,6 @@ class SLAM:
                     cv2.waitKey(1)
                 except Exception as e:
                     pass
-                    # Uncomment if you observe something weird, this will exit once the stream is finished
-                    # print(colored(e, "red"))
-                    # print(colored("Continue ..", "red"))
 
             if self.plot_uncertainty:
                 # Plot the uncertainty on top
@@ -653,6 +671,12 @@ class SLAM:
         self.info("Show stream Done!")
 
     def evaluate(self, stream, gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None) -> None:
+        """Based on the current state of the video buffer and maybe on the last state of the Gaussian Mapper,
+        evaluate the following against the ground truth from the (RGBD-) Dataset:
+            i) Tracking metrics for the keyframe poses and all poses. People often only report the keyframe trajectory or both.
+            ii) Rendering and depth evaluation for keyframes and non-keyframes. Since the keyframes are always in the training dataset,
+            people usually consider the non-keyframe metrics.
+        """
 
         eval_path = os.path.join(self.output, "evaluation")
         self.info("Saving evaluation results in {}".format(eval_path), logger=log)
@@ -662,7 +686,9 @@ class SLAM:
         ### Trajectory evaluation ###
         #### ------------------- ####
         # If we dont optimize the scales of our prior, we should also not use scale_adjustment!
-        if (self.cfg.mode == "prgbd" and self.video.optimize_scales) or self.cfg.mode == "mono":
+        # NOTE chen: Its unfair to not scale the trajectory when optimize_scales=False, because the monocular depth is usually not metric depth
+        # if (self.cfg.mode == "prgbd" and self.video.optimize_scales) or self.cfg.mode == "mono":
+        if self.cfg.mode in ["prgbd", "mono"]:
             monocular = True
         else:
             monocular = False
@@ -729,8 +755,8 @@ class SLAM:
         NOTE the trajectory filler will create keyframe poses, that slightly deviate due to how the interpolation works (we solve local motion_only BA problems)
         NOTE the poses from GaussianMapper are stored as 4x4 homogeneous matrices. When we convert them back into a Lie algebra the mapping is not unique
             (Example: a 180° rotation can be +180° or -180°, i.e. a sign flip of the quaternion).
-        NOTE since the evaluation frame evo, will register the estimated trajectory to the groundtruth with a single SE3 transform
-        in a best fit way, the sign does not matter as much and might make small numerical differences
+            Since the evaluation frame evo, will register the estimated trajectory to the groundtruth with a single SE3 transform
+            in a best fit way, the sign does not matter as much and might only make small numerical differences
         """
         from .geom import matrix_to_lie, lie_to_matrix, lie_quat_swap_convention
 
@@ -762,11 +788,11 @@ class SLAM:
             all frames of the whole video stream!"""
             tstamps = np.arange(len(est_w2c_all_matr)).tolist()
 
-            est_c2w_kf_lie, est_w2c_kf_lie = est_c2w_all_lie[kf_ids], est_w2c_all_lie[kf_ids]
-            est_w2c_kf_matr, est_c2w_kf_matr = est_w2c_all_matr[kf_ids], lie_to_matrix(est_c2w_kf_lie)
+            # est_c2w_kf_lie, est_w2c_kf_lie = est_c2w_all_lie[kf_ids], est_w2c_all_lie[kf_ids]
+            # est_w2c_kf_matr, est_c2w_kf_matr = est_w2c_all_matr[kf_ids], lie_to_matrix(est_c2w_kf_lie)
             # Take from video directly without interpolation optimization
-            # vid_w2c_kf_lie = self.video.poses[: self.video.counter.value]
-            # vid_c2w_kf_lie = SE3.InitFromVec(vid_w2c_kf_lie).inv().vec()
+            est_w2c_kf_lie = vid_w2c_kf_lie = self.video.poses[: self.video.counter.value]
+            est_c2w_kf_lie = vid_c2w_kf_lie = SE3.InitFromVec(vid_w2c_kf_lie).inv().vec()
             # vid_w2c_kf_matr, vid_c2w_kf_matr = lie_to_matrix(vid_w2c_kf_lie), lie_to_matrix(vid_c2w_kf_lie)
 
             kf_tstamps = kf_tstamps.tolist()
@@ -801,6 +827,10 @@ class SLAM:
         est_c2w_all_lie: np.ndarray,
         gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None,
     ) -> List[Camera]:
+        """Go over all [B, 7] lie algebra poses and convert these into renderable Camera objects. If we
+        already refined using non-keyframes during GaussianMapper Refinement, then we simply return the
+        last state of the Mapper.
+        """
 
         if self.cfg.mapping.refinement.use_non_keyframes:
             all_cams = gaussian_mapper_last_state.cameras
@@ -814,7 +844,7 @@ class SLAM:
 
                 _, gt_image, gt_depth, _, _ = stream[i]
                 # c2w -> w2c for initialization
-                view = SE3.InitFromVec(torch.tensor(view).float().to(device=self.device)).inv().matrix()
+                view = SE3.InitFromVec(view.float().to(device=self.device)).inv().matrix()
                 fx, fy, cx, cy = intrinsics
                 height, width = gt_image.shape[-2:]
                 fovx, fovy = focal2fov(fx, width), focal2fov(fy, height)
@@ -854,10 +884,10 @@ class SLAM:
         stream=None,
         gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None,
     ) -> None:
-        """fill poses for non-keyframe images and evaluate"""
-        self.info("Initiating termination ...", logger=log)
+        """Evaluate the system and then shut down all Process."""
 
-        # self.save_state()  ## this is not reached
+        self.info("Initiating termination ...", logger=log)
+        # self.save_state()  # NOTE we dont save this for now, since the network stays the same
         if self.do_evaluate:
             self.info("Doing evaluation!", logger=log)
             self.evaluate(stream, gaussian_mapper_last_state=gaussian_mapper_last_state)
@@ -870,6 +900,7 @@ class SLAM:
         self.info("Terminate: Done!", logger=log)
 
     def run(self, stream) -> None:
+        """Main SLAM function to manage the multi-threaded application."""
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
