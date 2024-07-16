@@ -490,29 +490,13 @@ class SLAM:
                 msg = "Optimize full map: [{}, {}]!".format(0, t_end)
                 self.backend.info(msg)
 
-                if self.cfg.run_loop_detection and loop_queue is not None:
-                    if not loop_queue.empty():
-                        loop_ii, loop_jj = self.get_potential_loop_update(loop_queue)
-                        # memoize all loop candidates to always give all candidates to the backend as edges!
-                        if loop_ii is not None and loop_jj is not None:
-                            all_lc_candidates.append((loop_ii, loop_jj))
-                            all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
-
                 ### 2 Refinement calls
                 if self.backend.enable_loop:
-                    _, _ = self.backend.optimizer.loop_ba(
-                        t_start=0, t_end=t_end, steps=6, add_ii=all_loop_ii, add_jj=all_loop_jj
-                    )
-                    _, _ = self.backend.optimizer.loop_ba(
-                        t_start=0, t_end=t_end, steps=6, add_ii=all_loop_ii, add_jj=all_loop_jj
-                    )
+                    _, _ = self.backend.optimizer.loop_ba(t_start=0, t_end=t_end, steps=6)
+                    _, _ = self.backend.optimizer.loop_ba(t_start=0, t_end=t_end, steps=6)
                 else:
-                    _, _ = self.backend.optimizer.dense_ba(
-                        t_start=0, t_end=t_end, steps=6, add_ii=all_loop_ii, add_jj=all_loop_jj
-                    )
-                    _, _ = self.backend.optimizer.dense_ba(
-                        t_start=0, t_end=t_end, steps=6, add_ii=all_loop_ii, add_jj=all_loop_jj
-                    )
+                    _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
+                    _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
 
                 del self.backend
                 torch.cuda.empty_cache()
