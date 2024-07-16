@@ -599,7 +599,7 @@ class GaussianMapper(object):
             do_densify = (
                 iter % self.refine_params.prune_densify_every == 0
             ) and iter <= self.refine_params.densify_until
-            opacity_densify = do_densify and self.refine_params.densify.use_opacity
+            opacity_densify = self.refine_params.densify.use_opacity
 
             if len(frames) > batch_size:
                 batches = [frames[i : i + batch_size] for i in range(0, len(frames), batch_size)]
@@ -824,7 +824,7 @@ class GaussianMapper(object):
             opacity_acm.append((view, render_pkg["opacity"]))
             visibility_filter_acm.append(render_pkg["visibility_filter"])
             viewspace_point_tensor_acm.append(render_pkg["viewspace_points"])
-            radii_acm.append(render["radii"])
+            radii_acm.append(render_pkg["radii"])
 
             loss += current_loss
 
@@ -861,7 +861,6 @@ class GaussianMapper(object):
             # Prune and Densify
             if (
                 self.last_idx > self.n_last_frames
-                and (iter + 1) % self.update_params.prune_densify_every == 0
                 and prune_densify
             ):
                 # General pruning based on opacity and size + densification (from original 3DGS)
@@ -869,14 +868,13 @@ class GaussianMapper(object):
 
             # Densify in low opacity regions only after the map is stable already
             # (else we waste compute, because densify_and_prune will fill initial holes quickly)
-            if (
-                (iter + 1) % self.update_params.prune_densify_every == 0
+            if (prune_densify
                 and opacity_densify
                 and self.count > self.update_params.densify.opacity.after
             ):
                 ng_before = len(self.gaussians)
                 for view, opacity in opacity_acm:
-                    self.gaussians.densify_w_opacity(opacity, view, min_opacity=self.update_params.densify.opacity.th)
+                    self.gaussians.densify_from_mask(view, opacity.squeeze() < self.update_params.densify.opacity.th)
                 if (len(self.gaussians) - ng_before) > 0:
                     self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity")
 
@@ -1152,16 +1150,15 @@ class GaussianMapper(object):
             return
 
         ### Optimize gaussians
-        do_densify = len(self.iteration_info) % self.update_params.densify_every == 0
-        opacity_densify = do_densify and self.update_params.densify.use_opacity
         for iter in tqdm(range(iters), desc=colored("Gaussian Optimization", "magenta"), colour="magenta"):
+            do_densify = len(self.iteration_info) % self.update_params.prune_densify_every == 0
             frames = self.select_keyframes()[0] + self.new_cameras
             loss = self.mapping_step(
                 iter,
                 frames,
                 self.update_params.densify.vanilla,
                 prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
-                opacity_densify=opacity_densify,  # Densify based on low opacity regions
+                opacity_densify=self.update_params.densify.use_opacity,  # Densify based on low opacity regions
                 optimize_poses=self.update_params.optimize_poses,
             )
             self.loss_list.append(loss)
