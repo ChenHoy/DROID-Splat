@@ -605,7 +605,7 @@ class DepthVideo:
             scale_t[scale_invalid], shift_t[shift_invalid] = 1.0, 0.0
 
             self.scales[: self.counter.value - 1], self.shifts[: self.counter.value - 1] = scale_t, shift_t
-            self.reset_prior()  # Reset the prior and update disps_sens to fit the map
+        self.reset_prior()  # Reset the prior and update disps_sens to fit the map
 
     def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 5e-3):
         """Bundle adjustment over structure with a scalable prior.
@@ -614,7 +614,6 @@ class DepthVideo:
         We optimize scale and shift parameters on top of the scene disparity.
         """
         with self.get_lock():
-
             # Store the uncertainty maps for source frames, that will get updated
             confidence, idx = self.reduce_confidence(weight, ii)
             # Uncertainties are for [x, y] directions -> Take norm to get single scalar
@@ -624,15 +623,16 @@ class DepthVideo:
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
-            # Precondition
-            self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
+        # Precondition
+        self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
 
-            # Block coordinate descent optimization
-            for i in range(iters):
-                # Sanity check for non-negative disparities
-                # FIXME clamp disps_sens as well after fix
-                self.disps.clamp_(min=1e-5)
+        # Block coordinate descent optimization
+        for i in range(iters):
+            # Sanity check for non-negative disparities
+            # FIXME clamp disps_sens as well after fix
+            self.disps.clamp_(min=1e-5)
 
+            with self.get_lock():
                 # Motion only Bundle Adjustment (MoBA)
                 droid_backends.ba(
                     self.poses,
@@ -676,8 +676,7 @@ class DepthVideo:
                     alpha=alpha,
                 )
 
-                # # After optimizing the prior, we need to update the disps_sens and reset the scales
-                # # only then can we use global BA and intrinsics optimization with the CUDA kernel later
-                self.reset_prior()
-
-                self.mapping_dirty[t0:t1] = True
+            # # After optimizing the prior, we need to update the disps_sens and reset the scales
+            # # only then can we use global BA and intrinsics optimization with the CUDA kernel later
+            self.reset_prior()
+            self.mapping_dirty[t0:t1] = True

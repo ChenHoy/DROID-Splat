@@ -554,7 +554,7 @@ class FactorGraph:
                     net, delta, weight, damping, upmask = self.update_op(
                         self.net[:, v], self.video.inps[None, iis], corr1, motion[:, v], iis, jjs
                     )
-                    weight = self.remove_dynamic_pixels(weight, iis)
+                    # weight = self.remove_dynamic_pixels(weight, iis)
 
                     if self.upsample:
                         self.video.upsample(torch.unique(iis, sorted=True), upmask)

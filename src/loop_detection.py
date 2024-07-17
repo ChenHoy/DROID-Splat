@@ -242,9 +242,10 @@ class LoopDetector:
 
     @torch.no_grad()
     def get_eigen_features(self, idx: int) -> torch.Tensor:
-        """Get features for a specific frame index"""
+        """Get EigenPlaces features for a specific frame index"""
         with torch.autocast(device_type="cuda", dtype=torch.float16):
-            image = self.video.images[idx]
+            with self.video.get_lock():
+                image = self.video.images[idx]
             image = self.normalize(image.unsqueeze(0))
             features = self.net(image)
         return features.cpu()
@@ -498,7 +499,9 @@ class LoopDetector:
 
         elif self.method == "internal":
             delta_i = self.compute_motion_batch(ii, jj)
-            valid = self.video.static_masks[ii, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
+            with self.video.get_lock():
+                valid = self.video.static_masks[ii, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
+
             df = self.get_motion_distance(delta_i, valid)
             mask_df = df < self.thresh  # Candidates need to have a low optical flow difference
             assert return_matches is False, "Internal DROID does not support place recognition!"
@@ -584,14 +587,16 @@ class LoopDetector:
         This does not work well on a modern setup, so we use recent deep feature descriptors used in place recognition.
         """
         # NOTE chen: extract value here because it could change during this update in multi-thread setup
-        kf_counter = self.video.counter.value
+        with self.video.get_lock():
+            kf_counter = self.video.counter.value
+
         # We need at least 2 frames in the video to compute motion
         if not self.counter.value < kf_counter or kf_counter < 2:
             return None
 
         start = time.time()
         candidates = []
-        for i in range(max(self.counter.value - 1, 1), self.video.counter.value - 1):
+        for i in range(max(self.counter.value - 1, 1), kf_counter - 1):
             # Get the latest frame and repeat index for all previous frames
             ii = torch.tensor(i, device=self.device).repeat(i)  # Repeat index for i-1 times
             jj = torch.arange(i, device=self.device)  # Get indices of all previous frames
@@ -601,8 +606,7 @@ class LoopDetector:
             dt = torch.abs(ii - jj)  # Temporal frame distance
 
             # Memoize these, for inspection later
-            self.rot_distances[i] = dr
-            self.f_distances[i] = df
+            self.rot_distances[i], self.f_distances[i] = dr, df
 
             ### Threshold conditions
             mask_dt = dt > self.min_temp_dist  # Candidates should not be in a temporal neighborhood
