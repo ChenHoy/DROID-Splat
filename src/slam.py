@@ -110,7 +110,7 @@ class SLAM:
             # NOTE self.frontend.window is not an accurate representation over which frames we optimize!
             # Because we delete edges of high age, we usually dont optimize over the whole window, but cut off past frames very fast
             # Example: Window might be [0, 25], but we only optimize [15, 25] -> [0, 15] is untouched and could be handled by backend
-            self.backend_warmup = max(self.frontend.window, self.backend.warmup)
+            self.backend_warmup = min(self.frontend.window, self.backend.warmup)
         else:
             self.backend = None
             self.backend_warmup = 9999
@@ -644,9 +644,9 @@ class SLAM:
                 with self.video.get_lock():
                     t_cur = max(0, self.video.counter.value - 1)
                     if self.cfg.tracking.get("upsample", False):
-                        uncertanity_cur = self.video.uncertainty_up[t_cur].clone()
+                        uncertanity_cur = self.video.confidence_up[t_cur].clone()
                     else:
-                        uncertanity_cur = self.video.uncertainty[t_cur].clone()
+                        uncertanity_cur = self.video.confidence[t_cur].clone()
                 uncertainty_img = uncertainty2rgb(uncertanity_cur)[0]
                 cv2.imshow("Uncertainty", uncertainty_img[..., ::-1])
                 cv2.waitKey(1)
