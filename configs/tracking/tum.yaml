@@ -1,0 +1,7 @@
+defaults:
+  - /tracking/base@_here_
+
+backend: 
+  warmup: 10
+  window: 80
+  max_factor_mult: 12

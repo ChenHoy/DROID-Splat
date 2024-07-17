@@ -2,11 +2,8 @@
 defaults:
   - override /data: Custom/kitchen
 
-sleep_delay: 1.0
 stride: 1
 opt_intr: True # Ensure, that you dont use scale_optimization in prgbd mode!
-
-run_visualization: True
 
 data:
   cam:
