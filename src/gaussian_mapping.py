@@ -1151,7 +1151,7 @@ class GaussianMapper(object):
 
         ### Optimize gaussians
         for iter in tqdm(range(iters), desc=colored("Gaussian Optimization", "magenta"), colour="magenta"):
-            do_densify = len(self.iteration_info) % self.update_params.prune_densify_every == 0
+            do_densify = iter % self.update_params.prune_densify_every == 0
             frames = self.select_keyframes()[0] + self.new_cameras
             loss = self.mapping_step(
                 iter,
