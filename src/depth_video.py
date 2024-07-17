@@ -482,31 +482,33 @@ class DepthVideo:
     def distance(self, ii=None, jj=None, beta=0.3, bidirectional=True):
         """frame distance metric, where distance = sqrt((u(ii) - u(jj->ii))^2 + (v(ii) - v(jj->ii))^2)"""
         return_matrix = False
-        N = self.counter.value
-        if ii is None:
-            return_matrix = True
-            ii, jj = torch.meshgrid(torch.arange(N), torch.arange(N), indexing="ij")
+        with self.get_lock():
+            N = self.counter.value
 
-        ii, jj = DepthVideo.format_indices(ii, jj)
+            if ii is None:
+                return_matrix = True
+                ii, jj = torch.meshgrid(torch.arange(N), torch.arange(N), indexing="ij")
 
-        intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same
-        if bidirectional:
-            poses = self.poses[: self.counter.value].clone()
+            ii, jj = DepthVideo.format_indices(ii, jj)
 
-            d1 = droid_backends.frame_distance(
-                poses, self.disps, self.intrinsics[intrinsic_common_id], ii, jj, beta, self.model_id
-            )
+            intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same
+            if bidirectional:
+                poses = self.poses[: self.counter.value].clone()
 
-            d2 = droid_backends.frame_distance(
-                poses, self.disps, self.intrinsics[intrinsic_common_id], jj, ii, beta, self.model_id
-            )
+                d1 = droid_backends.frame_distance(
+                    poses, self.disps, self.intrinsics[intrinsic_common_id], ii, jj, beta, self.model_id
+                )
 
-            d = 0.5 * (d1 + d2)
+                d2 = droid_backends.frame_distance(
+                    poses, self.disps, self.intrinsics[intrinsic_common_id], jj, ii, beta, self.model_id
+                )
 
-        else:
-            d = droid_backends.frame_distance(
-                self.poses, self.disps, self.intrinsics[intrinsic_common_id], ii, jj, beta, self.model_id
-            )
+                d = 0.5 * (d1 + d2)
+
+            else:
+                d = droid_backends.frame_distance(
+                    self.poses, self.disps, self.intrinsics[intrinsic_common_id], ii, jj, beta, self.model_id
+                )
 
         if return_matrix:
             return d.reshape(N, N)
