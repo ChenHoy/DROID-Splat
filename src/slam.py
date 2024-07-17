@@ -637,6 +637,7 @@ class SLAM:
                         cv2.imshow("depth", depth_image[..., ::-1])
                     cv2.waitKey(1)
                 except Exception as e:
+                    # print(colored(e, "red"))
                     pass
 
             if self.plot_uncertainty:

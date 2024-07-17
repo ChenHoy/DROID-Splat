@@ -28,7 +28,7 @@ class BackendWrapper(torch.nn.Module):
         # When to start optimizing globally
         self.frontend_window = cfg.tracking.frontend.window
         # Dont consider the state of frontend, but start optimizing after warmup frames
-        self.warmup = max(cfg.tracking.backend.get("warmup", 20), cfg.tracking.warmup)
+        self.warmup = min(cfg.tracking.backend.get("warmup", 15), cfg.tracking.warmup)
         # Do a final refinement over all keyframes if wanted
         self.do_refinement = cfg.tracking.backend.get("do_refinement", False)
 
