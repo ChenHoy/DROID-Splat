@@ -110,7 +110,7 @@ class SLAM:
             # NOTE self.frontend.window is not an accurate representation over which frames we optimize!
             # Because we delete edges of high age, we usually dont optimize over the whole window, but cut off past frames very fast
             # Example: Window might be [0, 25], but we only optimize [15, 25] -> [0, 15] is untouched and could be handled by backend
-            self.backend_warmup = min(self.frontend.window, self.backend.warmup)
+            self.backend_warmup = self.backend.warmup
         else:
             self.backend = None
             self.backend_warmup = 9999
@@ -514,7 +514,9 @@ class SLAM:
     def maybe_reanchor_gaussians(self, threshold: float = 0.02) -> None:
         """Reanchor the Gaussians to follow a big map update.
         For this purpose we simply track the pose changes after a backend optimization."""
-        unit = self.video.pose_changes.clone()
+        with self.video.get_lock():
+            unit = self.video.pose_changes.clone()
+
         unit[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.device)
         delta = pose_distance(self.video.pose_changes, unit)
         to_update = (delta > threshold).nonzero().squeeze()  # Check for frames with large updates
@@ -524,7 +526,8 @@ class SLAM:
             and len(to_update) > 0
         ):
             self.gaussian_mapper.reanchor_gaussians(to_update, self.video.pose_changes[to_update])
-            self.video.pose_changes[to_update] = unit  # Reset the pose update
+            with self.video.get_lock():
+                self.video.pose_changes[to_update] = unit  # Reset the pose update
 
     def gaussian_mapping(
         self,
