@@ -447,7 +447,7 @@ def show_masks_video(datastructure: SimpleVideo) -> None:
     plt.show()
 
 
-@hydra.main(version_base=None, config_path="./configs/", config_name="visu")
+@hydra.main(version_base=None, config_path="../configs/", config_name="visu")
 def main(cfg):
 
     output_folder = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
