@@ -1,0 +1,9 @@
+defaults:
+  # NOTE we need to use an absolute path here, because otherwise it will not be cfg.data in the Dict
+  - /data/TUM_RGBD/base@_here_
+
+cam: 
+  fx: 535.4
+  fy: 539.2
+  cx: 320.1
+  cy: 247.6

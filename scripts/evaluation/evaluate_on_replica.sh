@@ -9,14 +9,8 @@ echo "Start evaluating on Replica dataset..."
 for sc in ${scenes}
 do
   echo Running on $sc ...
-  python run.py slam.input_folder=/media/data/Replica/${sc} slam.dataset=replica configs/data/Replica/base.yaml mode=$MODE slam.evaluate=True hydra.job.name=${EXPNAME}
-  # TODO change configs dependent on mode if wanted
-  # if [[ $MODE == "mono" ]]
-  # then
-    # python run.py slam.input_folder=/media/data/Replica/${sc} slam.dataset=replica configs/data/Replica/base.yaml mode=$MODE slam.evaluate=True hydra.job.name=${EXPNAME}
-  # else
-    # python run.py slam.input_folder=/media/data/Replica/${sc} slam.dataset=replica configs/data/Replica/base.yaml mode=$MODE slam.evaluate=True hydra.job.name=${EXPNAME}
-  # fi
+  # TODO change the data subconfig to Replica/base.yaml
+  python run.py data=Replica/base data.input_folder=/media/data/Replica/${sc} mode=$MODE evaluate=True hydra.job.name=${EXPNAME}
   echo $sc done!
 done
 echo All Done!
