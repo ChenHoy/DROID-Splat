@@ -616,10 +616,9 @@ class TUM_RGBD(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(TUM_RGBD, self).__init__(cfg, device)
         self.color_paths, self.depth_paths, self.poses = self.loadtum(self.input_folder, frame_rate=32)
-        end_frame = 1000  # Dynamic after 1000 frames
-        self.color_paths = self.color_paths[: end_frame : self.stride]
-        self.depth_paths = self.depth_paths[: end_frame : self.stride]
-        self.poses = None if self.poses is None else self.poses[: end_frame : self.stride]
+        self.color_paths = self.color_paths[:: self.stride]
+        self.depth_paths = self.depth_paths[:: self.stride]
+        self.poses = None if self.poses is None else self.poses[:: self.stride]
         self.n_img = len(self.color_paths)
 
     def parse_list(self, filepath, skiprows=0):

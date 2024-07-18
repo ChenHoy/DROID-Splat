@@ -482,8 +482,10 @@ class GaussianMapper(object):
                 used_mem, free_mem = self.get_ram_usage()
                 # NOTE chen: this can add up a lot of memory, only this if we have enough slack
                 if used_mem <= max_mem:
+                    ng_before = len(self.gaussians)
                     self.info(f"Patching up holes in view {view_id} manually using Depth from Tracking ...")
                     self.densify_holes(view_id, mask, downsample_factor=2.0)
+                    self.info(f"Added {len(self.gaussians) - ng_before} Gaussians to fill holes in view {view_id} ...")
             else:
                 has_hole = False
             return has_hole
@@ -501,6 +503,7 @@ class GaussianMapper(object):
             for i, view in tqdm(enumerate(kf_cams)):
                 loss_i, render_pkg = self.render_compare(view, scale_invariant=scale_invariant)
                 has_holes = maybe_fill_holes(render_pkg, view.uid, size_hole=100)
+                has_holes = False
                 loss += loss_i
                 # We need to detach loss_i and copy, so the computation graph does not grow too large!
                 if has_holes:
@@ -1151,7 +1154,7 @@ class GaussianMapper(object):
 
         ### Optimize gaussians
         for iter in tqdm(range(iters), desc=colored("Gaussian Optimization", "magenta"), colour="magenta"):
-            do_densify = len(self.iteration_info) % self.update_params.prune_densify_every == 0
+            do_densify = iter % self.update_params.prune_densify_every == 0
             frames = self.select_keyframes()[0] + self.new_cameras
             loss = self.mapping_step(
                 iter,

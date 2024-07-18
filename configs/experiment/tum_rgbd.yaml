@@ -1,0 +1,39 @@
+# @package _global_
+defaults:
+  - override /data: TUM_RGBD/fr2
+  - override /tracking: base
+
+
+mode: rgbd
+stride: 1
+evaluate: True
+run_mapping_gui: True
+
+data:
+  input_folder: /media/data/tum_rgbd/benchmark_rgbd/fr2_xyz
+
+
+mapping:
+  warmup: 5
+  mapping_iters: 50
+  refinement_iters: 50 # Final Optimization iterations for all views
+  refine_lr_factor: 0.5
+
+  opt_params:
+    position_lr_init: 1e-3 # Default MonoGS: 0.00016 (RGB mode has x10)
+    position_lr_final: 1e-5 # Default MonoGS: 0.0000016
+    position_lr_max_steps: 100 # Default MonoGS: 30000
+
+
+  input:
+    pcd_downsample_init: 16 # This is a constant downsampling factor
+    pcd_downsample: 8 # You ideally have ~5-10k points per frame
+    point_size: 0.04
+
+  refinement:
+    iters: 50 # Final Optimization iterations for all views
+    optimize_poses: False
+    random_subset: 0.2 # Always optimize over a random subset of frames with size % of all to save compute
+    w_importance_sampling: True # Use importance sampling for the final optimization
+    use_non_keyframes: False # Use non-keyframes during map refinement
+    keyframes_at_least: 0.0 # Always make sure to have > x% keyframes in a batch

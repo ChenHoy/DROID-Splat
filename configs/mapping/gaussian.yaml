@@ -22,7 +22,7 @@ feedback:
 # Online Optimization
 online_opt:
   ## Local sliding optimization window
-  iters: 30 # Optimization iterations for selected views
+  iters: 50 # Optimization iterations for selected views
   n_last_frames: 10 # Always optimize the last n frames
   n_rand_frames: 5 # Optimize random global frames on top
   batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
@@ -110,17 +110,17 @@ refinement:
   iters: 50 # Final Optimization iterations for all views
   bs: 20 # Batch size for refinement (Use <= 70 to avoid OOM!)
   lr_factor: 0.1 # Change the learning rate for refinement
-  optimize_poses: False
+  optimize_poses: True
   random_subset: 0.2 # Always optimize over a random subset of frames with size % of all to save compute
   w_importance_sampling: True # Use importance sampling for the final optimization
-  use_non_keyframes: False # Use non-keyframes during map refinement
+  use_non_keyframes: True # Use non-keyframes during map refinement
   keyframes_at_least: 0.0 # Always make sure to have > x% keyframes in a batch
 
   prune_densify_every: 10 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
   densify_until: 20 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
 
   densify:
-    use_opacity: True # Use opacity based densification
+    use_opacity: False # Use opacity based densification
 
     # Densify Gaussians based on opacity only after k Mapper updates
     opacity:

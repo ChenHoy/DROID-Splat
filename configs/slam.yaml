@@ -28,10 +28,10 @@ sleep_delay: 0.01 # Sleep timer to cool off the system sometimtes
 run_frontend: True # This should always be True!
 run_backend: True # Global optimization
 run_loop_detection: False # Loop closure detection
-run_mapping: False # Rendering 
+run_mapping: True # Rendering 
 ## Visualizations / GUIs
 run_visualization: False
-run_mapping_gui: False
+run_mapping_gui: True
 show_stream: False
 
 # Frequencies for synchronizing the different main parts of the pipeline
