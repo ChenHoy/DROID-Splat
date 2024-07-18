@@ -2,6 +2,7 @@ import glob
 import os
 import ipdb
 from omegaconf import DictConfig
+from pathlib import Path
 from typing import Tuple, List
 
 import cv2
@@ -109,6 +110,13 @@ def get_dataset(cfg: DictConfig, device="cuda:0"):
 
 
 class BaseDataset(Dataset):
+    """Barebone dataset structure. This can load images and depth maps from specific folders.
+    We also load potential masks, e.g. for dynamic objects if provided.
+
+    Camera intrinsics are assumed to be passed in the config args.
+    We assume a pinhole camera model, but also allow distortion coefficients to be passed.
+    """
+
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(BaseDataset, self).__init__()
         self.name = cfg.data.dataset
@@ -301,6 +309,15 @@ class BaseDataset(Dataset):
 
 
 class ImageFolder(BaseDataset):
+    """Basic dataset for generic folder structures. Use this for custom datasets,
+    e.g. videos you record with your phone. We assume the following folder structure:
+
+    root/
+        images/
+        depths/ (optional)
+        calib.txt (optional)
+    """
+
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(ImageFolder, self).__init__(cfg, device)
         # Get either jpg or png files
@@ -312,9 +329,9 @@ class ImageFolder(BaseDataset):
             self.color_paths = sorted(glob.glob(input_images))
         self.color_paths = self.color_paths[:: self.stride]
 
-        depth_paths = os.path.join(self.input_folder, self.mono_model, "*.npy")
+        depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model, "*.npy")))
         if len(depth_paths) != 0:
-            self.depth_paths = sorted(glob.glob(depth_paths))
+            self.depth_paths = depth_paths
             self.depth_paths = self.depth_paths[:: self.stride]
             assert len(self.depth_paths) == len(
                 self.color_paths
@@ -615,7 +632,7 @@ class CoFusion(BaseDataset):
 class TUM_RGBD(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(TUM_RGBD, self).__init__(cfg, device)
-        self.color_paths, self.depth_paths, self.poses = self.loadtum(self.input_folder, frame_rate=32)
+        self.color_paths, self.depth_paths, self.poses = self.loadtum(self.input_folder, cfg, frame_rate=32)
         self.color_paths = self.color_paths[:: self.stride]
         self.depth_paths = self.depth_paths[:: self.stride]
         self.poses = None if self.poses is None else self.poses[:: self.stride]
@@ -644,7 +661,7 @@ class TUM_RGBD(BaseDataset):
 
         return associations
 
-    def loadtum(self, datapath, frame_rate=-1):
+    def loadtum(self, datapath: str, cfg: DictConfig, frame_rate: int = -1):
         """read video data in tum-rgbd format"""
         if os.path.isfile(os.path.join(datapath, "groundtruth.txt")):
             pose_list = os.path.join(datapath, "groundtruth.txt")
@@ -655,12 +672,23 @@ class TUM_RGBD(BaseDataset):
         depth_list = os.path.join(datapath, "depth.txt")
 
         image_data = self.parse_list(image_list)
-        depth_data = self.parse_list(depth_list)
+        if cfg.mode == "prgbd":
+            depth_paths = sorted(glob.glob(os.path.join(datapath, self.mono_model, "*.npy")))
+            assert len(depth_paths) == len(
+                image_data
+            ), f"Number of depth maps {len(depth_paths)} does not match number of images {len(image_data)}"
+            tstamp_depth = []
+            for dpath in depth_paths:
+                tstamp_depth.append(float(Path(dpath).stem))
+            tstamp_depth = np.array(tstamp_depth, dtype=np.float64)
+        else:
+            depth_data = self.parse_list(depth_list).astype("<U512")  # FIX extended the dtype to include long strings
+            tstamp_depth = depth_data[:, 0].astype(np.float64)
+
         pose_data = self.parse_list(pose_list, skiprows=1)
         pose_vecs = pose_data[:, 1:].astype(np.float64)
 
         tstamp_image = image_data[:, 0].astype(np.float64)
-        tstamp_depth = depth_data[:, 0].astype(np.float64)
         tstamp_pose = pose_data[:, 0].astype(np.float64)
         associations = self.associate_frames(tstamp_image, tstamp_depth, tstamp_pose)
 
@@ -676,10 +704,14 @@ class TUM_RGBD(BaseDataset):
         for ix in indicies:
             (i, j, k) = associations[ix]
             images += [os.path.join(datapath, image_data[i, 1])]
-            depths += [os.path.join(datapath, depth_data[j, 1])]
+            if cfg.mode == "prgbd":
+                depths += [os.path.join(datapath, depth_paths[j])]
+            else:
+                depths += [os.path.join(datapath, depth_data[j, 1])]
             # timestamp tx ty tz qx qy qz qw
             c2w = self.pose_matrix_from_quaternion(pose_vecs[k])
-            # NOTE always fix the first pose to identity
+
+            # NOTE Transform trajectory, so first pose is always idenity
             if inv_pose is None:
                 inv_pose = np.linalg.inv(c2w)
                 c2w = np.eye(4)

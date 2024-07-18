@@ -28,7 +28,7 @@ class BackendWrapper(torch.nn.Module):
         # When to start optimizing globally
         self.frontend_window = cfg.tracking.frontend.window
         # Dont consider the state of frontend, but start optimizing after warmup frames
-        self.warmup = max(cfg.tracking.backend.get("warmup", 20), cfg.tracking.warmup)
+        self.warmup = max(cfg.tracking.backend.get("warmup", 15), cfg.tracking.warmup)
         # Do a final refinement over all keyframes if wanted
         self.do_refinement = cfg.tracking.backend.get("do_refinement", False)
 
@@ -113,10 +113,11 @@ class Backend:
 
         Derivation: g12 = g2 * g1.inv(), g23 = g3 * g2.inv()  -> g3 = g23 * g2 = g23 * g12 * g1 = g13 * g1
         """
-        g0, g1 = lietorch.SE3.InitFromVec(pose_prev), lietorch.SE3.InitFromVec(pose_cur)
-        dP = g1 * g0.inv()  # Get relative pose in forward direction
-        dP_prev = lietorch.SE3.InitFromVec(self.video.pose_changes[t0:t1])
-        self.video.pose_changes[t0:t1] = (dP * dP_prev).vec()  # You can now get g_cur = dP * g_prev
+        with self.video.get_lock():
+            g0, g1 = lietorch.SE3.InitFromVec(pose_prev), lietorch.SE3.InitFromVec(pose_cur)
+            dP = g1 * g0.inv()  # Get relative pose in forward direction
+            dP_prev = lietorch.SE3.InitFromVec(self.video.pose_changes[t0:t1])
+            self.video.pose_changes[t0:t1] = (dP * dP_prev).vec()  # You can now get g_cur = dP * g_prev
 
     @torch.no_grad()
     def dense_ba(
@@ -131,8 +132,9 @@ class Backend:
     ):
         """Dense Bundle Adjustment over the whole map. Used for global optimization in the Backend."""
 
-        if t_end is None:
-            t_end = self.video.counter.value
+        with self.video.get_lock():
+            if t_end is None:
+                t_end = self.video.counter.value
         n = t_end - t_start
 
         # NOTE chen: This is one of the most important numbers for loop closures!
@@ -148,13 +150,12 @@ class Backend:
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)
 
-        # Sanity check: always reset the pose changes so we dont accidentally detect a change from some previous optimization ...
-        self.video.pose_changes[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.device)
-
-        poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
+        with self.video.get_lock():
+            poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
         # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
         graph.update_lowmem(t0=t_start + 1, t1=t_end, steps=steps, iters=iters, max_t=t_end, motion_only=motion_only)
-        poses_after = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
+        with self.video.get_lock():
+            poses_after = self.video.poses[t_start + 1 : t_end]  # Memoize pose before optimization
         # Memoize pose change in self.video so other Processes can adapt their datastructures
         self.accumulate_pose_change(poses_before, poses_after, t0=t_start + 1, t1=t_end)
 
@@ -186,8 +187,9 @@ class Backend:
         """Perform an update on the graph with loop closure awareness. This uses a higher step size
         for optimization than the dense bundle adjustment of the backend and rest of frontend.
         """
-        if t_end is None:
-            t_end = self.video.counter.value
+        with self.video.get_lock():
+            if t_end is None:
+                t_end = self.video.counter.value
 
         # NOTE chen: Make sure you have a large enough loop window set in cfg!
         # on larger maps you want to at least have a window of ~100 so we get enough factors
@@ -226,12 +228,14 @@ class Backend:
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)
 
-        poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
+        with self.video.get_lock():
+            poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
         # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
         graph.update_lowmem(
             t0=t_start_loop + 1, t1=t_end, steps=steps, iters=iters, max_t=t_end, lm=lm, ep=ep, motion_only=motion_only
         )
-        poses_after = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
+        with self.video.get_lock():
+            poses_after = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
         # Memoize pose change in self.video so other Processes can adapt their datastructures
         self.accumulate_pose_change(poses_before, poses_after, t0=t_start + 1, t1=t_end)
 

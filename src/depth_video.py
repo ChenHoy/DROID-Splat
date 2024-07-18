@@ -482,31 +482,33 @@ class DepthVideo:
     def distance(self, ii=None, jj=None, beta=0.3, bidirectional=True):
         """frame distance metric, where distance = sqrt((u(ii) - u(jj->ii))^2 + (v(ii) - v(jj->ii))^2)"""
         return_matrix = False
-        N = self.counter.value
-        if ii is None:
-            return_matrix = True
-            ii, jj = torch.meshgrid(torch.arange(N), torch.arange(N), indexing="ij")
+        with self.get_lock():
+            N = self.counter.value
 
-        ii, jj = DepthVideo.format_indices(ii, jj)
+            if ii is None:
+                return_matrix = True
+                ii, jj = torch.meshgrid(torch.arange(N), torch.arange(N), indexing="ij")
 
-        intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same
-        if bidirectional:
-            poses = self.poses[: self.counter.value].clone()
+            ii, jj = DepthVideo.format_indices(ii, jj)
 
-            d1 = droid_backends.frame_distance(
-                poses, self.disps, self.intrinsics[intrinsic_common_id], ii, jj, beta, self.model_id
-            )
+            intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same
+            if bidirectional:
+                poses = self.poses[: self.counter.value].clone()
 
-            d2 = droid_backends.frame_distance(
-                poses, self.disps, self.intrinsics[intrinsic_common_id], jj, ii, beta, self.model_id
-            )
+                d1 = droid_backends.frame_distance(
+                    poses, self.disps, self.intrinsics[intrinsic_common_id], ii, jj, beta, self.model_id
+                )
 
-            d = 0.5 * (d1 + d2)
+                d2 = droid_backends.frame_distance(
+                    poses, self.disps, self.intrinsics[intrinsic_common_id], jj, ii, beta, self.model_id
+                )
 
-        else:
-            d = droid_backends.frame_distance(
-                self.poses, self.disps, self.intrinsics[intrinsic_common_id], ii, jj, beta, self.model_id
-            )
+                d = 0.5 * (d1 + d2)
+
+            else:
+                d = droid_backends.frame_distance(
+                    self.poses, self.disps, self.intrinsics[intrinsic_common_id], ii, jj, beta, self.model_id
+                )
 
         if return_matrix:
             return d.reshape(N, N)
@@ -535,6 +537,8 @@ class DepthVideo:
             else:
                 disps_sens = self.disps_sens
 
+            # FIXME chen: This sometimes causes a malloc error :/
+            # I am not sure how to fix this
             droid_backends.ba(
                 self.poses,
                 self.disps,
@@ -605,7 +609,8 @@ class DepthVideo:
             scale_t[scale_invalid], shift_t[shift_invalid] = 1.0, 0.0
 
             self.scales[: self.counter.value - 1], self.shifts[: self.counter.value - 1] = scale_t, shift_t
-            self.reset_prior()  # Reset the prior and update disps_sens to fit the map
+
+        self.reset_prior()  # Reset the prior and update disps_sens to fit the map
 
     def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 5e-3):
         """Bundle adjustment over structure with a scalable prior.
@@ -613,22 +618,21 @@ class DepthVideo:
         We keep the poses fixed, since this would create an unnecessary ambiguity and can make the system unstable!
         We optimize scale and shift parameters on top of the scene disparity.
         """
-        with self.get_lock():
+        # Store the uncertainty maps for source frames, that will get updated
+        confidence, idx = self.reduce_confidence(weight, ii)
+        # Uncertainties are for [x, y] directions -> Take norm to get single scalar
+        self.confidence[idx] = torch.norm(confidence, dim=1)
 
-            # Store the uncertainty maps for source frames, that will get updated
-            confidence, idx = self.reduce_confidence(weight, ii)
-            # Uncertainties are for [x, y] directions -> Take norm to get single scalar
-            self.confidence[idx] = torch.norm(confidence, dim=1)
+        # [t0, t1] window of bundle adjustment optimization
+        if t1 is None:
+            t1 = max(ii.max().item(), jj.max().item()) + 1
 
-            # [t0, t1] window of bundle adjustment optimization
-            if t1 is None:
-                t1 = max(ii.max().item(), jj.max().item()) + 1
+        # Precondition
+        self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
 
-            # Precondition
-            self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
-
-            # Block coordinate descent optimization
-            for i in range(iters):
+        # Block coordinate descent optimization
+        for i in range(iters):
+            with self.get_lock():
                 # Sanity check for non-negative disparities
                 # FIXME clamp disps_sens as well after fix
                 self.disps.clamp_(min=1e-5)
@@ -675,9 +679,8 @@ class DepthVideo:
                     structure_only=True,
                     alpha=alpha,
                 )
-
-                # # After optimizing the prior, we need to update the disps_sens and reset the scales
-                # # only then can we use global BA and intrinsics optimization with the CUDA kernel later
-                self.reset_prior()
-
                 self.mapping_dirty[t0:t1] = True
+
+            # # After optimizing the prior, we need to update the disps_sens and reset the scales
+            # # only then can we use global BA and intrinsics optimization with the CUDA kernel later
+            self.reset_prior()

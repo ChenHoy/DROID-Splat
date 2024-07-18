@@ -123,7 +123,7 @@ def evaluate_evo(
     poses_est: List[np.ndarray],
     poses_gt: List[np.ndarray],
     timestamps: List[int],
-    plot_dir: str,
+    save_dir: str,
     label: str,
     monocular: bool = False,
 ) -> Dict:
@@ -132,6 +132,10 @@ def evaluate_evo(
 
     NOTE The plotting functionality of evo expects c2w convention.
     """
+
+    plot_dir = os.path.join(save_dir, "plots")
+    mkdir_p(plot_dir)
+
     # NOTE chen: MonoGS uses PosePath3D, where we need to supply 4x4 homogeneous matrices, others use se3 liealgebra directly in PoseTrajectory3D
     # traj_est, traj_ref  = PosePath3D(poses_se3=poses_est), PosePath3D(poses_se3=poses_gt)
     traj_est = PoseTrajectory3D(
@@ -162,7 +166,7 @@ def evaluate_evo(
     for key, value in ape_stats.items():
         ape_stats[key] = float(value)
 
-    with open(os.path.join(plot_dir, "stats_{}.json".format(str(label))), "w", encoding="utf-8") as f:
+    with open(os.path.join(save_dir, "stats_{}.json".format(str(label))), "w", encoding="utf-8") as f:
         json.dump(ape_stats, f, indent=4)
 
     plot_mode = PlotMode.xy
@@ -259,9 +263,6 @@ def eval_ate(
     assert traj_est.shape == traj_gt.shape, "Trajectories should have the same shape!"
     assert len(timestamps) == len(traj_est), "Timestamps should have the same length as the trajectories!"
 
-    plot_dir = os.path.join(save_dir, "plots")
-    mkdir_p(plot_dir)
-
     # Write out serialized string to read later
     trj_data = {"trj_est": traj_est.tolist(), "trj_gt": traj_gt.tolist()}
     with open(os.path.join(save_dir, f"trj_final.json"), "w", encoding="utf-8") as f:
@@ -270,7 +271,7 @@ def eval_ate(
         poses_est=traj_est,
         poses_gt=traj_gt,
         timestamps=timestamps,
-        plot_dir=plot_dir,
+        save_dir=save_dir,
         label="final",
         monocular=monocular,
     )
@@ -345,7 +346,7 @@ def plot_metric_statistics(psnr_array, ssim_array, lpips_array, plot_dir: str):
     ax[0].set_ylim([0.0, max(psnr_array) + 1])
 
     ax[1].bar(frames, ssim_array, color="green")
-    ax[1].set_ylim([0.95, 1.0])
+    ax[1].set_ylim([0.999, 1.0])
     ax[1].set_title("SSIM")
 
     ax[2].bar(frames, lpips_array, color="red")
@@ -396,6 +397,8 @@ def do_odometry_evaluation(
     """Perform evaluation both on keyframe trajectory and the whole trajectory."""
     ### Get the numbers for keyframes only
     kf_eval_path = os.path.join(eval_path, "odometry", "keyframes")
+    mkdir_p(kf_eval_path)
+
     kf_result_ate = eval_ate(est_c2w_kf_lie, gt_c2w_kf_lie, kf_tstamps, save_dir=kf_eval_path, monocular=monocular)
     kf_trajectory_df = pd.DataFrame([kf_result_ate])
     kf_trajectory_df.to_csv(os.path.join(kf_eval_path, "kf_trajectory_results.csv"), index=False)
@@ -404,6 +407,8 @@ def do_odometry_evaluation(
 
     ### Get the numbers for the whole trajectory
     all_eval_path = os.path.join(eval_path, "odometry", "all")
+    mkdir_p(all_eval_path)
+
     all_result_ate = eval_ate(est_c2w_all_lie, gt_c2w_all_lie, tstamps, save_dir=all_eval_path, monocular=monocular)
     all_trajectory_df = pd.DataFrame([all_result_ate])
     all_trajectory_df.to_csv(os.path.join(all_eval_path, "all_trajectory_results.csv"), index=False)
@@ -508,18 +513,19 @@ def eval_rendering(
     output["mean_ssim"] = float(np.mean(ssim_array))
     output["mean_lpips"] = float(np.mean(lpips_array))
 
-    rnd_statistics = {"psnr": psnr_array, "ssim": ssim_array, "lpips": lpips_array}
-    with open(os.path.join(save_dir, "frame_statistics.pkl"), "wb") as f:
-        pickle.dump(rnd_statistics, f)
-
     # Print this in pretty so we can see it
     loss_str = "[Eval] mean PSNR: {}, SSIM: {}, LPIPS: {}".format(
         output["mean_psnr"], output["mean_ssim"], output["mean_lpips"]
     )
+    rnd_statistics = {"psnr": psnr_array, "ssim": ssim_array, "lpips": lpips_array}
     if has_gt_depth:
         output["mean_l1"] = float(np.mean(depth_l1))
         loss_str += ", L1 (depth): {}".format(output["mean_l1"])
+        rnd_statistics["l1"] = depth_l1
+
     print(colored(loss_str, "red"))
 
+    with open(os.path.join(save_dir, "frame_statistics.pkl"), "wb") as f:
+        pickle.dump(rnd_statistics, f)
     json.dump(output, open(os.path.join(save_dir, "final_result.json"), "w", encoding="utf-8"), indent=4)
     return output

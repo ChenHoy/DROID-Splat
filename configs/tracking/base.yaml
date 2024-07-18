@@ -24,10 +24,10 @@ frontend:
   radius: 5 # Always build edges between nearby frames
   nms: 1
 
-  release_cache: True # Tradeoff: memory vs. speed, This can save up to ~5GB
+  release_cache: False # Tradeoff: memory vs. speed, This can save up to ~5GB
   
 backend:
-  warmup: 15
+  warmup: 10
   do_refinement: True # Do we want to refine the map afterwards with backend?
   window: 150 # Dont optimize more keyframes to avoid OOM
   thresh: 60.0 # Add edges between frames within this distance

@@ -153,6 +153,7 @@ class Frontend:
         # Naive strategy for initializing next pose as previous pose in DROID-SLAM
         # self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
         # Better: use constant speed assumption and extrapolate
+        # (usually gives a boost of 1-4mm in ATE RMSE)
         dP = SE3(self.video.poses[self.t1 - 1]) * SE3(self.video.poses[self.t1 - 2]).inv()  # Get relative pose
         self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
 

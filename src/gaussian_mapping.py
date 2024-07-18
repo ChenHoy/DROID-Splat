@@ -503,7 +503,6 @@ class GaussianMapper(object):
             for i, view in tqdm(enumerate(kf_cams)):
                 loss_i, render_pkg = self.render_compare(view, scale_invariant=scale_invariant)
                 has_holes = maybe_fill_holes(render_pkg, view.uid, size_hole=100)
-                has_holes = False
                 loss += loss_i
                 # We need to detach loss_i and copy, so the computation graph does not grow too large!
                 if has_holes:
@@ -562,8 +561,8 @@ class GaussianMapper(object):
         # Update GUI
         if self.use_gui:
             self.q_main2vis.put_nowait(
-                gui_utils.GaussianPacket(
-                    gaussians=clone_obj(self.gaussians), keyframes=[cam.detach() for cam in self.cameras]
+                gui_utils.GaussianPacket( # NOTE leon: the GUI will lag (even run OOM) if we add thousands of cameras.
+                    gaussians=clone_obj(self.gaussians) #, keyframes=[cam.detach() for cam in self.cameras]
                 )
             )
 
