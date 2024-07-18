@@ -368,14 +368,14 @@ class GaussianMapper(object):
             dense_disps_ref = self.video.disps_sens_up[idx_in_video].clone().cpu()
             valid = dense_disps_ref > 0
             dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
-        # We have a dense depth reference in the video (from Tracking)
-        elif self.video.upsampled:
-            dense_disps_ref = self.video.disps_up[idx_in_video].clone().cpu()
-            valid = dense_disps_ref > 0
-            dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
         # We have at least a scaled prior (from an external source)
         elif self.mode == "prgbd":
             dense_disps_ref = self.video.disps_sens_up[idx_in_video].clone().cpu()
+            valid = dense_disps_ref > 0
+            dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
+        # We have a dense depth reference in the video (from Tracking)
+        elif self.video.upsampled:
+            dense_disps_ref = self.video.disps_up[idx_in_video].clone().cpu()
             valid = dense_disps_ref > 0
             dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
         else:
@@ -553,8 +553,7 @@ class GaussianMapper(object):
                 Will ignore the importance weights ..."""
             )
 
-        # FIXME chen: is this really a good idea?
-        self.covisibility_pruning(n_last_frames=self.n_last_frames, **self.update_params.pruning)
+        # self.covisibility_pruning(mode="abs", visibility_th=2)
 
         # Update GUI
         if self.use_gui:
@@ -776,7 +775,7 @@ class GaussianMapper(object):
                 view.cam_rot_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
                 view.cam_trans_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
 
-    def render_compare(self, view: Camera, scale_invariant: bool = False) -> Tuple[float, Dict]:
+    def render_compare(self, view: Camera) -> Tuple[float, Dict]:
         """Render current view and compute loss by comparing with groundtruth"""
         render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
         # NOTE chen: this can be None when self.gaussians is 0. This can happen in some cases
@@ -784,7 +783,7 @@ class GaussianMapper(object):
             return 0.0, None
 
         image, depth = render_pkg["render"], render_pkg["depth"]
-        current_loss = mapping_rgbd_loss(image, depth, view, scale_invariant=scale_invariant, **self.loss_params)
+        current_loss = mapping_rgbd_loss(image, depth, view, **self.loss_params)
         return current_loss, render_pkg
 
     def mapping_step(
@@ -807,7 +806,6 @@ class GaussianMapper(object):
 
         if optimize_poses:
             pose_optimizer = self.get_pose_optimizer(frames)
-        scale_invariant = self.loss_params.supervise_with_prior and self.mode == "prgbd"
 
         loss = 0.0
         # Collect for densification and pruning
@@ -815,7 +813,7 @@ class GaussianMapper(object):
         visibility_filter_acm, viewspace_point_tensor_acm = [], []
         for view in frames:
 
-            current_loss, render_pkg = self.render_compare(view, scale_invariant=scale_invariant)
+            current_loss, render_pkg = self.render_compare(view)
             if render_pkg is None:
                 self.info(f"Skipping view {view.uid} as no gaussians are present ...")
                 continue
@@ -859,19 +857,13 @@ class GaussianMapper(object):
                 self.gaussians.add_densification_stats(viewspace_point_tensor_acm[idx], visibility_filter_acm[idx])
 
             # Prune and Densify
-            if (
-                self.last_idx > self.n_last_frames
-                and prune_densify
-            ):
+            if self.last_idx > self.n_last_frames and prune_densify:
                 # General pruning based on opacity and size + densification (from original 3DGS)
                 self.gaussians.densify_and_prune(**vanilla_densify_params)
 
             # Densify in low opacity regions only after the map is stable already
             # (else we waste compute, because densify_and_prune will fill initial holes quickly)
-            if (prune_densify
-                and opacity_densify
-                and self.count > self.update_params.densify.opacity.after
-            ):
+            if prune_densify and opacity_densify and self.count > self.update_params.densify.opacity.after:
                 ng_before = len(self.gaussians)
                 for view, opacity in opacity_acm:
                     self.gaussians.densify_from_mask(view, opacity.squeeze() < self.update_params.densify.opacity.th)

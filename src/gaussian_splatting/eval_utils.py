@@ -297,12 +297,12 @@ def create_comparison_figure(
 
         fig, axes = plt.subplots(2, 2, figsize=(10, 5))
         # Display the ground truth image
-        axes[0, 0].imshow(gt_img.squeeze())
+        axes[0, 0].imshow(gt_img.squeeze()[..., ::-1])
         axes[0, 0].set_title("Ground Truth")
         axes[0, 0].axis("off")
 
         # Display the predicted image
-        axes[0, 1].imshow(est_img.squeeze())
+        axes[0, 1].imshow(est_img.squeeze()[..., ::-1])
         axes[0, 1].set_title("Prediction")
         axes[0, 1].axis("off")
 
