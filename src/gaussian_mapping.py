@@ -53,7 +53,7 @@ class GaussianMapper(object):
         self.evaluate = cfg.evaluate
         self.output = slam.output
         self.delay = cfg.mapping.delay  # Delay between tracking and mapping
-        self.warmup = max(cfg.mapping.warmup, cfg.tracking.warmup)
+        self.warmup = cfg.mapping.warmup
         self.batch_mode = cfg.mapping.online_opt.batch_mode  # Take a batch of all unupdated frames at once
 
         # Given an external mask for dyn. objects, remove these from the optimization
