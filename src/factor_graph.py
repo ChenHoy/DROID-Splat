@@ -251,7 +251,8 @@ class FactorGraph:
     ):
         """add edges to the factor graph based on distance"""
 
-        t = max_t if max_t is not None else self.video.counter.value
+        with self.video.get_lock():
+            t = max_t if max_t is not None else self.video.counter.value
         ilen, jlen = t - t0, t - t1
         ix = torch.arange(t0, t)
         jx = torch.arange(t1, t)
@@ -513,7 +514,8 @@ class FactorGraph:
         self, t0=None, t1=None, iters=8, steps=2, max_t=None, lm: float = 5e-5, ep: float = 5e-2, motion_only=False
     ):
         """run update operator on factor graph - reduced memory implementation"""
-        cur_t = self.video.counter.value
+        with self.video.get_lock():
+            cur_t = self.video.counter.value
 
         # alternate corr implementation
         t = max_t if max_t is not None else cur_t
@@ -580,6 +582,7 @@ class FactorGraph:
             weight = self.weight.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
 
             # dense bundle adjustment, fix the first keyframe, while optimize within [1, t]
+            # FIXME this somehow collides with Frontend
             self.video.ba(target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep, motion_only)
 
     @torch.cuda.amp.autocast(enabled=True)

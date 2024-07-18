@@ -28,7 +28,7 @@ class BackendWrapper(torch.nn.Module):
         # When to start optimizing globally
         self.frontend_window = cfg.tracking.frontend.window
         # Dont consider the state of frontend, but start optimizing after warmup frames
-        self.warmup = max(cfg.tracking.backend.get("warmup", 10), cfg.tracking.warmup)
+        self.warmup = max(cfg.tracking.backend.get("warmup", 15), cfg.tracking.warmup)
         # Do a final refinement over all keyframes if wanted
         self.do_refinement = cfg.tracking.backend.get("do_refinement", False)
 
@@ -132,8 +132,9 @@ class Backend:
     ):
         """Dense Bundle Adjustment over the whole map. Used for global optimization in the Backend."""
 
-        if t_end is None:
-            t_end = self.video.counter.value
+        with self.video.get_lock():
+            if t_end is None:
+                t_end = self.video.counter.value
         n = t_end - t_start
 
         # NOTE chen: This is one of the most important numbers for loop closures!
@@ -154,7 +155,7 @@ class Backend:
         # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
         graph.update_lowmem(t0=t_start + 1, t1=t_end, steps=steps, iters=iters, max_t=t_end, motion_only=motion_only)
         with self.video.get_lock():
-            poses_after = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
+            poses_after = self.video.poses[t_start + 1 : t_end]  # Memoize pose before optimization
         # Memoize pose change in self.video so other Processes can adapt their datastructures
         self.accumulate_pose_change(poses_before, poses_after, t0=t_start + 1, t1=t_end)
 
@@ -186,8 +187,9 @@ class Backend:
         """Perform an update on the graph with loop closure awareness. This uses a higher step size
         for optimization than the dense bundle adjustment of the backend and rest of frontend.
         """
-        if t_end is None:
-            t_end = self.video.counter.value
+        with self.video.get_lock():
+            if t_end is None:
+                t_end = self.video.counter.value
 
         # NOTE chen: Make sure you have a large enough loop window set in cfg!
         # on larger maps you want to at least have a window of ~100 so we get enough factors

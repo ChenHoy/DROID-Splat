@@ -442,15 +442,14 @@ class SLAM:
 
             semaBackend.acquire()  # Aquire the semaphore (If the counter == 0, then this thread will be blocked)
 
-            # Only run backend if we have enough RAM for it
+            ## Only run backend if we have enough RAM for it
             memoized_backend_count = self.ram_safeguard_backend(
                 max_ram=self.max_ram_usage, count_to_set=memoized_backend_count
             )
-
             if self.backend is None:
                 continue
 
-            # If we run an additional loop detector -> Pull in visually similar candidate edges as well
+            ## If we run an additional loop detector -> Pull in visually similar candidate edges as well
             loop_ii, loop_jj = None, None
             if self.cfg.run_loop_detection and loop_queue is not None:
                 if not loop_queue.empty():

@@ -1,7 +1,9 @@
 defaults:
   - /tracking/base@_here_
 
+beta: 0.5
+
 backend: 
-  warmup: 10
-  window: 80
-  max_factor_mult: 12
+  warmup: 15
+  window: 120
+  max_factor_mult: 14
