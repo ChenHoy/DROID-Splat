@@ -169,7 +169,7 @@ class SLAM:
 
         # Synchronization objects
         self.backend_freq = self.cfg.get("backend_every", 10)  # Run the backend every k frontend calls
-        self.mapping_freq = self.cfg.get("mapping_every", 5)  # Run the Renderer/Mapper every k frontend calls
+        self.mapping_freq = self.cfg.get("mapper_every", 5)  # Run the Renderer/Mapper every k frontend calls
         self.semaBackend = mp.Semaphore(1)  # Semaphore allows to keep concurrency
         self.semaMapping = mp.Semaphore(1)  # Semaphore allows to keep concurrency
         self.communication_lock = mp.Lock()

@@ -6,7 +6,7 @@ warmup: 8
 upsample: True
 
 motion_filter:
-  thresh: 4.0  # Consider new keyframe with motion >
+  thresh: 3.0  # Consider new keyframe with motion >
 
 frontend:
   optimize_scales: True # Whether or not to optimize scale of prgbd prior
@@ -21,18 +21,18 @@ frontend:
   thresh: 15.0 # Add edges between frames within this distance
   window: 25 # local ba window size
   max_factors: 150 # num of edges within local ba
-  radius: 5 # Always build edges between nearby frames
+  radius: 3 # Always build edges between nearby frames
   nms: 1
 
   release_cache: False # Tradeoff: memory vs. speed, This can save up to ~5GB
   
 backend:
-  warmup: 10
+  warmup: 15
   do_refinement: True # Do we want to refine the map afterwards with backend?
   window: 150 # Dont optimize more keyframes to avoid OOM
   thresh: 60.0 # Add edges between frames within this distance
   max_factor_mult: 16
-  radius: 2
+  radius: 3
   nms: 2
 
   use_loop_closure: False

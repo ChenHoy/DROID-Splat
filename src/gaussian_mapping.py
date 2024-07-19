@@ -119,6 +119,8 @@ class GaussianMapper(object):
         self.initialized = False
         self.projection_matrix = None
 
+        self.n_optimized = {}  # Keep track how many times a keyframe was optimized
+
         # Memoize the mapping of Gaussian indices to video indices
         # (this maps cam.uid -> position in video buffer)
         # Since we only store keyframes inside the video buffers, we reassign the mapping ones we add non-keyframes cameras during refinement
@@ -336,10 +338,10 @@ class GaussianMapper(object):
             if int(idx) not in self.buffer2cam:
                 continue
             else:
-                self.gaussians.reanchor(self.buffer2cam(int(idx)), pose)
+                self.gaussians.reanchor(self.buffer2cam[int(idx)], pose)
                 # NOTE chen: We append to our camera list in consecutive order, i.e. this should normally be sorted!
                 # this is not a given though! be cautious, e.g. during refinement the list changes due to insertion of non-keyframes
-                cam = self.cameras[self.buffer2cam(int(idx))]
+                cam = self.cameras[self.buffer2cam[int(idx)]]
                 updated_cams.append(cam)
 
         # Add the kf from self.cameras[idx] to updated cameras for GUI
@@ -349,6 +351,17 @@ class GaussianMapper(object):
                     gaussians=clone_obj(self.gaussians), keyframes=[cam.detached() for cam in updated_cams]
                 )
             )
+
+    def plot_masked_image(self, img: torch.Tensor, mask: torch.Tensor, title: str = "Masked Image"):
+        import matplotlib.pyplot as plt
+
+        img = img.squeeze().detach().cpu().numpy().transpose(1, 2, 0)
+        mask = mask.squeeze().detach().cpu().numpy()
+        img[mask] = 0
+        plt.imshow(img)
+        plt.axis("off")
+        plt.title(title)
+        plt.show()
 
     def densify_holes(self, idx: int, mask: torch.Tensor, downsample_factor: float = 1.0) -> None:
         """When initializing the map based on multi-view filtered depths, we often have holes
@@ -475,6 +488,7 @@ class GaussianMapper(object):
             for initialization. Manually filling these speeds up refinement significantly!
             """
             mask = torch.all((render_pkg["render"].squeeze() == self.background[:, None, None]), dim=0)
+
             if mask.sum() > size_hole:
                 has_hole = True
                 self.info(f"Detected holes in view {view_id} during importance sampling. Adding higher weight ...")
@@ -496,10 +510,9 @@ class GaussianMapper(object):
             This whole operation consumes much time, so we still backpropagate the loss and optimize the Gaussians,
             even though this does not return the "true" importance weights.
             """
-            scale_invariant = self.loss_params.supervise_with_prior and self.mode == "prgbd"
             loss, weights = 0.0, []
             for i, view in tqdm(enumerate(kf_cams)):
-                loss_i, render_pkg = self.render_compare(view, scale_invariant=scale_invariant)
+                loss_i, render_pkg = self.render_compare(view)
                 has_holes = maybe_fill_holes(render_pkg, view.uid, size_hole=100)
                 loss += loss_i
                 # We need to detach loss_i and copy, so the computation graph does not grow too large!
@@ -813,6 +826,12 @@ class GaussianMapper(object):
         visibility_filter_acm, viewspace_point_tensor_acm = [], []
         for view in frames:
 
+            # Keep track of how often this keyframe was already optimized
+            if view not in self.n_optimized:
+                self.n_optimized[view] = 1
+            else:
+                self.n_optimized[view] += 1
+
             current_loss, render_pkg = self.render_compare(view)
             if render_pkg is None:
                 self.info(f"Skipping view {view.uid} as no gaussians are present ...")
@@ -832,9 +851,11 @@ class GaussianMapper(object):
         # NOTE chen: this is only a valid strategy for standard optimizers
         # if the optimizer has a regularization term (e.g. weight decay), then this changes the trade-off between objective and regularizor!
         avg_loss = loss / len(frames)  # Average over batch
-        scaled_loss = avg_loss * np.sqrt(
-            len(frames)
-        )  # see https://stackoverflow.com/questions/53033556/how-should-the-learning-rate-change-as-the-batch-size-change
+        # scaled_loss = avg_loss * np.sqrt(
+        #     len(frames)
+        # )  # see https://stackoverflow.com/questions/53033556/how-should-the-learning-rate-change-as-the-batch-size-change
+        scaled_loss = avg_loss * len(frames)
+
         # Regularizor: Punish anisotropic Gaussians
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))

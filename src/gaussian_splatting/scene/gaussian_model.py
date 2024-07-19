@@ -163,21 +163,19 @@ class GaussianModel:
     ):
         image_ab = (torch.exp(cam.exposure_a)) * cam.original_image + cam.exposure_b
         image_ab = torch.clamp(image_ab, 0.0, 1.0)
-        if mask is not None:
-            image_ab = image_ab * mask
         rgb_raw = (image_ab * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
 
+        ### Get depth map
         if depthmap is not None and depthmap.sum() > 0:
-            rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
-            depth = o3d.geometry.Image(depthmap.astype(np.float32))
-            if mask is not None:
-                depthmap = depthmap * mask.cpu().numpy()
+            depth_raw = depthmap
         else:
+            # Take the attached depth
             if cam.depth is not None and cam.depth.sum() > 0:
                 depth_raw = cam.depth.contiguous().cpu().numpy()
 
             # If we don't have a depth signal, initialize from random
             else:
+                print("Initializing Gaussians from random depth ...!")
                 if cam.uid == 0:
                     # Introduce random Gaussians, this is how MonoGS works in monocular mode
                     depth_raw = (
@@ -186,9 +184,8 @@ class GaussianModel:
                 else:
                     # Take the depth of a small neighborhood of Gaussian keyframes
                     neighbors = torch.arange(max(0, cam.uid - 1), cam.uid + 1, device=self.unique_kfIDs.device)
-                    neighbors_scale = self.get_avg_scale(
-                        kfIdx=neighbors, factor=1.5
-                    )  # Take 1.5*median of neighboring frames
+                    # Take 1.5*median of neighboring frames
+                    neighbors_scale = self.get_avg_scale(kfIdx=neighbors, factor=1.5)
                     if neighbors_scale is not None:
                         depth_raw = np.ones(rgb_raw.shape[:2]) * neighbors_scale
                     else:
@@ -203,11 +200,10 @@ class GaussianModel:
                     np.ones_like(depth_raw) + (np.random.randn(depth_raw.shape[0], depth_raw.shape[1]) - 0.5) * 0.05
                 ) * scale
 
-            if mask is not None:
-                depth_raw = depth_raw * mask.cpu().numpy()
-
-            rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
-            depth = o3d.geometry.Image(depth_raw.astype(np.float32))
+        if mask is not None:
+            depth_raw[mask.cpu().numpy()] = 0.0
+        depth = o3d.geometry.Image(depth_raw.astype(np.float32))
+        rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
 
         return self.create_pcd_from_image_and_depth(cam, rgb, depth, init, downsample_factor=downsample_factor)
 
@@ -236,17 +232,11 @@ class GaussianModel:
         W2C = getWorld2View2(cam.R, cam.T).cpu().numpy()
         pcd_tmp = o3d.geometry.PointCloud.create_from_rgbd_image(
             rgbd,
-            o3d.camera.PinholeCameraIntrinsic(
-                cam.image_width,
-                cam.image_height,
-                cam.fx,
-                cam.fy,
-                cam.cx,
-                cam.cy,
-            ),
+            o3d.camera.PinholeCameraIntrinsic(cam.image_width, cam.image_height, cam.fx, cam.fy, cam.cx, cam.cy),
             extrinsic=W2C,
             project_valid_depth_only=True,
         )
+
         pcd_tmp = pcd_tmp.random_down_sample(1.0 / downsample_factor)
         new_xyz = np.asarray(pcd_tmp.points)
         new_rgb = np.asarray(pcd_tmp.colors)
@@ -656,7 +646,7 @@ class GaussianModel:
         if new_n_obs is not None:
             self.n_obs = torch.cat((self.n_obs, new_n_obs)).int()
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, scale_std: float = 1.0):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device=self.device)
@@ -667,10 +657,11 @@ class GaussianModel:
             torch.max(self.get_scaling, dim=1).values > self.percent_dense * scene_extent,
         )
 
-        stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
+        stds = scale_std * self.get_scaling[selected_pts_mask].repeat(N, 1)
         means = torch.zeros((stds.size(0), 3), device=self.device)
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
+
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N))
         new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
@@ -731,10 +722,7 @@ class GaussianModel:
             new_n_obs=new_n_obs,
         )
 
-    # TODO does this work when the opacity hole also has no depth? -> Check for both
     def densify_from_mask(self, cam, mask, downsample_factor=1):
-        # FIXME check if this has holes in the depth map where the opacity is low
-
         features = self.create_pcd_from_image(cam, mask=mask, downsample_factor=downsample_factor)
 
         if features is not None:
@@ -742,14 +730,14 @@ class GaussianModel:
 
             self.extend_from_pcd(fused_point_cloud, features, scales, rots, opacities, cam.uid)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, scale_std=1.0):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         n_g = self.get_xyz.shape[0]
 
         self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+        self.densify_and_split(grads, max_grad, extent, scale_std=scale_std)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:

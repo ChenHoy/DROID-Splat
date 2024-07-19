@@ -215,10 +215,10 @@ def bundle_adjustment(
             ba_function = BA
 
     #### Bundle Adjustment Loop
-    disps.clamp_(min=1e-5)
+    disps.clamp_(min=1e-3)
     for i in range(iters):
         ba_function(*args, **skwargs, ep=ep, lm=lm, use_double=use_double)
-        disps.clamp_(min=1e-5)  # Disparities should never be negative
+        disps.clamp_(min=1e-3)  # Disparities should never be negative
 
     #### Update data structure
     # Remove the batch dimension again
@@ -737,7 +737,7 @@ def BA_prior(
     # Residuals for r2(disps, s, o) (B, N, HW)
     scaled_prior = disps_sens[:, kx_exp].view(bs, -1, ht * wd) * scales[:, kx_exp, None] + shifts[:, kx_exp, None]
     # Prior should never be negative, i.e. clip this if s and o are diverging
-    scaled_prior.clamp_(min=1e-5)
+    scaled_prior.clamp_(min=1e-3)
 
     ## Rescale the prior residuals according to estimated uncertainty
     # NOTE this gets rid of strong outliers like the sky or dynamic objects for scale adjustment
@@ -924,7 +924,7 @@ def BA_prior_no_motion(
 
     scaled_prior = disps_sens[:, kx_exp].view(bs, -1, ht * wd) * scales[:, kx_exp, None] + shifts[:, kx_exp, None]
     # Prior should never be negative, i.e. clip this if s and o are diverging
-    scaled_prior.clamp_(min=1e-5)
+    scaled_prior.clamp_(min=1e-3)
 
     ## Rescale the prior residuals according to estimated uncertainty
     # NOTE this gets rid of strong outliers like the sky or dynamic objects for scale adjustment
@@ -982,8 +982,8 @@ def BA_prior_no_motion(
     ### 4: Solve whole system with dX, ds, do, dZ ###
     dso, dz, was_success = schur_solve(H, E, C_exp, v, w_exp, ep=ep, lm=lm, return_state=True, use_double=use_double)
     if not was_success:
-        print(colored("Entering debug mode ...", "red"))
-        ipdb.set_trace()
+        # print(colored("Entering debug mode ...", "red"))
+        # ipdb.set_trace()
         dso, dz = schur_solve(H, E, C_exp, v, w_exp, ep=ep, lm=lm, solver="lu", use_double=use_double)
 
     dso, dz = dso.float(), dz.float()  # Finally always work in float32 like main system!
