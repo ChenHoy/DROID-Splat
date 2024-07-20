@@ -29,7 +29,7 @@ from ..utils.general_utils import (
 )
 from ..utils.graphics_utils import BasicPointCloud, getWorld2View2
 from ..utils.sh_utils import RGB2SH
-from gaussian_model import GaussianModel, mkdir_p
+from .gaussian_model import GaussianModel
 
 
 class DynamicGaussianModel(GaussianModel):
@@ -186,7 +186,7 @@ class DynamicGaussianModel(GaussianModel):
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "xyz":
                 # lr = self.xyz_scheduler_args(iteration)
-                lr = helper(
+                lr = expon_lr_decay(
                     iteration,
                     lr_init=self.lr_init,
                     lr_final=self.lr_final,

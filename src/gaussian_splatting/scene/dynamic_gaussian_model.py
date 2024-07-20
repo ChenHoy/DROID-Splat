@@ -23,7 +23,6 @@ from ..utils.general_utils import (
     build_rotation,
     build_scaling_rotation,
     get_expon_lr_func,
-    helper,
     inverse_sigmoid,
     strip_symmetric,
 )
@@ -34,7 +33,7 @@ from .gaussian_model import GaussianModel
 
 
 class DynamicGaussianModel(GaussianModel):
-    def __init__(self, sh_degree: int, lifespan: int = 100, config = None, device: str = "cuda:0"):
+    def __init__(self, sh_degree: int, lifespan: int = 100, config=None, device: str = "cuda:0"):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
         self.device = device
@@ -79,7 +78,7 @@ class DynamicGaussianModel(GaussianModel):
         actual_covariance = L @ L.transpose(1, 2)
         symm = strip_symmetric(actual_covariance)
         return symm
-    
+
     def __len__(self):
         if self.get_xyz.shape[0] == 0:
             return 0
@@ -115,13 +114,12 @@ class DynamicGaussianModel(GaussianModel):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-
     def init_lr(self, spatial_lr_scale):
         self.spatial_lr_scale = spatial_lr_scale
 
     def extend_from_pcd(self, fused_point_cloud, features, scales, rots, opacities, kf_id):
 
-        if fused_point_cloud.shape[0] == 0: # No new points
+        if fused_point_cloud.shape[0] == 0:  # No new points
             self.info(f"No gaussians added for kf_id {kf_id}")
             return
 
@@ -139,7 +137,6 @@ class DynamicGaussianModel(GaussianModel):
         new_features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
         new_scaling = nn.Parameter(scales.requires_grad_(True))
         new_opacity = nn.Parameter(opacities.requires_grad_(True))
-
 
         new_unique_kfIDs = torch.ones((new_gaussians)).int() * kf_id
         new_n_obs = torch.zeros((new_gaussians)).int()
@@ -202,7 +199,7 @@ class DynamicGaussianModel(GaussianModel):
         ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
-        
+
         self.xyz_scheduler_args = get_expon_lr_func(
             lr_init=training_args.position_lr_init * self.spatial_lr_scale,
             lr_final=training_args.position_lr_final * self.spatial_lr_scale,
@@ -215,24 +212,25 @@ class DynamicGaussianModel(GaussianModel):
         self.lr_delay_mult = training_args.position_lr_delay_mult
         self.max_steps = training_args.position_lr_max_steps
 
-
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             stored_state = self.optimizer.state.get(group["params"][0], None)
 
-            if group["name"] == "xyz" or group["name"] == "rotation": # NOTE leon: xyz and rot have different dimensions. #TODO: cleaner solution
+            if (
+                group["name"] == "xyz" or group["name"] == "rotation"
+            ):  # NOTE leon: xyz and rot have different dimensions. #TODO: cleaner solution
                 if stored_state is not None:
-                    stored_state["exp_avg"] = stored_state["exp_avg"][:,mask]
-                    stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][:,mask]
+                    stored_state["exp_avg"] = stored_state["exp_avg"][:, mask]
+                    stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][:, mask]
 
                     del self.optimizer.state[group["params"][0]]
-                    group["params"][0] = nn.Parameter((group["params"][0][:,mask].requires_grad_(True)))
+                    group["params"][0] = nn.Parameter((group["params"][0][:, mask].requires_grad_(True)))
                     self.optimizer.state[group["params"][0]] = stored_state
 
                     optimizable_tensors[group["name"]] = group["params"][0]
                 else:
-                    group["params"][0] = nn.Parameter(group["params"][0][:,mask].requires_grad_(True))
+                    group["params"][0] = nn.Parameter(group["params"][0][:, mask].requires_grad_(True))
                     optimizable_tensors[group["name"]] = group["params"][0]
             else:
                 if stored_state is not None:
@@ -248,7 +246,7 @@ class DynamicGaussianModel(GaussianModel):
                     group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
                     optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
-    
+
     def prune_points(self, mask):
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
@@ -269,7 +267,6 @@ class DynamicGaussianModel(GaussianModel):
         self.unique_kfIDs = self.unique_kfIDs[valid_points_mask.cpu()]
         self.n_obs = self.n_obs[valid_points_mask.cpu()]
 
-
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -279,7 +276,6 @@ class DynamicGaussianModel(GaussianModel):
             # print(extension_tensor.shape, group["params"][0].shape)
             # print(group["name"])
             if group["name"] == "xyz" or group["name"] == "rotation":
-
 
                 if stored_state is not None:
                     # self.info(group["name"], stored_state["exp_avg"].shape, extension_tensor.shape)
@@ -382,13 +378,11 @@ class DynamicGaussianModel(GaussianModel):
         means = torch.zeros((stds.size(0), 3), device=self.device)
         samples = torch.normal(mean=means, std=stds)
 
-
         new_xyz = torch.zeros((self.lifespan, N * selected_pts_mask.sum(), 3), device=self.device)
 
         for t in range(self.lifespan):
             rot = build_rotation(self._rotation[t, selected_pts_mask]).repeat(N, 1, 1)
             new_xyz[t] = torch.bmm(rot, samples.unsqueeze(-1)).squeeze(-1)
-
 
         new_xyz += self.get_xyz[:, selected_pts_mask].repeat(1, N, 1)
         new_rotation = self._rotation[:, selected_pts_mask].repeat(1, N, 1)
@@ -453,17 +447,19 @@ class DynamicGaussianModel(GaussianModel):
         )
 
     def densify_and_prune(self, kf_id, max_grad, min_opacity, extent, max_screen_size):
-        grads = self.xyz_gradient_accum[kf_id] / self.denom[kf_id] # NOTE leon: we densify on a given view, based on the gradients of that frame
+        grads = (
+            self.xyz_gradient_accum[kf_id] / self.denom[kf_id]
+        )  # NOTE leon: we densify on a given view, based on the gradients of that frame
         grads[grads.isnan()] = 0.0
         n_g = self.__len__()
 
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
-        
+
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
-            big_points_vs = self.max_radii2D > max_screen_size # Size
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent 
+            big_points_vs = self.max_radii2D > max_screen_size  # Size
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
 
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
 

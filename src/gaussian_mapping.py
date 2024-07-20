@@ -120,7 +120,6 @@ class GaussianMapper(object):
         self.projection_matrix = None
 
         self.n_optimized = {}  # Keep track how many times a keyframe was optimized
-
         # Memoize the mapping of Gaussian indices to video indices
         # (this maps cam.uid -> position in video buffer)
         # Since we only store keyframes inside the video buffers, we reassign the mapping ones we add non-keyframes cameras during refinement
@@ -827,10 +826,11 @@ class GaussianMapper(object):
         for view in frames:
 
             # Keep track of how often this keyframe was already optimized
-            if view not in self.n_optimized:
-                self.n_optimized[view] = 1
+            self.gaussians.increment_n_opt_counter(view.uid)
+            if view.uid in self.n_optimized:
+                self.n_optimized[view.uid] += 1
             else:
-                self.n_optimized[view] += 1
+                self.n_optimized[view.uid] = 1
 
             current_loss, render_pkg = self.render_compare(view)
             if render_pkg is None:
@@ -844,6 +844,9 @@ class GaussianMapper(object):
             radii_acm.append(render_pkg["radii"])
 
             loss += current_loss
+
+        if self.update_params.scale_grads:
+            grad_hooks = self.gaussians.set_scale_grads()  # Update scaling function with current n_optimized
 
         # Scale the loss with the number of frames so we adjust the learning rate dependent on batch size,
         # (naive adding for huge batches would result on bigger updates)
@@ -895,6 +898,10 @@ class GaussianMapper(object):
         self.gaussians.optimizer.step()
         self.gaussians.optimizer.zero_grad()
         self.gaussians.update_learning_rate(iter)
+
+        if self.update_params.scale_grads:
+            for hook in grad_hooks:
+                hook.remove()  # Remove again for sanity
 
         if optimize_poses:
             pose_optimizer.step()
@@ -985,15 +992,17 @@ class GaussianMapper(object):
         gc.collect()
 
         self.info(f"Added {len(non_kf_cams)} new cameras: {[cam.uid for cam in non_kf_cams]}")
-        new_cam2buffer, new_buffer2cam, masked_mapping = {}, {}, {}
+        new_cam2buffer, new_buffer2cam, masked_mapping, new_n_optimized = {}, {}, {}, {}
+
         for cam in self.cameras:
             new_id = int(self.video.timestamp[cam.uid].item())
             masked_mapping[cam.uid] = (new_id, self.gaussians.unique_kfIDs == cam.uid)
             new_cam2buffer[new_id] = cam.uid  # Memoize from timestamp to old video index
             new_buffer2cam[cam.uid] = new_id
+            new_n_optimized[new_id] = self.n_optimized[cam.uid]
             cam.uid = new_id  # Reassign local keyframe ids to global stream ids
 
-        self.cam2buffer, self.buffer2cam = new_cam2buffer, new_buffer2cam
+        self.cam2buffer, self.buffer2cam, self.n_optimized = new_cam2buffer, new_buffer2cam, new_n_optimized
         # Update the keyframe ids for each Gaussian, so they fit the new global cam.uid's
         for key, val in masked_mapping.items():
             new_id, mask = val
@@ -1175,6 +1184,7 @@ class GaussianMapper(object):
                 optimize_poses=self.update_params.optimize_poses,
             )
             self.loss_list.append(loss)
+
         # Keep track of how well the Rendering is doing
         print(colored("\n[Gaussian Mapper] ", "magenta"), colored(f"Loss: {self.loss_list[-1]}", "cyan"))
 
@@ -1238,10 +1248,12 @@ class GaussianMapper(object):
             return False
 
         elif the_end and (self.last_idx + self.delay) >= self.cur_idx:
+
             # Allow pruning all frames equally
             self.update_params.pruning.dont_prune_latest = 0
             self.update_params.pruning.last = 0
             # Run another call to catch the last batch of keyframes
+            ipdb.set_trace()
             self._update(iters=self.mapping_iters + 10, delay_to_tracking=False)
             self.count += 1
 
