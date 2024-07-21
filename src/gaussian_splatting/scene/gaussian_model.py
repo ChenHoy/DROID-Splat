@@ -39,14 +39,15 @@ from ..utils.sh_utils import RGB2SH
 class GradientScaler(object):
     """
     Tracks the number of times each variable has been optimized and scales gradients with diminishing effect.
+    We use an exponential decay schedule here.
     """
 
-    # TODO whats a good value for the min_scale?
-    def __init__(self, min_scale: float = 0.1, counts: torch.Tensor = None):
+    def __init__(self, min_scale: float = 0.1, decay_rate: float = 0.01, counts: torch.Tensor = None):
         self.min_scale = min_scale  # Dont lower gradients below 1/10, so we never stop optimizing some old gaussians
+        self.decay_rate = decay_rate
         self.counts = counts if counts is not None else torch.ones(1)
 
-    def get_scale(self, counts: torch.Tensor, beta: float = 0.5) -> torch.Tensor:
+    def get_scale(self, counts: torch.Tensor) -> torch.Tensor:
         """
         Scales the gradients of a variable based on its optimization count with diminishing effect.
 
@@ -56,8 +57,8 @@ class GradientScaler(object):
         Returns:
             The scaling factor as a Tensor of floats.
         """
-        # Use a logarithmic function for diminishing effect, avoid reaching 0
-        scale = self.min_scale + (1 - self.min_scale) / (1 + beta * torch.log1p(counts - 1))
+        decay = torch.exp(-self.decay_rate * (counts - 1))
+        scale = self.min_scale + (1 - self.min_scale) * decay
         return scale
 
     def __call__(self, grad):
