@@ -780,9 +780,9 @@ class GaussianModel:
         print(f"Using average scale: {avg_scale}")
         return avg_scale.item()
 
-    def set_scale_grads(self) -> None:
+    def set_scale_grads(self, min_scale: float = 0.1, decay_rate: float = 0.01) -> None:
         """Attach a hook with the scaling factor to scale the gradients during the backward pass dependent on self.n_optimized."""
-        scale_fn = GradientScaler(min_scale=0.1, counts=self.n_optimized.to(self.device))
+        scale_fn = GradientScaler(min_scale=min_scale, decay_rate=decay_rate, counts=self.n_optimized.to(self.device))
         h_xyz = scale_gradients(self._xyz, scale_fn)
         h_features_dc = scale_gradients(self._features_dc, scale_fn)
         h_features_rest = scale_gradients(self._features_rest, scale_fn)

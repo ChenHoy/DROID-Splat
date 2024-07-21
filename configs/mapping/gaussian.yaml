@@ -44,8 +44,11 @@ online_opt:
       max_screen_size: 15 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
       scale_std: 0.25 # How much variance when perturbating old Gaussians during densify_and_split()
     
-  # TODO make attributes of scaler (e.g. min_scale and adjustment rate) configurable
-  scale_grads: True # Scale gradients of Gaussians by how many times they already have been optimized
+  # Scale gradients of already optimized Gaussians to battle catastrophic forgetting
+  grad_scaler:
+    do_scale: True # Scale gradients of Gaussians by how many times they already have been optimized
+    min_scale: 0.1 # Reduce learning rate only to min. 1/10
+    decay_rate: 0.01 # Decay rate of exponential function
 
   # How to Filter the Tracking Map before feeding into Mapper
   filter: # Parameter for filtering incoming points from the SLAM system

@@ -845,8 +845,11 @@ class GaussianMapper(object):
 
             loss += current_loss
 
-        if self.update_params.scale_grads:
-            grad_hooks = self.gaussians.set_scale_grads()  # Update scaling function with current n_optimized
+        if self.update_params.grad_scaler.do_scale:
+            # Update scaling function with current n_optimized
+            grad_hooks = self.gaussians.set_scale_grads(
+                self.update_params.grad_scaler.min_scale, self.update_params.grad_scaler.decay_rate
+            )
 
         # Scale the loss with the number of frames so we adjust the learning rate dependent on batch size,
         # (naive adding for huge batches would result on bigger updates)
@@ -899,9 +902,9 @@ class GaussianMapper(object):
         self.gaussians.optimizer.zero_grad()
         self.gaussians.update_learning_rate(iter)
 
-        if self.update_params.scale_grads:
+        if self.update_params.grad_scaler.do_scale:
             for hook in grad_hooks:
-                hook.remove()  # Remove again for sanity
+                hook.remove()  # Remove again for sanity, the hook needs to be set every iteration again
 
         if optimize_poses:
             pose_optimizer.step()
