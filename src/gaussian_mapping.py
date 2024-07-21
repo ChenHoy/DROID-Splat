@@ -1176,7 +1176,9 @@ class GaussianMapper(object):
 
         ### Optimize gaussians
         for iter in tqdm(range(iters), desc=colored("Gaussian Optimization", "magenta"), colour="magenta"):
-            do_densify = iter % self.update_params.prune_densify_every == 0
+            do_densify = (
+                iter % self.update_params.prune_densify_every == 0 and iter < self.update_params.prune_densify_until
+            )
             frames = self.select_keyframes()[0] + self.new_cameras
             loss = self.mapping_step(
                 iter,
@@ -1256,7 +1258,6 @@ class GaussianMapper(object):
             self.update_params.pruning.dont_prune_latest = 0
             self.update_params.pruning.last = 0
             # Run another call to catch the last batch of keyframes
-            ipdb.set_trace()
             self._update(iters=self.mapping_iters + 10, delay_to_tracking=False)
             self.count += 1
 
