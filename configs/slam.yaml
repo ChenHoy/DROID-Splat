@@ -5,14 +5,14 @@ defaults:
  - loop_closure: eigen.yaml
 #  - data: Custom/kitchen.yaml
 #  - data: TotalRecon/base.yaml
- - data: Replica/base.yaml
+ - data: TUM_RGBD/fr1.yaml
 
 hydra:
   run:
     dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}_${mode}
   job:
     chdir: False
-    name: mono_slam # Change this to your experiment run name, e.g. the dataset you run on
+    name: tum_rgbd # Change this to your experiment run name, e.g. the dataset you run on
 
 device: "cuda:0"
 sync_method: strict
@@ -23,8 +23,9 @@ mode: "mono"  # 'mono', 'prgbd', 'rgbd'
 mono_depth: "metric3d-vit_giant2" # 'zoed-nk', 'metric3d-vit_giant2', 'depthany-vitl-outdoor_left', 'depthany-vitl-indoor_left'
 with_dyn: False
 opt_intr: False # Optimizes additional intrinsic parameters
-sleep_delay: 0.01 # Sleep timer to cool off the system sometimtes
+sleep_delay: 0.1 # Sleep timer to cool off the system sometimtes
 
+## Components
 run_frontend: True # This should always be True!
 run_backend: True # Global optimization
 run_loop_detection: False # Loop closure detection
@@ -34,12 +35,12 @@ run_visualization: False
 run_mapping_gui: True
 show_stream: False
 
-# Frequencies for synchronizing the different main parts of the pipeline
+## Frequencies for synchronizing the different main parts of the pipeline
 # In an optimal setup, the Frontend would be the bottlenck, which can run at ~20-30FPS
 # Mapping takes ~5-7 iters/s, i.e. with a well tuned system each Render update hits <= 0.4fps
-backend_every: 2 # Run global bundle adjustment only every k Frontend updates
+backend_every: 10 # Run global bundle adjustment only every k Frontend updates
 # NOTE this is a trade-off between accuracy and speed, we can also add more compute to refinement!
-mapper_every: 5  # Run Renderer every k Frontend updates
+mapper_every: 20  # Run Renderer every k Frontend updates
 
 ## Evaluation
-evaluate: True
+evaluate: False

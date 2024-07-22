@@ -124,7 +124,6 @@ class Frontend:
         # If the distance is too small, remove the last keyframe
         if d.item() < self.keyframe_thresh:
 
-            self.count += 1  # Only increase the count when a new frame comes in
             self.graph.rm_keyframe(self.t1 - 2)
 
             with self.video.get_lock():
@@ -150,19 +149,22 @@ class Frontend:
                 gc.collect()
 
         ### Set pose & disp for next iteration
-        # Naive strategy for initializing next pose as previous pose in DROID-SLAM
-        # self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
-        # Better: use constant speed assumption and extrapolate
-        # (usually gives a boost of 1-4mm in ATE RMSE)
-        dP = SE3(self.video.poses[self.t1 - 1]) * SE3(self.video.poses[self.t1 - 2]).inv()  # Get relative pose
-        self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
+        with self.video.get_lock():
+            # Naive strategy for initializing next pose as previous pose in DROID-SLAM
+            # self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
+            # Better: use constant speed assumption and extrapolate
+            # (usually gives a boost of 1-4mm in ATE RMSE)
+            dP = SE3(self.video.poses[self.t1 - 1]) * SE3(self.video.poses[self.t1 - 2]).inv()  # Get relative pose
+            self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
 
-        self.video.disps[self.t1] = self.video.disps[self.t1 - 1].mean()
+            self.video.disps[self.t1] = self.video.disps[self.t1 - 1].mean()
 
-        ### update visualization
-        # NOTE chen: Sanity check, because this was sometimes []
-        if self.graph.ii.numel() > 0:
-            self.video.dirty[self.graph.ii.min() : self.t1] = True
+            ### update visualization
+            # NOTE chen: Sanity check, because this was sometimes []
+            if self.graph.ii.numel() > 0:
+                self.video.dirty[self.graph.ii.min() : self.t1] = True
+
+        self.count += 1
 
     def __initialize(self):
         """initialize the SLAM system"""

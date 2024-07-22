@@ -169,7 +169,7 @@ class SLAM:
 
         # Synchronization objects
         self.backend_freq = self.cfg.get("backend_every", 10)  # Run the backend every k frontend calls
-        self.mapping_freq = self.cfg.get("mapping_every", 5)  # Run the Renderer/Mapper every k frontend calls
+        self.mapping_freq = self.cfg.get("mapper_every", 5)  # Run the Renderer/Mapper every k frontend calls
         self.semaBackend = mp.Semaphore(1)  # Semaphore allows to keep concurrency
         self.semaMapping = mp.Semaphore(1)  # Semaphore allows to keep concurrency
         self.communication_lock = mp.Lock()
@@ -441,6 +441,7 @@ class SLAM:
                 continue
 
             semaBackend.acquire()  # Aquire the semaphore (If the counter == 0, then this thread will be blocked)
+            sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
             ## Only run backend if we have enough RAM for it
             memoized_backend_count = self.ram_safeguard_backend(
@@ -464,7 +465,6 @@ class SLAM:
                 self.backend(local_graph=self.frontend.optimizer.graph, add_ii=all_loop_ii, add_jj=all_loop_jj)
             else:
                 self.backend(add_ii=all_loop_ii, add_jj=all_loop_jj)
-            sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
         sleep(self.sleep_time)  # Let other threads finish their last optimization
         # Try to instantiate again if needed

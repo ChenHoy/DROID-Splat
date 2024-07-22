@@ -1,16 +1,16 @@
 # @package _global_
 defaults:
-  - override /data: TUM_RGBD/fr2
+  - override /data: TUM_RGBD/fr3
   - override /tracking: tum
 
 
 mode: rgbd
-stride: 4
+stride: 2
 evaluate: True
 run_mapping_gui: True
 
 data:
-  input_folder: /media/data/tum_rgbd/benchmark_rgbd/fr2_xyz
+  input_folder: /media/data/tum_rgbd/benchmark_rgbd/fr3_office
 
 
 mapping:
@@ -18,14 +18,14 @@ mapping:
 
 
   opt_params:
-    position_lr_init: 1e-3 # Default MonoGS: 0.00016 (RGB mode has x10)
-    position_lr_final: 1e-5 # Default MonoGS: 0.0000016
-    position_lr_max_steps: 50 # Default MonoGS: 30000
+    position_lr_init: 1e-4 # Default MonoGS: 0.00016 (RGB mode has x10)
+    position_lr_final: 1e-6 # Default MonoGS: 0.0000016
+    position_lr_max_steps: 100 # Default MonoGS: 30000
 
 
   input:
     pcd_downsample_init: 16 # This is a constant downsampling factor
-    pcd_downsample: 8 # You ideally have ~5-10k points per frame
+    pcd_downsample: 16 # You ideally have ~5-10k points per frame
     point_size: 0.02
 
   refinement:
@@ -35,11 +35,22 @@ mapping:
     w_importance_sampling: True # Use importance sampling for the final optimization
     use_non_keyframes: False # Use non-keyframes during map refinement
     keyframes_at_least: 0.0 # Always make sure to have > x% keyframes in a batch
-    densify_until: 20 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
-
+    densify_until: 0 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
+    bs: 10 # Batch size for refinement (Use <= 70 to avoid OOM!)
+    lr_factor: 1
 
   online_opt:
+    iters: 50 # Optimization iterations for selected views
+
     densify:
+
+      vanilla:
+        max_grad: 0.001 # Gaussians with gradients above this are split (smaller -> denser)
+        extent: 5  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
+        min_opacity: 0.05 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
+        max_screen_size: 15 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
+        scale_std: 0.25 # How much variance when perturbating old Gaussians during densify_and_split()
+
       use_opacity: False # Use opacity based densification
 
       opacity:

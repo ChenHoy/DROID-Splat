@@ -4,6 +4,9 @@ defaults:
 beta: 0.5
 
 backend: 
-  warmup: 15
-  window: 120
-  max_factor_mult: 14
+  warmup: 25
+  window: 150
+  max_factor_mult: 16
+  thresh: 60.0
+  radius: 2
+  nms: 2
