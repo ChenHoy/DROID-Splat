@@ -41,7 +41,7 @@ dependencies:
       # - glm
     - PyGLM # This substitutes glm
     - dask
-    - faiss-gpu
+    #- faiss-gpu
     - gdown
     - einops
     - plyfile

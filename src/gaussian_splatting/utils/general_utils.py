@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import os
 import random
 import sys
 from datetime import datetime
@@ -151,3 +152,16 @@ def safe_state(silent):
     np.random.seed(0)
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
+
+
+def mkdir_p(folder_path):
+    from errno import EEXIST
+
+    # Creates a directory. equivalent to using mkdir -p on the command line
+    try:
+        os.makedirs(folder_path)
+    except OSError as exc:  # Python >2.5
+        if exc.errno == EEXIST and os.path.isdir(folder_path):
+            pass
+        else:
+            raise

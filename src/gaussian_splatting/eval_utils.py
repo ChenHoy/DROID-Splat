@@ -150,7 +150,10 @@ def evaluate_evo(
     # NOTE chen: monocular can sometimes even be better than RGBD due to the adjustment
     traj_est_aligned = clone_obj(traj_est)
     # traj_est_aligned.align_origin(traj_ref) # this only aligns the origins
-    traj_est_aligned.align(traj_ref, correct_scale=monocular)  # this computes an se3 transform to register est on ref
+
+    # This computes an SE3 transform to register est on ref
+    # (for monocular it contains an additional scale, i.e. sim3 transform)
+    traj_est_aligned.align(traj_ref, correct_scale=monocular)
 
     # Get APE statistics
     ape_metric = metrics.APE(metrics.PoseRelation.translation_part)
@@ -346,7 +349,7 @@ def plot_metric_statistics(psnr_array, ssim_array, lpips_array, plot_dir: str):
     ax[0].set_ylim([0.0, max(psnr_array) + 1])
 
     ax[1].bar(frames, ssim_array, color="green")
-    ax[1].set_ylim([0.999, 1.0])
+    ax[1].set_ylim([0.99, 1.0])
     ax[1].set_title("SSIM")
 
     ax[2].bar(frames, lpips_array, color="red")

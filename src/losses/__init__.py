@@ -30,7 +30,7 @@ def mapping_rgbd_loss(
     scale_invariant: bool = False,
     **kwargs,
 ) -> float:
-    if cam.depth is not None or (cam.depth_prior is not None and supervise_with_prior):
+    if (cam.depth is not None and not supervise_with_prior) or (cam.depth_prior is not None and supervise_with_prior):
         has_depth = True
         if supervise_with_prior:  # NOTE leon: this can be active on mono mode, but both depths are the same
             depth_gt = cam.depth_prior.clone()
