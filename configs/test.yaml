@@ -1,18 +1,16 @@
 defaults:
  - _self_
- - mapping: gaussian.yaml
+ - mapping: tum.yaml
  - tracking: base.yaml
  - loop_closure: eigen.yaml
  - data: Replica/base.yaml
-#  - data: TotalRecon/base.yaml
-#  - data: Custom/kitchen.yaml
 
 hydra:
   run:
     dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}
   job:
     chdir: False
-    name: mono_slam
+    name: test
 
 device: "cuda:0"
 sync_method: strict
@@ -31,8 +29,8 @@ run_backend: True # Global optimization
 run_mapping: True # Rendering 
 run_loop_detection: False # Loop closure detection
 # Visualizations / GUIs
-run_visualization: True
-run_mapping_gui: False 
+run_visualization: False
+run_mapping_gui: False
 show_stream: False
 
 # Frequencies for synchronizing the different main parts of the pipeline

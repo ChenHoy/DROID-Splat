@@ -21,23 +21,24 @@ frontend:
   thresh: 15.0 # Add edges between frames within this distance
   window: 25 # local ba window size
   max_factors: 150 # num of edges within local ba
-  radius: 3 # Always build edges between nearby frames
+  radius: 5 # Always build edges between nearby frames
   nms: 1
 
-  release_cache: False # Tradeoff: memory vs. speed, This can save up to ~5GB
+  release_cache: True # Tradeoff: memory vs. speed, This can save up to ~5GB
   
 backend:
   warmup: 15
   do_refinement: True # Do we want to refine the map afterwards with backend?
   window: 150 # Dont optimize more keyframes to avoid OOM
-  thresh: 60.0 # Add edges between frames within this distance
+  thresh: 50.0 # Add edges between frames within this distance
   max_factor_mult: 16
   radius: 3
   nms: 2
 
   use_loop_closure: False
-  loop_window: 75 # NOTE make sure that loop window is not bigger than the general window of the backend
-  loop_thresh: 60.0 # You want this one to be big, so we add enough edges for loops
-  loop_radius: 2
-  loop_nms: 3 # default GO-SLAM: 12
+  # NOTE make sure that loop window is not bigger than the general window of the backend
+  loop_window: 40 # Default GO-SLAM: 25
+  loop_thresh: 50.0 # You want this one to be big, so we add enough edges for loops
+  loop_radius: 5 # Default GO-SLAM: 1
+  loop_nms: 12 # Default GO-SLAM: 12
   loop_max_factor_mult: 16

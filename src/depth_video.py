@@ -233,6 +233,7 @@ class DepthVideo:
         multiview: bool = True,
         uncertainty: bool = True,
         return_mask: bool = False,
+        set_video: bool = True,  # Whether to actually set the cleaned disps in the video
     ) -> None:
         """Filter the map based on consistency across multiple views and uncertainty.
         Normally this is done based on only a selected few views. We extend the selection with a local neighborhood
@@ -284,8 +285,10 @@ class DepthVideo:
         mask = mask & inliers
 
         disps[~mask] = 0.0  # Filter away invalid points
-        self.disps_clean[dirty_index] = disps
-        self.filtered_id = max(dirty_index.max().item(), self.filtered_id)
+        # Assign clean values to datastructure
+        if set_video:
+            self.disps_clean[dirty_index] = disps
+            self.filtered_id = max(dirty_index.max().item(), self.filtered_id)
 
         if return_mask:
             return mask
@@ -575,9 +578,10 @@ class DepthVideo:
             idx=torch.arange(self.counter.value - 1, device=self.device),
             radius=1,
             multiview=True,
-            bin_th=0.01,
+            bin_th=0.05,
             mv_count_th=2,
             return_mask=True,
+            set_video=False,  # Dont use this to set video.clean_disps
         )
         if valid_d.sum() < min_num_points:
             print(

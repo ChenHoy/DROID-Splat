@@ -78,7 +78,6 @@ class EvaluatePacket:
         print("Im getting something: {} {}".format(self.pipeline_params, len(self.cameras)))
 
 
-# TODO Can we filter the Dataset name out of this to make it prettier?
 def create_odometry_csv(results_kf: Dict, results_all: Dict, cfg: DictConfig, input_path: str) -> Dict:
     csv_dict = {
         "ate_on_keyframes_only": [True, False],
@@ -93,11 +92,11 @@ def create_odometry_csv(results_kf: Dict, results_all: Dict, cfg: DictConfig, in
         "dataset": [input_path, input_path],
         "mode": [cfg.mode, cfg.mode],
         "ape": [results_kf["mean"], results_all["mean"]],
+        "ate": [results_kf["rmse"], results_all["rmse"]],
     }
     return csv_dict
 
 
-# TODO Can we filter the Dataset name out of this to make it prettier?
 def create_rendering_csv(results_kf, results_nonkf, cfg: DictConfig, input_path: str) -> Dict:
     csv_dict = {
         "run_backend": [str(cfg.run_backend), str(cfg.run_backend)],
@@ -525,7 +524,6 @@ def eval_rendering(
         output["mean_l1"] = float(np.mean(depth_l1))
         loss_str += ", L1 (depth): {}".format(output["mean_l1"])
         rnd_statistics["l1"] = depth_l1
-
     print(colored(loss_str, "red"))
 
     with open(os.path.join(save_dir, "frame_statistics.pkl"), "wb") as f:

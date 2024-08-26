@@ -1,0 +1,18 @@
+defaults:
+  - /mapping/base@_here_
+
+# Online Optimization
+online_opt:
+  ## Local sliding optimization window
+  iters: 50 # Optimization iterations for selected views
+  n_last_frames: 10 # Always optimize the last n frames
+  n_rand_frames: 5 # Optimize random global frames on top
+
+  ## Strategy for adding / pruning Gaussians
+  # How often to prune and densify gaussians during optimization
+  prune_densify_every: 10 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
+  prune_densify_until: 25 # dont do this after this iteration
+
+  pruning:
+    last: 5 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
+    dont_prune_latest: 1 # Never prune the latest Gaussians as this leads to unnecessary add / delete

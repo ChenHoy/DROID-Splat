@@ -510,7 +510,7 @@ class SLAM:
         self.all_finished += 1
         self.info("Backend done!")
 
-    def maybe_reanchor_gaussians(self, threshold: float = 0.02) -> None:
+    def maybe_reanchor_gaussians(self, threshold: float = 0.001) -> None:
         """Reanchor the Gaussians to follow a big map update.
         For this purpose we simply track the pose changes after a backend optimization."""
         with self.video.get_lock():
@@ -705,6 +705,8 @@ class SLAM:
             render_cfg = gaussian_mapper_last_state.pipeline_params
             background = gaussian_mapper_last_state.background
 
+            self.info(f"Rendering finished with {len(gaussians)} Gaussians!", logger=log)
+
             # Get the whole trajectory as Camera objects, so we can render them
             all_cams = self.get_all_cams_for_rendering(stream, est_c2w_all_lie, gaussian_mapper_last_state)
             # Renderer needs timestamps as int for indexing
@@ -716,6 +718,12 @@ class SLAM:
             kf_rnd_metrics = eval_utils.eval_rendering(
                 kf_cams, kf_tstamps, gaussians, stream, render_cfg, background, save_dir, True, monocular
             )
+            self.info(
+                "(Keyframes) Rendering: mean PSNR: {}, SSIM: {}, LPIPS: {}".format(
+                    kf_rnd_metrics["mean_psnr"], kf_rnd_metrics["mean_ssim"], kf_rnd_metrics["mean_lpips"]
+                ),
+                logger=log,
+            )
 
             ### Evalaute on non-keyframes, which we have never seen during training (NOTE this is the proper metric, that people compare in papers)
             _, _, nonkf_tstamps = eval_utils.torch_intersect1d(torch.tensor(kf_tstamps), torch.tensor(tstamps))
@@ -724,6 +732,12 @@ class SLAM:
             save_dir = os.path.join(render_eval_path, "non-keyframes")
             nonkf_rnd_metrics = eval_utils.eval_rendering(
                 nonkf_cams, nonkf_tstamps, gaussians, stream, render_cfg, background, save_dir, True, monocular
+            )
+            self.info(
+                "(Non-Keyframes) Rendering: mean PSNR: {}, SSIM: {}, LPIPS: {}".format(
+                    nonkf_rnd_metrics["mean_psnr"], nonkf_rnd_metrics["mean_ssim"], nonkf_rnd_metrics["mean_lpips"]
+                ),
+                logger=log,
             )
 
             rendering_results = eval_utils.create_rendering_csv(
@@ -872,6 +886,9 @@ class SLAM:
         gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None,
     ) -> None:
         """Evaluate the system and then shut down all Process."""
+
+        if self.video.opt_intr:
+            self.info("Final estimated video intrinsics: {}".format(self.video.intrinsics[0]), logger=log)
 
         self.info("Initiating termination ...", logger=log)
         # self.save_state()  # NOTE we dont save this for now, since the network stays the same

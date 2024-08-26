@@ -2,6 +2,7 @@ import os
 import ipdb
 from copy import deepcopy
 from typing import List, Dict, Optional, Tuple
+import time
 import math
 import gc
 from termcolor import colored
@@ -565,8 +566,6 @@ class GaussianMapper(object):
                 Will ignore the importance weights ..."""
             )
 
-        # self.covisibility_pruning(mode="abs", visibility_th=2)
-
         # Update GUI
         if self.use_gui:
             self.q_main2vis.put_nowait(
@@ -938,7 +937,10 @@ class GaussianMapper(object):
         if dont_prune_latest > len(self.cameras + self.new_cameras):
             return
 
+        start = time.time()
         frames = sorted(self.cameras + self.new_cameras, key=lambda x: x.uid)
+        last = min(last, len(frames))
+
         # Make a covisibility check only for the last n frames
         if mode == "new":
             # Dont prune the Last/last-1 frame, since we then would add and prune Gaussians immediately -> super wasteful
@@ -961,12 +963,15 @@ class GaussianMapper(object):
             ids = [view.uid for view in frames]
             sorted_frames = sorted(ids, reverse=True)
             # Only prune Gaussians added on the last k frames
-            prune_last = self.gaussians.unique_kfIDs >= sorted_frames[last - 1]
+            last_idx = min(last, len(sorted_frames))
+            prune_last = self.gaussians.unique_kfIDs >= sorted_frames[last_idx - 1]
             to_prune = torch.logical_and(to_prune, prune_last)
 
         if to_prune.sum() > 0:
             self.gaussians.prune_points(to_prune.to(self.device))
-        self.info(f"({mode}) Covisibility pruning removed {to_prune.sum()} gaussians")
+
+        end = time.time()
+        self.info(f"({mode}) Covisibility pruning took {(end - start):.2f}s, pruned: {to_prune.sum()} Gaussians")
 
     def select_keyframes(self):
         """Select the last n1 frames and n2 other random frames from all."""
@@ -1194,11 +1199,18 @@ class GaussianMapper(object):
         print(colored("\n[Gaussian Mapper] ", "magenta"), colored(f"Loss: {self.loss_list[-1]}", "cyan"))
 
         ### Prune unreliable Gaussians
-        if len(self.iteration_info) % self.update_params.prune_every == 0:
-            self.covisibility_pruning(n_last_frames=self.n_last_frames, **self.update_params.pruning)
-            was_pruned = True
-        else:
-            was_pruned = False
+        was_pruned = False
+        if len(self.iteration_info) % self.update_params.prune_every == 0 and delay_to_tracking:
+            if self.update_params.pruning.use_covisibility:
+                # Gaussians should be visible in multiple frames
+                self.covisibility_pruning(n_last_frames=self.n_last_frames, **self.update_params.pruning.covisibility)
+                was_pruned = True
+            if self.update_params.pruning.use_floaters:
+                start = time.time()
+                floaters = self.gaussians.prune_floaters(**self.update_params.pruning.floaters)
+                end = time.time()
+                self.info(f"(Floater) pruning took {(end - start):.2f}s, pruned: {floaters.sum()} floaters")
+                was_pruned = True
 
         ### Feedback new state of map to Tracker
         if (self.feedback_poses or self.feedback_disps) and self.count > self.feedback_params.warmup:
@@ -1255,8 +1267,8 @@ class GaussianMapper(object):
         elif the_end and (self.last_idx + self.delay) >= self.cur_idx:
 
             # Allow pruning all frames equally
-            self.update_params.pruning.dont_prune_latest = 0
-            self.update_params.pruning.last = 0
+            self.update_params.pruning.covisibility.dont_prune_latest = 0
+            self.update_params.pruning.covisibility.last = 0
             # Run another call to catch the last batch of keyframes
             self._update(iters=self.mapping_iters + 10, delay_to_tracking=False)
             self.count += 1

@@ -1,0 +1,83 @@
+defaults:
+  - /mapping/base@_here_
+  
+# Online Optimization
+online_opt:
+  ## Local sliding optimization window
+  iters: 100 # Optimization iterations for selected views
+  n_last_frames: 10 # Always optimize the last n frames
+  n_rand_frames: 15 # Optimize random global frames on top
+
+  ## Scale gradients of already optimized Gaussians to battle catastrophic forgetting
+  grad_scaler:
+    do_scale: False # Scale gradients of Gaussians by how many times they already have been optimized
+    min_scale: 0.2 # Reduce learning rate only to e.g. max. 1/10
+    decay_rate: 0.005 # Decay rate of exponential function
+
+  prune_every: 4 # Prune every k Render passes
+  pruning:
+    use_covisibility: True
+    covisibility:
+      # NOTE: Using the absolute visibility check is more wasteful as we need to count the visiblity of each Gaussian!
+      # -> Use 'new' for faster performance
+        mode: "new" # ["abs", "new"] How to prune: either check for covisible frames everywhere or just in the last n frames
+        last: 10 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
+        visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
+    # This is a proxy for density
+    use_floaters: False
+    floaters:
+      search_radius: 0.5 # Search radius for fixed radius nearest neighbor search
+      min_nn_distance: 0.04 # Minimum distance to the nearest neighbor for pruning
+
+  prune_densify_every: 20 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
+  prune_densify_until: 45 # dont do this after this iteration
+  ## Densification parameters
+  densify:
+    # Vanilla 3DGS splitting and densification strategy
+    vanilla:
+      max_grad: 0.001 # Gaussians with gradients above this are split (smaller -> denser)
+      extent: 5  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
+      min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
+      max_screen_size: 15 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
+      scale_std: 0.25 # How much variance when perturbating old Gaussians during densify_and_split()
+    
+  # TODO chen: the following parameters should be different for TUM since we use the same for Replica?
+  # How to Filter the Tracking Map before feeding into Mapper
+  filter: # Parameter for filtering incoming points from the SLAM system
+    multiview: True # Only initialize Gaussians that are consistent in multiple views
+    uncertainty: False # Only use very certain points for intializing Gaussians
+    mv_count_th: 2 # Pixels need to be consistent within bin_thresh distance across these k views
+    # NOTE these are in relation to the mean of the distribution
+    bin_th: 0.1 # Distance between points for binning, this depends on the scene scale, so be careful!
+    min_disp_th: 0.005 # Relative to distribution, e.g. reject the lowest 1%
+    hard_disp_th: 0.001 # Absolute, i.e. reject depth > 1000m
+    conf_th: 0.1 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
+
+
+# MonoGS uses their defaults for a window size of 10
+# Since we want to independent to the batch_size, we adjust the learning rate accordingly
+# see: https://stackoverflow.com/questions/53033556/how-should-the-learning-rate-change-as-the-batch-size-change
+# -> lr = defaults / sqrt(10)
+# However, we need to be cautious of https://stats.stackexchange.com/questions/346299/whats-the-effect-of-scaling-a-loss-function-in-deep-learning
+opt_params:
+  position_lr_init: 1e-3 # Default MonoGS: 0.00016 (RGB mode has x10)
+  position_lr_final: 5e-4 # Default MonoGS: 0.0000016
+  position_lr_max_steps: 100 # Default MonoGS: 30000
+
+loss:
+  supervise_with_prior: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
+  with_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
+  with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
+  with_depth_smoothness: True # Similarity loss between depth and image gradients
+  scale_invariant: False # Whether to use the actual scale of the prior or not, i.e. a scale-invariant loss is computed
+  # Weights
+  alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha2: 0.8 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
+  beta1: 5.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
+  beta2: 0.1 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+
+# Parameters for transfer SLAM -> Renderer
+input:
+  pcd_downsample_init: 4 # 8 # This is a constant downsampling factor
+  pcd_downsample: 16 # You ideally have ~5-10k points per frame
+  point_size: 0.02

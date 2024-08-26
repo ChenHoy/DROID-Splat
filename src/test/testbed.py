@@ -333,6 +333,7 @@ class SlamTestbed(SLAM):
         self.gaussian_mapper._last_call(None, None)
 
         ipdb.set_trace()
+
         # self.compare_mapping_video(0)
 
         # Check distance statistics, so you can select a good threshold depending on the Place Recognition Network
