@@ -496,8 +496,10 @@ class GaussianMapper(object):
                 used_mem, free_mem = self.get_ram_usage()
                 # NOTE chen: this can add up a lot of memory, only this if we have enough slack
                 if used_mem <= max_mem:
+                    ng_before = len(self.gaussians)
                     self.info(f"Patching up holes in view {view_id} manually using Depth from Tracking ...")
                     self.densify_holes(view_id, mask, downsample_factor=2.0)
+                    self.info(f"Added {len(self.gaussians) - ng_before} Gaussians to fill holes in view {view_id} ...")
             else:
                 has_hole = False
             return has_hole
@@ -569,8 +571,8 @@ class GaussianMapper(object):
         # Update GUI
         if self.use_gui:
             self.q_main2vis.put_nowait(
-                gui_utils.GaussianPacket(
-                    gaussians=clone_obj(self.gaussians), keyframes=[cam.detach() for cam in self.cameras]
+                gui_utils.GaussianPacket(  # NOTE leon: the GUI will lag (even run OOM) if we add thousands of cameras.
+                    gaussians=clone_obj(self.gaussians)  # , keyframes=[cam.detach() for cam in self.cameras]
                 )
             )
 
@@ -607,7 +609,7 @@ class GaussianMapper(object):
 
             # Decide whether to densify / prune this iteration
             do_densify = (
-                iter % self.refine_params.prune_densify_every == 0
+                (iter + 1) % self.refine_params.prune_densify_every == 0
             ) and iter <= self.refine_params.densify_until
             opacity_densify = self.refine_params.densify.use_opacity
 
@@ -892,7 +894,8 @@ class GaussianMapper(object):
             if prune_densify and opacity_densify and self.count > self.update_params.densify.opacity.after:
                 ng_before = len(self.gaussians)
                 for view, opacity in opacity_acm:
-                    self.gaussians.densify_from_mask(view, opacity.squeeze() < self.update_params.densify.opacity.th)
+                    mask = opacity.squeeze() < self.update_params.densify.opacity.th
+                    self.gaussians.densify_from_mask(view, mask)
                 if (len(self.gaussians) - ng_before) > 0:
                     self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity")
 
@@ -940,7 +943,6 @@ class GaussianMapper(object):
         start = time.time()
         frames = sorted(self.cameras + self.new_cameras, key=lambda x: x.uid)
         last = min(last, len(frames))
-
         # Make a covisibility check only for the last n frames
         if mode == "new":
             # Dont prune the Last/last-1 frame, since we then would add and prune Gaussians immediately -> super wasteful

@@ -45,12 +45,13 @@ def main(args):
 
     # Initialize an empty dictionary to store statistics
     statistics = {"tracking_all": {}, "tracking_kf": {}, "rendering_kf": {}, "rendering_nkf": {}}
-    for metric in tracking_metrics_keys:
-        for key in statistics.keys():
-            statistics[key][metric] = []
-    for metric in rendering_metrics_keys:
-        for key in statistics.keys():
-            statistics[key][metric] = []
+    # create empty lists for each metric
+    for key in tracking_metrics_keys:
+        statistics["tracking_all"][key] = []
+        statistics["tracking_kf"][key] = []
+    for key in rendering_metrics_keys:
+        statistics["rendering_kf"][key] = []
+        statistics["rendering_nkf"][key] = []
 
     # Go through each experiment subfolder
     for subfolder in data_path.iterdir():
@@ -86,9 +87,17 @@ def main(args):
             if len(statistics[eval_kind][key]) == 0:
                 continue
             metric_print(f"{key}", "green")
+            print(f"{statistics[eval_kind][key]}")
             print(f"Mean: {pd.Series(statistics[eval_kind][key]).mean()}")
             print(f"Median: {pd.Series(statistics[eval_kind][key]).median()}")
             print(f"Std: {pd.Series(statistics[eval_kind][key]).std()}\n")
+
+    # save results to csv
+    for eval_kind in statistics.keys():
+        df = pd.DataFrame(statistics[eval_kind])
+        df = df.apply(pd.Series.explode)
+        df.to_csv(data_path / f"{eval_kind}_results.csv", index=False)
+
 
 
 if __name__ == "__main__":

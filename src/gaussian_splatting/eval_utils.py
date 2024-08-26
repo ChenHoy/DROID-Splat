@@ -345,15 +345,15 @@ def plot_metric_statistics(psnr_array, ssim_array, lpips_array, plot_dir: str):
     fig, ax = plt.subplots(1, 3, figsize=(15, 5))
     ax[0].bar(frames, psnr_array, color="blue")
     ax[0].set_title("PSNR")
-    ax[0].set_ylim([0.0, np.array(psnr_array).max() + 10])
+    ax[0].set_ylim([0.0, max(psnr_array) + 1])
 
     ax[1].bar(frames, ssim_array, color="green")
-    ax[1].set_ylim([0.999, 1.0])
+    ax[1].set_ylim([0.99, 1.0])
     ax[1].set_title("SSIM")
 
     ax[2].bar(frames, lpips_array, color="red")
     ax[2].set_title("LPIPS")
-    ax[2].set_ylim([0.0, np.array(lpips_array).max() + 0.05])
+    ax[2].set_ylim([0.0, max(lpips_array) + 0.005])
 
     plt.savefig(os.path.join(plot_dir, "metrics_per_frame.pdf"))
 

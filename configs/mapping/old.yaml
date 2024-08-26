@@ -55,9 +55,8 @@ online_opt:
     multiview: True # Only initialize Gaussians that are consistent in multiple views
     uncertainty: False # Only use very certain points for intializing Gaussians
     mv_count_th: 2 # Pixels need to be consistent within bin_thresh distance across these k views
-    bin_th: 0.001 # Distance between points for binning, this depends on the scene scale, so be careful!
-    # bin_th: 0.05 # Distance between points for binning, this depends on the scene scale, so be careful!
-    conf_th: 0.025 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
+    bin_th: 0.05 # Distance between points for binning, this depends on the scene scale, so be careful!
+    conf_th: 0.1 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
 
 
 # MonoGS uses their defaults for a window size of 10
@@ -102,7 +101,7 @@ loss:
 refinement:
   iters: 0 # Final Optimization iterations for all views
   bs: 15 # Batch size for refinement (Use <= 70 to avoid OOM!)
-  lr_factor: 0.5 # Change the learning rate for refinement
+  lr_factor: 0.1 # Change the learning rate for refinement
   optimize_poses: False
   random_subset: 0.8 # Always optimize over a random subset of frames with size % of all to save compute
   w_importance_sampling: False # Use importance sampling for the final optimization
@@ -117,7 +116,8 @@ refinement:
 
     # Densify Gaussians based on opacity only after k Mapper updates
     opacity:
-      th: 0.2 # Opacity value below which we densify
+      th: 0.8
+ # Opacity value below which we densify
 
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
