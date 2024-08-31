@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 
 from .gaussian_splatting.gui import gui_utils
 from .gaussian_splatting.eval_utils import EvaluatePacket
+from .gaussian_splatting.utils.general_utils import random_subsample_mask
 from .gaussian_splatting.gaussian_renderer import render
 from .gaussian_splatting.scene.gaussian_model import GaussianModel
 from .gaussian_splatting.camera_utils import Camera
@@ -121,6 +122,7 @@ class GaussianMapper(object):
         self.projection_matrix = None
 
         self.n_optimized = {}  # Keep track how many times a keyframe was optimized
+        self.last_frame_loss = {}  # Keep track of the last loss for each frame
         # Memoize the mapping of Gaussian indices to video indices
         # (this maps cam.uid -> position in video buffer)
         # Since we only store keyframes inside the video buffers, we reassign the mapping ones we add non-keyframes cameras during refinement
@@ -215,6 +217,10 @@ class GaussianMapper(object):
             if cam.uid not in self.cam2buffer:
                 self.cam2buffer[cam.uid] = cam.uid
                 self.buffer2cam[cam.uid] = cam.uid
+
+            if cam.uid not in self.n_optimized:
+                self.n_optimized[cam.uid] = 0
+
             self.new_cameras.append(cam)
 
     def get_pose_optimizer(self, frames: List) -> torch.optim.Optimizer:
@@ -826,17 +832,14 @@ class GaussianMapper(object):
         visibility_filter_acm, viewspace_point_tensor_acm = [], []
         for view in frames:
 
-            # Keep track of how often this keyframe was already optimized
-            self.gaussians.increment_n_opt_counter(view.uid)
-            if view.uid in self.n_optimized:
-                self.n_optimized[view.uid] += 1
-            else:
-                self.n_optimized[view.uid] = 1
-
             current_loss, render_pkg = self.render_compare(view)
             if render_pkg is None:
                 self.info(f"Skipping view {view.uid} as no gaussians are present ...")
                 continue
+
+            # Keep track of how often the Gaussians were already optimized
+            self.gaussians.increment_n_opt_counter(visibility=render_pkg["visibility_filter"])
+            self.n_optimized[view.uid] += 1
 
             # Accumulate for after loss backpropagation
             opacity_acm.append((view, render_pkg["opacity"]))
@@ -844,6 +847,7 @@ class GaussianMapper(object):
             viewspace_point_tensor_acm.append(render_pkg["viewspace_points"])
             radii_acm.append(render_pkg["radii"])
 
+            self.last_frame_loss[view.uid] = current_loss
             loss += current_loss
 
         if self.update_params.grad_scaler.do_scale:
@@ -895,7 +899,10 @@ class GaussianMapper(object):
                 ng_before = len(self.gaussians)
                 for view, opacity in opacity_acm:
                     mask = opacity.squeeze() < self.update_params.densify.opacity.th
-                    self.gaussians.densify_from_mask(view, mask)
+                    # if this mask has too many pixels, then subsample to acceptable lower number
+                    if mask.sum() > self.update_params.densify.opacity.max_pixels:
+                        mask = random_subsample_mask(mask, self.update_params.densify.opacity.max_pixels)
+                        self.gaussians.densify_from_mask(view, mask, depthmap=view.depth_prior.cpu().numpy())
                 if (len(self.gaussians) - ng_before) > 0:
                     self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity")
 
@@ -975,14 +982,45 @@ class GaussianMapper(object):
         end = time.time()
         self.info(f"({mode}) Covisibility pruning took {(end - start):.2f}s, pruned: {to_prune.sum()} Gaussians")
 
-    def select_keyframes(self):
-        """Select the last n1 frames and n2 other random frames from all."""
+    def select_keyframes(self, random_weights: Optional[str] = None):
+        """Select the last n1 frames and n2 other random frames from all.
+        If with_random_weights is set, we assign a higher sampling probability to keyframes, that have not yet been
+        optimized a lot. This is measured by self.n_optimized.
+
+        NOTE this method assumes self.cameras to contain sorted keyframes with increasing uid order.
+
+        random_weights:
+            If set to "visited", we assign higher probability to frames that have been visited less often.
+            If set
+        """
         if len(self.cameras) <= self.n_last_frames + self.n_rand_frames:
             keyframes = self.cameras
             keyframes_idx = np.arange(len(self.cameras))
         else:
-            keyframes_idx = np.random.choice(len(self.cameras) - self.n_last_frames, self.n_rand_frames, replace=False)
-            keyframes = self.cameras[-self.n_last_frames :] + [self.cameras[i] for i in keyframes_idx]
+            last_window = self.cameras[-self.n_last_frames :]
+            window_idx = np.arange(len(self.cameras))[-self.n_last_frames :]
+            if self.n_rand_frames > 0:
+                if random_weights == "visited":
+                    to_draw = np.arange(len(self.cameras) - self.n_last_frames)  # Indices we can draw from
+                    weights = [self.n_optimized[idx] / self.mapping_iters + 1 for idx in to_draw]
+                    weights = [1 / w for w in weights]  # Invert to get higher probability for less visited frames
+                    random_idx = list(WeightedRandomSampler(weights, self.n_rand_frames, replacement=False))
+                    random_idx = to_draw[random_idx]
+                elif random_weights == "loss":
+                    to_draw = np.arange(len(self.cameras) - self.n_last_frames)  # Indices we can draw from
+                    weights = [self.last_frame_loss[idx] for idx in to_draw]
+                    random_idx = list(WeightedRandomSampler(weights, self.n_rand_frames, replacement=False))
+                    random_idx = to_draw[random_idx]
+                else:
+                    random_idx = np.random.choice(
+                        len(self.cameras) - self.n_last_frames, self.n_rand_frames, replace=False
+                    )
+                random_frames = [self.cameras[i] for i in random_idx]
+                keyframes = last_window + random_frames
+                keyframes_idx = np.concatenate([window_idx, random_idx])
+            else:
+                keyframes = last_window
+                keyframes_idx = window_idx
         return keyframes, keyframes_idx
 
     def add_nonkeyframe_cameras(self):
@@ -1186,7 +1224,9 @@ class GaussianMapper(object):
             do_densify = (
                 iter % self.update_params.prune_densify_every == 0 and iter < self.update_params.prune_densify_until
             )
-            frames = self.select_keyframes()[0] + self.new_cameras
+            frames = (
+                self.select_keyframes(random_weights=self.update_params.random_selection_weights)[0] + self.new_cameras
+            )
             loss = self.mapping_step(
                 iter,
                 frames,

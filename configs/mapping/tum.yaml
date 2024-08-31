@@ -1,18 +1,22 @@
 defaults:
   - /mapping/base@_here_
+
+warmup: 10 # Wait until tracking gets to this frame
   
 # Online Optimization
 online_opt:
   ## Local sliding optimization window
   iters: 100 # Optimization iterations for selected views
-  n_last_frames: 10 # Always optimize the last n frames
-  n_rand_frames: 15 # Optimize random global frames on top
+  n_last_frames: 5 # Always optimize the last n frames
+  n_rand_frames: 20 # Optimize random global frames on top
+  # If chosen "loss" or "visited", we assign higher weights to frames with higher loss or that have been visited less
+  random_selection_weights: null # Strategy how to select random frames
 
   ## Scale gradients of already optimized Gaussians to battle catastrophic forgetting
   grad_scaler:
     do_scale: False # Scale gradients of Gaussians by how many times they already have been optimized
-    min_scale: 0.2 # Reduce learning rate only to e.g. max. 1/10
-    decay_rate: 0.005 # Decay rate of exponential function
+    min_scale: 0.0001 # Reduce learning rate only to e.g. max. 1/10
+    decay_rate: 0.001 # Decay rate of exponential function
 
   prune_every: 4 # Prune every k Render passes
   pruning:
@@ -27,10 +31,10 @@ online_opt:
     use_floaters: False
     floaters:
       search_radius: 0.5 # Search radius for fixed radius nearest neighbor search
-      min_nn_distance: 0.04 # Minimum distance to the nearest neighbor for pruning
+      min_nn_distance: 0.06 # Minimum distance to the nearest neighbor for pruning
 
-  prune_densify_every: 20 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
-  prune_densify_until: 45 # dont do this after this iteration
+  prune_densify_every: 25 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
+  prune_densify_until: 55 # dont do this after this iteration
   ## Densification parameters
   densify:
     # Vanilla 3DGS splitting and densification strategy
@@ -39,7 +43,14 @@ online_opt:
       extent: 5  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
       min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
       max_screen_size: 15 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
-      scale_std: 0.25 # How much variance when perturbating old Gaussians during densify_and_split()
+      scale_std: 1.0 # How much variance when perturbating old Gaussians during densify_and_split()
+
+    # Densify Gaussians based on opacity only after k Mapper updates
+    use_opacity: False # Use opacity based densification
+    opacity:
+      after: 5 # NOTE we usually run the Mapper ~30-40 times on normal videos
+      max_pixels: 5000 # Maximum number of pixels to densify
+      th: 0.01 # Opacity value below which we densify
     
   # TODO chen: the following parameters should be different for TUM since we use the same for Replica?
   # How to Filter the Tracking Map before feeding into Mapper
@@ -48,8 +59,8 @@ online_opt:
     uncertainty: False # Only use very certain points for intializing Gaussians
     mv_count_th: 2 # Pixels need to be consistent within bin_thresh distance across these k views
     # NOTE these are in relation to the mean of the distribution
-    bin_th: 0.1 # Distance between points for binning, this depends on the scene scale, so be careful!
-    min_disp_th: 0.005 # Relative to distribution, e.g. reject the lowest 1%
+    bin_th: 0.001 # Distance between points for binning, this depends on the scene scale, so be careful!
+    min_disp_th: 0.001 # Relative to distribution, e.g. reject the lowest 1%
     hard_disp_th: 0.001 # Absolute, i.e. reject depth > 1000m
     conf_th: 0.1 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
 
@@ -72,12 +83,12 @@ loss:
   scale_invariant: False # Whether to use the actual scale of the prior or not, i.e. a scale-invariant loss is computed
   # Weights
   alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
-  alpha2: 0.8 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
+  alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta1: 5.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
-  beta2: 0.1 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+  beta2: 0.001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
 # Parameters for transfer SLAM -> Renderer
 input:
-  pcd_downsample_init: 4 # 8 # This is a constant downsampling factor
-  pcd_downsample: 16 # You ideally have ~5-10k points per frame
+  pcd_downsample_init: 1 # This is a constant downsampling factor
+  pcd_downsample: 8 # You ideally have ~5-10k points per frame
   point_size: 0.02

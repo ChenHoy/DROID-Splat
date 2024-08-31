@@ -39,7 +39,8 @@ online_opt:
     # Densify Gaussians based on opacity only after k Mapper updates
     use_opacity: False # Use opacity based densification
     opacity:
-      after: 8 # NOTE we usually run the Mapper ~30-40 times on normal videos
+      after: 1 # NOTE we usually run the Mapper ~30-40 times on normal videos
+      max_pixels: 2000 # Maximum number of pixels to densify
       th: 0.01 # Opacity value below which we densify
 
     # Vanilla 3DGS splitting and densification strategy
