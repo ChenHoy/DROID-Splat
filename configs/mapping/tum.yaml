@@ -72,7 +72,7 @@ loss:
   scale_invariant: False # Whether to use the actual scale of the prior or not, i.e. a scale-invariant loss is computed
   # Weights
   alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
-  alpha2: 0.8 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
+  alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta1: 5.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
   beta2: 0.1 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 

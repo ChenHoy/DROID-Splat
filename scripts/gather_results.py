@@ -44,7 +44,7 @@ def main(args):
     data_path = Path(args.data)
 
     # Initialize an empty dictionary to store statistics
-    statistics = {"tracking_all": {}, "tracking_kf": {}, "rendering_kf": {}, "rendering_nkf": {}}
+    statistics = {"name": [], "tracking_all": {}, "tracking_kf": {}, "rendering_kf": {}, "rendering_nkf": {}}
     # create empty lists for each metric
     for key in tracking_metrics_keys:
         statistics["tracking_all"][key] = []
@@ -55,6 +55,7 @@ def main(args):
 
     # Go through each experiment subfolder
     for subfolder in data_path.iterdir():
+        statistics["name"].append(subfolder.name)
         eval_dir = subfolder / "evaluation"
         tracking_dir = eval_dir / "odometry"
         tracking_all = read_json(tracking_dir / "all" / "stats_final.json")
@@ -81,6 +82,8 @@ def main(args):
     main_print(f"Evaluation statistics for: {data_path}")
     print("")
     for eval_kind in statistics.keys():
+        if eval_kind == "name":
+            continue
 
         main_print(f"{eval_kind}", "red")
         for key in statistics[eval_kind].keys():

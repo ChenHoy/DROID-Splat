@@ -7,7 +7,7 @@ defaults:
 
 hydra:
   run:
-    dir: outputs/${hydra.job.name}/test/ablations/losses/${now:%Y-%m-%d_%H-%M-%S}_${mode}
+    dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}_${mode}
   job:
     chdir: False
     name: tum_rgbd # Change this to your experiment run name, e.g. the dataset you run on
@@ -38,7 +38,7 @@ show_stream: False
 # Mapping takes ~5-7 iters/s, i.e. with a well tuned system each Render update hits <= 0.4fps
 backend_every: 8 # Run global bundle adjustment only every k Frontend updates
 # NOTE this is a trade-off between accuracy and speed, we can also add more compute to refinement!
-mapper_every: 10  # Run Renderer every k Frontend updates
+mapper_every: 20  # Run Renderer every k Frontend updates
 
 ## Evaluation
 evaluate: False
