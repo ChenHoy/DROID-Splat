@@ -64,6 +64,22 @@ class Camera(nn.Module):
         if self.mask is not None:
             self.mask = self.mask.to(new_device)
 
+    def to(self, device: str) -> None:
+        self.device = device
+        self.image_tensors_to(device)
+
+        self.R = self.R.to(device=device)
+        self.T = self.T.to(device=device)
+        self.cam_rot_delta = self.cam_rot_delta.to(device=device)
+        self.cam_trans_delta = self.cam_trans_delta.to(device=device)
+
+        self.exposure_a = self.exposure_a.to(device=device)
+        self.exposure_b = self.exposure_b.to(device=device)
+        self.projection_matrix = self.projection_matrix.to(device=device)
+
+        if self.grad_mask is not None:
+            self.grad_mask = self.grad_mask.to(device=device)
+
     def detach(self):
         """Clone and detach all tensors from the camera object"""
         return Camera(
