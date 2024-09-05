@@ -74,6 +74,13 @@ class EvaluatePacket:
         self.cam2buffer = cam2buffer
         self.buffer2cam = buffer2cam
 
+    def cameras_to(self, device: str) -> None:
+        """In case we have a lot of images, it is better to move all dense image tensors from the device to e.g.
+        the CPU. We usually run into these problems when we clone the EvaluatePacket in the main process for clean handling.
+        """
+        for cam in self.cameras:
+            cam.image_tensors_to(device)
+
     def __str__(self) -> str:
         print("Im getting something: {} {}".format(self.pipeline_params, len(self.cameras)))
 
@@ -455,6 +462,8 @@ def eval_rendering(
 
         saved_frame_idx.append(idx)
         cam = cams[i]  # NOTE chen: Make sure that the order of tstamps and cams is the same and corresponding!
+        # NOTE we detach tensors to the CPU, because for some scenes we have a lot of images and we want to save memory
+        cam.image_tensors_to("cuda")  # Make sure everything is on the GPU for Rendering
         _, gt_image, gt_depth, _, _ = dataset[idx]
         gt_image = gt_image.squeeze(0)
         if has_gt_depth:

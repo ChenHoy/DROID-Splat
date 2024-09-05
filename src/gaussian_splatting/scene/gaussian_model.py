@@ -771,6 +771,7 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(xyz_new, "xyz")
         self._xyz = optimizable_tensors["xyz"]
 
+    @torch.no_grad()
     def increment_n_opt_counter(
         self, visibility: Optional[torch.Tensor] = None, kf_idx: Optional[torch.Tensor] = None
     ) -> None:
