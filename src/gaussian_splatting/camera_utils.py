@@ -55,6 +55,15 @@ class Camera(nn.Module):
 
         self.projection_matrix = projection_matrix.to(device=device)
 
+    def image_tensors_to(self, new_device: str) -> None:
+        self.original_image = self.original_image.to(new_device)
+        if self.depth is not None:
+            self.depth = self.depth.to(new_device)
+        if self.depth_prior is not None:
+            self.depth_prior = self.depth_prior.to(new_device)
+        if self.mask is not None:
+            self.mask = self.mask.to(new_device)
+
     def detach(self):
         """Clone and detach all tensors from the camera object"""
         return Camera(
