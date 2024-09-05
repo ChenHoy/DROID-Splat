@@ -97,7 +97,7 @@ loss:
   rgb_boundary_threshold: 0.001 # Pixel information in an image needs to be at least higher than this 
 
   # Weights
-  alpha1: 0.6 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta1: 2.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
   beta2: 0.01 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
@@ -105,28 +105,30 @@ loss:
 
 # Offline Map Refinement for finetuning
 refinement:
-  iters: 0 # Final Optimization iterations for all views
-  bs: 10 # Batch size for refinement (Use <= 70 to avoid OOM!)
-  lr_factor: 1.0 # Change the learning rate for refinement
-  optimize_poses: False
-  random_subset: 0.8 # Always optimize over a random subset of frames with size % of all to save compute
-  w_importance_sampling: False # Use importance sampling for the final optimization
-  use_non_keyframes: False # Use non-keyframes during map refinement
-  keyframes_at_least: 0.0 # Always make sure to have > x% keyframes in a batch
+  optimize_poses: True
+  use_non_keyframes: True # Use RGB non-keyframes as well during map refinement
+  w_importance_sampling: False
 
-  prune_densify_every: 5 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
-  densify_until: 50 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
+  iters: 50 # Optimize over this many different batches
+  batch_iters: 30 # Optimize each batch this many times
+  lr_factor: 0.1 # Change the learning rate for refinement
+  bs: 35 # Batch size for refinement 
+  kf_at_least: 0.5 # Always make sure to have > x% keyframes in a batch
+
+  prune_densify_every: 3 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
+  densify_until: 8 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
 
   densify:
-    use_opacity: True # Use opacity based densification
     # Densify Gaussians based on opacity only after k Mapper updates
+    use_opacity: False # Use opacity based densification
     opacity:
-      th: 0.8 # Opacity value below which we densify
+      max_pixels: 10000 # Maximum number of pixels to densify
+      th: 0.01 # Opacity value below which we densify
 
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
-      max_grad: 0.001 # Gaussians with gradients above this are split (smaller -> denser)
-      extent: 3 # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
+      max_grad: 0.005 # Gaussians with gradients above this are split (smaller -> denser)
+      extent: 8 # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
       min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
       max_screen_size: 15 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
 

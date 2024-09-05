@@ -7,8 +7,8 @@ warmup: 10 # Wait until tracking gets to this frame
 online_opt:
   ## Local sliding optimization window
   iters: 100 # Optimization iterations for selected views
-  n_last_frames: 5 # Always optimize the last n frames
-  n_rand_frames: 20 # Optimize random global frames on top
+  n_last_frames: 10 # Always optimize the last n frames
+  n_rand_frames: 15 # Optimize random global frames on top
   # If chosen "loss" or "visited", we assign higher weights to frames with higher loss or that have been visited less
   random_selection_weights: null # Strategy how to select random frames
 
@@ -82,7 +82,7 @@ loss:
   with_depth_smoothness: True # Similarity loss between depth and image gradients
   scale_invariant: False # Whether to use the actual scale of the prior or not, i.e. a scale-invariant loss is computed
   # Weights
-  alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha1: 0.6 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta1: 5.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
   beta2: 0.001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)

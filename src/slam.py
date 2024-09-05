@@ -1,7 +1,7 @@
 import os
 import ipdb
 import gc
-from time import sleep
+from time import sleep, time
 from typing import List, Optional, Tuple
 from tqdm import tqdm
 import logging
@@ -32,7 +32,7 @@ from .gaussian_splatting.camera_utils import Camera
 from .gaussian_splatting import eval_utils
 from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
 from .gaussian_splatting.gui import gui_utils, slam_gui
-from .utils import clone_obj, get_all_queue
+from .utils import clone_obj, get_all_queue, recursive_to
 
 # A logger for this file
 log = logging.getLogger(__name__)
@@ -95,6 +95,9 @@ class SLAM:
         # Manage the stream, i.e. we can also run the system only in [t0, t1]
         self.t_start = cfg.get("t_start", 0)
         self.t_stop = cfg.get("t_stop", None)
+
+        self.start_time = torch.ones((1)).float().share_memory_()
+        self.end_time = torch.ones((1)).float().share_memory_()
 
         # Delete backend when hitting this threshold, so we can keep going with just frontend
         self.max_ram_usage = cfg.get("max_ram_usage", 0.8)
@@ -286,6 +289,8 @@ class SLAM:
         # Wait up for other threads to start
         while self.all_trigered < self.num_running_thread:
             pass
+
+        self.start_time *= time()
 
         # Main Loop which drives the whole system
         for frame in tqdm(stream):
@@ -967,8 +972,12 @@ class SLAM:
                 a = deepcopy(a)
                 gaussian_mapper_last_state = None
             else:
+                a.cameras_to("cpu")  # Put all dense tensors on the CPU before cloning to avoid OOM
                 gaussian_mapper_last_state = clone_obj(a)
+
             del a  # NOTE Always delete receive object from a multiprocessing Queue!
+            torch.cuda.empty_cache()
+            gc.collect()
             self.received_mapping.set()
 
         # Let the processes run until they are finished (When using GUI's these need to be closed manually)
@@ -977,5 +986,13 @@ class SLAM:
 
         while self.all_finished < self.num_running_thread:
             pass
+
+        self.end_time = time() * self.end_time
+        self.info("##########", logger=log)
+        self.info(
+            "Total time elapsed: {:.2f} minutes".format((self.end_time - self.start_time).item() / 60), logger=log
+        )
+        self.info("Total FPS: {:.2f}".format(len(stream) / (self.end_time - self.start_time).item()), logger=log)
+        self.info("##########", logger=log)
 
         self.terminate(processes, stream, gaussian_mapper_last_state)
