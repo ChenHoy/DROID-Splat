@@ -8,7 +8,10 @@ online_opt:
   ## Local sliding optimization window
   iters: 30 # Optimization iterations for selected views
   n_last_frames: 10 # Always optimize the last n frames
-  n_rand_frames: 5 # Optimize random global frames on top
+  n_rand_frames: 15 # Optimize random global frames on top
+  # If chosen "loss" or "visited", we assign higher weights to frames with higher loss or that have been visited less
+  random_selection_weights: null # Strategy how to select random frames
+
   batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
   batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
   optimize_poses: False
@@ -24,6 +27,7 @@ online_opt:
       last: 10 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
       dont_prune_latest: 0 # Never prune the latest Gaussians as this leads to unnecessary add / delete
       visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
+
     use_floaters: False
     # This is a proxy for density
     floaters:
@@ -39,7 +43,8 @@ online_opt:
     # Densify Gaussians based on opacity only after k Mapper updates
     use_opacity: False # Use opacity based densification
     opacity:
-      after: 1 # NOTE we usually run the Mapper ~30-40 times on normal videos
+      after: 5 # NOTE we usually run the Mapper ~30-40 times on normal videos
+      # NOTE we limit this because in unmapped areas, we suddenly would add 100k Gaussians
       max_pixels: 2000 # Maximum number of pixels to densify
       th: 0.01 # Opacity value below which we densify
 
@@ -50,11 +55,11 @@ online_opt:
       min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
       max_screen_size: 10 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
     
-  # Scale gradients of already optimized Gaussians to battle catastrophic forgetting
+  ## Scale gradients of already optimized Gaussians to battle catastrophic forgetting
   grad_scaler:
     do_scale: False # Scale gradients of Gaussians by how many times they already have been optimized
-    min_scale: 0.1 # Reduce learning rate only to min. 1/10
-    decay_rate: 0.01 # Decay rate of exponential function
+    min_scale: 0.0001 # Reduce learning rate only to e.g. max. 1/10
+    decay_rate: 0.001 # Decay rate of exponential function
 
   # How to Filter the Tracking Map before feeding into Mapper
   filter: # Parameter for filtering incoming points from the SLAM system
@@ -106,17 +111,21 @@ loss:
 # Offline Map Refinement for finetuning
 refinement:
   optimize_poses: True
-  use_non_keyframes: True # Use RGB non-keyframes as well during map refinement
-  w_importance_sampling: False
+  use_non_keyframes: False # Use RGB non-keyframes as well during map refinement
 
-  iters: 50 # Optimize over this many different batches
-  batch_iters: 30 # Optimize each batch this many times
+  iters: 0 # Optimize over this many different batches
+  batch_iters: 50 # Optimize each batch this many times
   lr_factor: 0.1 # Change the learning rate for refinement
-  bs: 35 # Batch size for refinement 
-  kf_at_least: 0.5 # Always make sure to have > x% keyframes in a batch
+  bs: 30 # Batch size for refinement 
 
-  prune_densify_every: 3 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
-  densify_until: 8 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
+  sampling:
+    use_neighborhood: True
+    neighborhood_size: 10 # If this is an even number, we sample more frames in the past
+    weighted: False
+    kf_at_least: 0.5 # Always make sure to have > x% keyframes in a batch
+
+  prune_densify_every: 3 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densificatio# This has to be an uneven number
+  densify_until: 10 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
 
   densify:
     # Densify Gaussians based on opacity only after k Mapper updates
@@ -128,9 +137,9 @@ refinement:
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
       max_grad: 0.005 # Gaussians with gradients above this are split (smaller -> denser)
-      extent: 8 # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
-      min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
-      max_screen_size: 15 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
+      extent: 5 # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
+      min_opacity: 0.05 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
+      max_screen_size: 10 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
 
 
 # Backpropagate the Render updates into Tracking system
