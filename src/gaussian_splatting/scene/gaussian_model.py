@@ -393,7 +393,7 @@ class GaussianModel:
                 ) * scale
 
         if mask is not None:
-            depth_raw[mask.cpu().numpy()] = 0.0
+            depth_raw[~mask.cpu().numpy()] = 0.0
         depth = o3d.geometry.Image(depth_raw.astype(np.float32))
         rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
 
@@ -534,7 +534,8 @@ class GaussianModel:
         # NOTE chen: highly suspect that these can create malloc errors on some pytorch versions
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()].repeat(N)
         new_n_obs = self.n_obs[selected_pts_mask.cpu()].repeat(N)
-        new_n_opt = self.n_optimized[selected_pts_mask.cpu()].repeat(N)
+        # Divide by 100, so that cloned points move faster when we use the grad scaler
+        new_n_opt = self.n_optimized[selected_pts_mask.cpu()].repeat(N) / 100
 
         self.densification_postfix(
             new_xyz,
@@ -575,7 +576,8 @@ class GaussianModel:
         # NOTE these operations create a malloc error with wrong pytorch version
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()]
         new_n_obs = self.n_obs[selected_pts_mask.cpu()]
-        new_n_opt = self.n_optimized[selected_pts_mask.cpu()]
+        # Divide by 100, so that cloned points move faster when we use the grad scaler
+        new_n_opt = self.n_optimized[selected_pts_mask.cpu()] / 100
 
         self.densification_postfix(
             new_xyz,
@@ -589,8 +591,8 @@ class GaussianModel:
             new_n_opt=new_n_opt,
         )
 
-    def densify_from_mask(self, cam, mask, downsample_factor=1):
-        features = self.create_pcd_from_image(cam, mask=mask, downsample_factor=downsample_factor)
+    def densify_from_mask(self, cam, mask, downsample_factor=1, depthmap=None):
+        features = self.create_pcd_from_image(cam, mask=mask, downsample_factor=downsample_factor, depthmap=depthmap)
         if features is not None:
             fused_point_cloud, features, scales, rots, opacities = features
             self.extend_from_pcd(fused_point_cloud, features, scales, rots, opacities, cam.uid)
@@ -769,8 +771,16 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(xyz_new, "xyz")
         self._xyz = optimizable_tensors["xyz"]
 
-    def increment_n_opt_counter(self, kf_idx: torch.Tensor) -> None:
-        to_increment = self.unique_kfIDs == kf_idx
+    @torch.no_grad()
+    def increment_n_opt_counter(
+        self, visibility: Optional[torch.Tensor] = None, kf_idx: Optional[torch.Tensor] = None
+    ) -> None:
+        to_increment = torch.zeros_like(self.unique_kfIDs, dtype=torch.bool)
+        if kf_idx is not None:
+            to_increment = self.unique_kfIDs == kf_idx
+        if visibility is not None:
+            to_increment = torch.logical_and(to_increment, visibility.to(to_increment.device))
+
         self.n_optimized[to_increment] += 1
 
     def get_avg_scale(self, factor: float = 1.0, kfIdx: Optional[torch.Tensor | List[int]] = None) -> float:

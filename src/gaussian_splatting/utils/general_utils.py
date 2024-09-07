@@ -22,6 +22,23 @@ def inverse_sigmoid(x):
     return torch.log(x / (1 - x))
 
 
+def random_subsample_mask(mask: torch.Tensor, max_pixels: int) -> torch.Tensor:
+    """Given a binary mask of size H, W, where we have n pixels that are 1 and n > max_pixels,
+    randomly select max_pixels pixels to keep and set the rest to 0.
+    """
+    n = mask.sum().item()
+    if n <= max_pixels:
+        return mask
+    mask = mask.clone()
+    mask_flat = mask.view(-1)
+    mask_indices = torch.nonzero(mask_flat).flatten()
+    indices_to_keep = torch.randperm(n)[:max_pixels]
+    mask_indices_to_keep = mask_indices[indices_to_keep]
+    mask_flat[:] = 0
+    mask_flat[mask_indices_to_keep] = 1
+    return mask
+
+
 def PILtoTorch(pil_image, resolution):
     resized_image_PIL = pil_image.resize(resolution)
     resized_image = torch.from_numpy(np.array(resized_image_PIL)) / 255.0

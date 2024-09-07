@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 
 from .gaussian_splatting.gui import gui_utils
 from .gaussian_splatting.eval_utils import EvaluatePacket
+from .gaussian_splatting.utils.general_utils import random_subsample_mask
 from .gaussian_splatting.gaussian_renderer import render
 from .gaussian_splatting.scene.gaussian_model import GaussianModel
 from .gaussian_splatting.camera_utils import Camera
@@ -121,6 +122,7 @@ class GaussianMapper(object):
         self.projection_matrix = None
 
         self.n_optimized = {}  # Keep track how many times a keyframe was optimized
+        self.last_frame_loss = {}  # Keep track of the last loss for each frame
         # Memoize the mapping of Gaussian indices to video indices
         # (this maps cam.uid -> position in video buffer)
         # Since we only store keyframes inside the video buffers, we reassign the mapping ones we add non-keyframes cameras during refinement
@@ -215,6 +217,10 @@ class GaussianMapper(object):
             if cam.uid not in self.cam2buffer:
                 self.cam2buffer[cam.uid] = cam.uid
                 self.buffer2cam[cam.uid] = cam.uid
+
+            if cam.uid not in self.n_optimized:
+                self.n_optimized[cam.uid] = 0
+
             self.new_cameras.append(cam)
 
     def get_pose_optimizer(self, frames: List) -> torch.optim.Optimizer:
@@ -416,71 +422,44 @@ class GaussianMapper(object):
     def map_refinement(self) -> None:
         """Refine the map with color only optimization. Instead of going over last frames, we always select random frames from the whole map."""
 
-        def select_frames(
-            random_frames: Optional[float] = None,
+        def draw_random_batch(
+            kf_cams: List[Camera],
+            batch_size: int = 16,
+            weights_kf: Optional[List[float]] = None,
+            nonkf_cams: Optional[List[Camera]] = None,
             kf_always: Optional[float] = None,
-            importance_weights: Optional[List[float]] = None,
         ) -> List[Camera]:
-            """If we do random sampling, select a random subset of frames to optimize over. We can make sure that at least kf_always %
-            of that subset are keyframes, when we have a mix of keyframes and non-keyframes.
-            If random_frames is None, then we simply select all frames that are in self.cameras.
+            """Draw a random mini batch. If only keyframes are passed, we draw a random batch from them.
+            If importance weights are provided, we assign a higher probability to certain keyframes to be drawn.
+
+            If both key- and nonkey-frames are provided, we draw a random batch from all frames. Since usually only the keyframes
+            have an attached depth map, you may want to have a certain percentage of keyframes in the batch at all times.
             """
-            has_nonkf = len(self.cameras) != len(self.cam2buffer)  # Check if we added non-keyframes
-            if kf_always == 0.0:
-                kf_always = None
 
-            kf_cams, non_kf_cams = [], []
-            for cam in self.cameras:
-                if cam.uid in self.cam2buffer:
-                    kf_cams.append(cam)
+            def draw_frames(cams, n_samples, weights: Optional[List[float]] = None):
+                if weights is not None:
+                    idx = list(WeightedRandomSampler(weights, n_samples, replacement=False))
                 else:
-                    non_kf_cams.append(cam)
+                    idx = np.random.choice(len(cams), n_samples, replace=False)
+                return [cams[i] for i in idx]
 
-            # Only select a subset of all the frames during refinement for faster optimization
-            if random_frames is not None:
-                n_refine = int(len(self.cameras) * random_frames)
-                if kf_always is not None and has_nonkf:
-                    n_kf = int(len(kf_cams) * kf_always)  # Min. number of keyframes
+            if nonkf_cams is None:  # We only draw keyframes
+                n_kf = batch_size
+                batch = draw_frames(kf_cams, n_kf, weights=weights_kf)
+            elif kf_always is not None:  # We draw a fixed ratio of keyframes and non-keyframes
+                n_kf = int(batch_size * kf_always)
+                n_else = batch_size - n_kf
+                keyframes = draw_frames(kf_cams, n_kf, weights=weights_kf)
+                others = draw_frames(nonkf_cams, n_else)
+                batch = keyframes + others
+            else:  # We draw uniformly from all frames
+                if weights_kf is not None:
+                    print(
+                        "Warning. Importance sampling is ignored when we sample from all frames! Define a min. number of keyframes per batch!"
+                    )
+                batch = draw_frames(kf_cams + nonkf_cams, batch_size)
 
-            # Importance sampling is only implemented for keyframes, because we dont want to do a full render of the whole video in the beginning
-            if importance_weights is not None:
-                if has_nonkf:
-                    to_refine_kf = list(WeightedRandomSampler(importance_weights, len(kf_cams), replacement=True))
-                else:
-                    to_refine = list(WeightedRandomSampler(importance_weights, len(self.cameras), replacement=True))
-            else:
-                if has_nonkf:
-                    to_refine_kf = list(np.arange(len(kf_cams)))
-                else:
-                    to_refine = list(np.arange(len(self.cameras)))
-
-            ### Select the right frames depending on strategy
-            if not has_nonkf:  # Sample only from keyframes (self.cameras)
-                if random_frames is not None:
-                    rnd_idx = np.random.choice(len(to_refine), n_refine, replace=False)
-                    frame_idx = [to_refine[i] for i in rnd_idx]
-                    frames = [self.cameras[i] for i in frame_idx]
-                else:
-                    frames = [self.cameras[i] for i in to_refine]
-
-            else:  # Sample from both keyframes (kf_cams) and non-keyframes (non_kf_cams)
-                if random_frames is not None:
-                    if kf_always is None:  # Take random sample from all cameras
-                        rnd_idx = np.random.choice(len(self.cameras), n_refine, replace=False)
-                        frames = [self.cameras[i] for i in rnd_idx]
-                    else:  # NOTE chen: this will take importance sampling into account during sampling of the keyframes
-                        kf_idx_idx = np.random.choice(len(to_refine_kf), n_kf, replace=False)
-                        rnd_kf_idx = [to_refine_kf[i] for i in kf_idx_idx]  # Use already importance sampled indices
-                        kf = [kf_cams[i] for i in rnd_kf_idx]  # Always take n keyframes
-                        # Sample with uniform probability from all frames!
-                        rest_idx = np.random.choice(len(self.cameras), (n_refine - n_kf), replace=False)
-                        rest = [self.cameras[i] for i in rest_idx]
-                        frames = kf + rest
-                else:
-                    kf = kf_cams[to_refine_kf]  # Take importance sampled keyframes
-                    frames = kf + non_kf_cams  # Take all non-keyframes as well
-
-            return frames
+            return batch
 
         @torch.no_grad()
         def maybe_fill_holes(render_pkg, view_id: int, size_hole: int = 100, max_mem: float = 0.95) -> bool:
@@ -504,40 +483,29 @@ class GaussianMapper(object):
                 has_hole = False
             return has_hole
 
-        def single_pass_over_all_for_importance_weights(
-            kf_cams: List[Camera], batch_size: int = 16, lr_factor: float = 1.0
-        ):
-            """Run a single forward pass over all keyframes to gather importance weights.
+        def importance_weights_from_single_pass(cams: List[Camera], batch_size: int = 16):
+            """Run a single forward pass over all frames to gather importance weights.
             Since we need to run over a potential large batch of all frames, we use mini batches.
             This whole operation consumes much time, so we still backpropagate the loss and optimize the Gaussians,
-            even though this does not return the "true" importance weights.
+            even though this does not return the "true" importance weights at timestep 0.
             """
             loss, weights = 0.0, []
-            for i, view in tqdm(enumerate(kf_cams)):
-                loss_i, render_pkg = self.render_compare(view)
-                has_holes = maybe_fill_holes(render_pkg, view.uid, size_hole=100)
+            for i, view in tqdm(enumerate(cams)):
+                loss_i, _ = self.render_compare(view)
                 loss += loss_i
-                # We need to detach loss_i and copy, so the computation graph does not grow too large!
-                if has_holes:
-                    weights.append(2 * loss_i.detach().clone().item())  # Give higher weight to frames with holes
-                else:
-                    weights.append(loss_i.detach().clone().item())
+                weights.append(loss_i.detach().clone().item())
 
                 # Keep memory in check by only backpropagating in batches
                 if i % batch_size == 0:
                     self.gaussians.check_nans()  # NOTE chen: this can happen we have zero depth and an inconvenient pose
 
-                    loss = loss / batch_size  # Average over batch
-                    # Scale loss according to batch size, so we have a good learning rate
-                    scaled_loss = loss * np.sqrt(batch_size)
                     # Punish anisotropic Gaussians
                     scaling = self.gaussians.get_scaling
                     isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-                    scaled_loss += self.loss_params.beta1 * isotropic_loss.mean()
-                    scaled_loss = scaled_loss * lr_factor  # Scale loss with lr_factor
+                    loss += self.loss_params.beta1 * isotropic_loss.mean()
                     # Backpropagate through batch
                     self.gaussians.check_nans()  # Sanity check to avoid invalid Gaussians (e.g. from 0 depths)
-                    scaled_loss.backward()
+                    loss.backward()
                     # Make step
                     self.gaussians.optimizer.step()
                     self.gaussians.optimizer.zero_grad()
@@ -548,25 +516,12 @@ class GaussianMapper(object):
 
             return weights
 
-        # TODO clean up and make kwargs
-        random_frames = self.refine_params.random_subset
-        kf_always = self.refine_params.keyframes_at_least
-        importance_sampling = self.refine_params.w_importance_sampling
-        batch_size = self.refine_params.bs
-        num_iters = self.refine_params.iters
-        lr_factor = self.refine_params.lr_factor
-
-        # Warnings for misconfiguration
-        if random_frames is None and kf_always is not None:
-            self.info("Warning. If we dont do random sampling, it does not make sense to set kf_always ...")
+        kf_cams = [cam for cam in self.cameras if cam.uid in self.cam2buffer]
         has_nonkf = len(self.cameras) != len(self.cam2buffer)  # Check if we added non-keyframes
-        if importance_sampling and random_frames is not None and kf_always is None and has_nonkf:
-            self.info(
-                """Warning. Importance sampling is implemented for keyframes only! 
-                You have not selected a fixed percentage of keyframes in your random subsets, 
-                therefore we will uniformly sample from all frames!
-                Will ignore the importance weights ..."""
-            )
+        if has_nonkf:
+            non_kf_cams = [cam for cam in self.cameras if cam.uid not in self.cam2buffer]
+        else:
+            non_kf_cams = None
 
         # Update GUI
         if self.use_gui:
@@ -576,83 +531,65 @@ class GaussianMapper(object):
                 )
             )
 
-        # Optimize over a random subset of all frames
-        if random_frames is not None:
-            n_frames = int(len(self.cameras) * random_frames)
-            self.info(
-                f"Info. Going over {n_frames} random frames instead of {len(self.cameras)} of frames for optimization ..."
-            )
-        else:
-            n_frames = len(self.cameras)
-        if n_frames > batch_size:
-            n_batches = math.ceil(n_frames / batch_size)
-            self.info(
-                f"Warning. {n_frames} Frames is too many! Optimizing over {n_batches} chunks of frames with batch size {batch_size} ..."
-            )
-
         # Gather importance weights by computing the loss over all frames first
         # Because we dont want to waste too much compute, we backpropagate over this large accumulated batch
-        if importance_sampling:
-            # NOTE chen: we only compute the importance weights for keyframe cams to save compute
-            kf_cams = [cam for cam in self.cameras if cam.uid in self.cam2buffer]
+        if self.refine_params.w_importance_sampling:
             self.info("Gathering importance weights for refinement ...")
-            weights = single_pass_over_all_for_importance_weights(kf_cams, batch_size=batch_size, lr_factor=lr_factor)
-            self.gaussians.update_learning_rate(0)
-            num_iters -= 1  # Dont do the first iteration again
+            self.opt_params.position_lr_init /= 10  # We use a constant lower learning rate for all frames
+            self.gaussians.training_setup(self.opt_params)
+            weights = importance_weights_from_single_pass(kf_cams, batch_size=self.refine_params.bs)
+            self.opt_params.position_lr_init *= 10
         else:
             weights = None
 
         ### Refinement loop
-        for iter in tqdm(range(num_iters), desc=colored("Gaussian Refinement", "magenta"), colour="magenta"):
-            # Use a selection of frames instead of always going over all frames to save compute
-            frames = select_frames(random_frames=random_frames, kf_always=kf_always, importance_weights=weights)
+        # Reset scheduler and optimizer for refinement
+        self.opt_params.position_lr_max_steps = self.refine_params.batch_iters
+        # Reduce the learning rate by wanted factor for refinement since we already have a good map
+        self.opt_params.position_lr_init *= self.refine_params.lr_factor
+        self.opt_params.position_lr_final *= self.refine_params.lr_factor
+        self.gaussians.training_setup(self.opt_params)
 
+        for iter1 in tqdm(
+            range(self.refine_params.iters), desc=colored("Gaussian Refinement", "magenta"), colour="magenta"
+        ):
             # Decide whether to densify / prune this iteration
             do_densify = (
-                (iter + 1) % self.refine_params.prune_densify_every == 0
-            ) and iter <= self.refine_params.densify_until
+                (iter1 + 1) % self.refine_params.prune_densify_every == 0
+            ) and iter1 <= self.refine_params.densify_until
             opacity_densify = self.refine_params.densify.use_opacity
 
-            if len(frames) > batch_size:
-                batches = [frames[i : i + batch_size] for i in range(0, len(frames), batch_size)]
-                loss = 0  # Accumulate logging loss over all batches
-                for batch in batches:
-                    contains_non_kf = any([cam.uid not in self.cam2buffer for cam in batch])
-                    if contains_non_kf:
-                        # Dont densify non-keyframes with potentially poor depth initialization
-                        opacity_densify = False
-
-                    loss += self.mapping_step(
-                        iter,
-                        batch,
-                        self.refine_params.densify.vanilla,
-                        prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
-                        opacity_densify=opacity_densify,  # Densify based on low opacity regions
-                        optimize_poses=self.refine_params.optimize_poses,
-                    )
-                loss = loss / len(batches)  # Take mean
-            else:
-                contains_non_kf = any([cam.uid not in self.cam2buffer for cam in frames])
-                if contains_non_kf:
-                    opacity_densify = False
+            ### Optimize a random batch from all frames
+            batch = draw_random_batch(
+                kf_cams,
+                self.refine_params.bs,
+                weights_kf=weights,
+                nonkf_cams=non_kf_cams,
+                kf_always=self.refine_params.kf_at_least,
+            )
+            # Optimize this batch for a few iterations, so newly added Gaussians can converge
+            for iter2 in tqdm(
+                range(self.refine_params.batch_iters), desc=colored("Batch Optimization", "magenta"), colour="magenta"
+            ):
                 loss = self.mapping_step(
-                    iter,
-                    frames,
+                    iter2,
+                    batch,
                     self.refine_params.densify.vanilla,
                     prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
                     opacity_densify=opacity_densify,  # Densify based on low opacity regions
                     optimize_poses=self.refine_params.optimize_poses,
                 )
-
-            print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss}", "cyan"))
-            self.loss_list.append(loss)
-
-            if self.use_gui:
-                self.q_main2vis.put_nowait(
-                    gui_utils.GaussianPacket(
-                        gaussians=clone_obj(self.gaussians), keyframes=[frame.detach() for frame in frames]
+                do_densify, opacity_densify = False, False
+                print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss}", "cyan"))
+                self.loss_list.append(loss)
+                if self.use_gui:
+                    self.q_main2vis.put_nowait(
+                        gui_utils.GaussianPacket(
+                            gaussians=clone_obj(self.gaussians), keyframes=[frame.detach() for frame in batch]
+                        )
                     )
-                )
+
+            del batch
 
     def get_mapping_update(
         self,
@@ -760,9 +697,6 @@ class GaussianMapper(object):
                 rejected.append(view.uid)
                 # self.info(f"Skipping view {view.uid} during Feedback as it has too low coverage with video buffer ...")
 
-            torch.cuda.empty_cache()
-            gc.collect()
-
         if not feedback_disps:
             depths = []
         if not feedback_poses:
@@ -807,7 +741,6 @@ class GaussianMapper(object):
         prune_densify: bool = False,
         opacity_densify: bool = False,
         optimize_poses: bool = False,
-        lr_factor: float = 1.0,
     ) -> float:
         """Takes the list of selected keyframes to optimize and performs one step of the mapping optimization."""
         # Sanity check when we dont have anything to optimize
@@ -826,17 +759,14 @@ class GaussianMapper(object):
         visibility_filter_acm, viewspace_point_tensor_acm = [], []
         for view in frames:
 
-            # Keep track of how often this keyframe was already optimized
-            self.gaussians.increment_n_opt_counter(view.uid)
-            if view.uid in self.n_optimized:
-                self.n_optimized[view.uid] += 1
-            else:
-                self.n_optimized[view.uid] = 1
-
             current_loss, render_pkg = self.render_compare(view)
             if render_pkg is None:
                 self.info(f"Skipping view {view.uid} as no gaussians are present ...")
                 continue
+
+            # Keep track of how often the Gaussians were already optimized
+            self.gaussians.increment_n_opt_counter(visibility=render_pkg["visibility_filter"])
+            self.n_optimized[view.uid] += 1
 
             # Accumulate for after loss backpropagation
             opacity_acm.append((view, render_pkg["opacity"]))
@@ -844,10 +774,11 @@ class GaussianMapper(object):
             viewspace_point_tensor_acm.append(render_pkg["viewspace_points"])
             radii_acm.append(render_pkg["radii"])
 
+            self.last_frame_loss[view.uid] = current_loss.item()
             loss += current_loss
 
         if self.update_params.grad_scaler.do_scale:
-            # Update scaling function with current n_optimized
+            # Scale gradients dependent on how often a Gaussian was already optimized in the past
             grad_hooks = self.gaussians.set_scale_grads(
                 self.update_params.grad_scaler.min_scale, self.update_params.grad_scaler.decay_rate
             )
@@ -855,24 +786,17 @@ class GaussianMapper(object):
         # Scale the loss with the number of frames so we adjust the learning rate dependent on batch size,
         # (naive adding for huge batches would result on bigger updates)
         # NOTE chen: MonoGS scales their loss with len(frames)
-        # NOTE chen: this is only a valid strategy for standard optimizers
-        # if the optimizer has a regularization term (e.g. weight decay), then this changes the trade-off between objective and regularizor!
+        # NOTE we get better results when not scaling, getting good performance really requires tuning batch size and learning rate together
         avg_loss = loss / len(frames)  # Average over batch
-        # scaled_loss = avg_loss * np.sqrt(
-        #     len(frames)
-        # )  # see https://stackoverflow.com/questions/53033556/how-should-the-learning-rate-change-as-the-batch-size-change
-        scaled_loss = avg_loss * len(frames)
 
         # Regularizor: Punish anisotropic Gaussians
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-        scaled_loss += self.loss_params.beta1 * isotropic_loss.mean()
-        # HACK adjust learning rate manually by scaling the loss instead of changing every optimizer
-        scaled_loss = scaled_loss * lr_factor
+        loss += self.loss_params.beta1 * isotropic_loss.mean()
 
         # NOTE chen: this can happen we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
-        scaled_loss.backward()
+        loss.backward()
 
         ### Maybe Densify and Prune before update
         with torch.no_grad():
@@ -895,7 +819,10 @@ class GaussianMapper(object):
                 ng_before = len(self.gaussians)
                 for view, opacity in opacity_acm:
                     mask = opacity.squeeze() < self.update_params.densify.opacity.th
-                    self.gaussians.densify_from_mask(view, mask)
+                    # if this mask has too many pixels, then subsample to acceptable lower number
+                    if mask.sum() > self.update_params.densify.opacity.max_pixels:
+                        mask = random_subsample_mask(mask, self.update_params.densify.opacity.max_pixels)
+                        self.gaussians.densify_from_mask(view, mask, depthmap=view.depth_prior.cpu().numpy())
                 if (len(self.gaussians) - ng_before) > 0:
                     self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity")
 
@@ -904,22 +831,28 @@ class GaussianMapper(object):
         self.gaussians.optimizer.zero_grad()
         self.gaussians.update_learning_rate(iter)
 
+        # Delete lists of tensors
+        del opacity_acm
+        del radii_acm
+        del visibility_filter_acm
+        del viewspace_point_tensor_acm
+
         if self.update_params.grad_scaler.do_scale:
             for hook in grad_hooks:
                 hook.remove()  # Remove again for sanity, the hook needs to be set every iteration again
 
         if optimize_poses:
             pose_optimizer.step()
-            self.maybe_clean_pose_update(frames)
+            self.maybe_clean_pose_update(frames)  # Sanitize in case of nan's
             pose_optimizer.zero_grad()
             # Actually make optimizer step
             for view in frames:
-                # Keep first pose fixed!
-                if view.uid == 0:
+                if view.uid == 0:  # Keep first pose always fixed!
                     continue
                 update_pose(view)
+            del pose_optimizer  # We define a new one every time anyways
 
-        return avg_loss.item()
+        return avg_loss.detach().item()
 
     def covisibility_pruning(
         self,
@@ -975,14 +908,45 @@ class GaussianMapper(object):
         end = time.time()
         self.info(f"({mode}) Covisibility pruning took {(end - start):.2f}s, pruned: {to_prune.sum()} Gaussians")
 
-    def select_keyframes(self):
-        """Select the last n1 frames and n2 other random frames from all."""
+    def select_keyframes(self, random_weights: Optional[str] = None):
+        """Select the last n1 frames and n2 other random frames from all.
+        If with_random_weights is set, we assign a higher sampling probability to keyframes, that have not yet been
+        optimized a lot. This is measured by self.n_optimized.
+
+        NOTE this method assumes self.cameras to contain sorted keyframes with increasing uid order.
+
+        random_weights:
+            If set to "visited", we assign higher probability to frames that have been visited less often.
+            If set
+        """
         if len(self.cameras) <= self.n_last_frames + self.n_rand_frames:
             keyframes = self.cameras
             keyframes_idx = np.arange(len(self.cameras))
         else:
-            keyframes_idx = np.random.choice(len(self.cameras) - self.n_last_frames, self.n_rand_frames, replace=False)
-            keyframes = self.cameras[-self.n_last_frames :] + [self.cameras[i] for i in keyframes_idx]
+            last_window = self.cameras[-self.n_last_frames :]
+            window_idx = np.arange(len(self.cameras))[-self.n_last_frames :]
+            if self.n_rand_frames > 0:
+                if random_weights == "visited":
+                    to_draw = np.arange(len(self.cameras) - self.n_last_frames)  # Indices we can draw from
+                    weights = [self.n_optimized[idx] / self.mapping_iters + 1 for idx in to_draw]
+                    weights = [1 / w for w in weights]  # Invert to get higher probability for less visited frames
+                    random_idx = list(WeightedRandomSampler(weights, self.n_rand_frames, replacement=False))
+                    random_idx = to_draw[random_idx]
+                elif random_weights == "loss":
+                    to_draw = np.arange(len(self.cameras) - self.n_last_frames)  # Indices we can draw from
+                    weights = [self.last_frame_loss[idx] for idx in to_draw]
+                    random_idx = list(WeightedRandomSampler(weights, self.n_rand_frames, replacement=False))
+                    random_idx = to_draw[random_idx]
+                else:
+                    random_idx = np.random.choice(
+                        len(self.cameras) - self.n_last_frames, self.n_rand_frames, replace=False
+                    )
+                random_frames = [self.cameras[i] for i in random_idx]
+                keyframes = last_window + random_frames
+                keyframes_idx = np.concatenate([window_idx, random_idx])
+            else:
+                keyframes = last_window
+                keyframes_idx = window_idx
         return keyframes, keyframes_idx
 
     def add_nonkeyframe_cameras(self):
@@ -1021,6 +985,10 @@ class GaussianMapper(object):
         self.cameras += non_kf_cams  # Add to set of cameras
         # Reorder according to global video timestamp uid
         self.cameras = sorted(self.cameras, key=lambda x: x.uid)
+        # Add non-keyframes to dictionary
+        for cam in self.cameras:
+            if not cam.uid in self.n_optimized:
+                self.n_optimized[cam.uid] = 0
 
     def _last_call(self, mapping_queue: mp.Queue, received_item: mp.Event):
         """We already build up the map based on the SLAM system and finetuned over it.
@@ -1148,7 +1116,7 @@ class GaussianMapper(object):
             )
         )
 
-    def _update(self, delay_to_tracking=True, iters: int = 10):
+    def _update(self, delay_to_tracking=True, iters: int = 10, release_cache: bool = False):
         """Update our rendered map by:
         i) Pull a filtered update from the sparser SLAM map
         ii) Add new Gaussians based on new views
@@ -1186,7 +1154,9 @@ class GaussianMapper(object):
             do_densify = (
                 iter % self.update_params.prune_densify_every == 0 and iter < self.update_params.prune_densify_until
             )
-            frames = self.select_keyframes()[0] + self.new_cameras
+            frames = (
+                self.select_keyframes(random_weights=self.update_params.random_selection_weights)[0] + self.new_cameras
+            )
             loss = self.mapping_step(
                 iter,
                 frames,
@@ -1242,8 +1212,9 @@ class GaussianMapper(object):
                     self.save_render(cam, f"{self.output}/intermediate_renders/temp/{cam.uid}.png")
 
         # Free memory each iteration NOTE: this slows it down a bit
-        torch.cuda.empty_cache()
-        gc.collect()
+        if release_cache:
+            torch.cuda.empty_cache()
+            gc.collect()
 
         self.iteration_info.append(len(self.new_cameras))
         # Keep track of added cameras
