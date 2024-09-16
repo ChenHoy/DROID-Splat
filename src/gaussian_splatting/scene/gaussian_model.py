@@ -58,11 +58,11 @@ class GradientScaler(object):
         Returns:
             The scaling factor as a Tensor of floats.
         """
-        decay = torch.exp(-self.decay_rate * (counts - 1))
+        decay = torch.exp(-self.decay_rate * counts)
         scale = self.min_scale + (1 - self.min_scale) * decay
         return scale
 
-    def __call__(self, grad):
+    def __call__(self, grad: torch.Tensor) -> torch.Tensor:
         # Apply scaling factor to gradients during backward pass
         assert len(grad) == len(
             self.counts
@@ -79,6 +79,27 @@ class GradientScaler(object):
             raise Exception(f"Gradient shape {grad.shape} not supported! Use either 1D, 2D or 3D tensors.")
 
 
+class InverseScaler(GradientScaler):
+    def __init__(self, min_scale: float = 0.1, decay_rate: float = 0.01, counts: torch.Tensor = None):
+        super().__init__(min_scale, decay_rate, counts)
+
+    def __call__(self, grad: torch.Tensor) -> torch.Tensor:
+        # Apply scaling factor to gradients during backward pass
+        assert len(grad) == len(
+            self.counts
+        ), f"Gradient and count shape mismatch! Expected shape {grad.shape}, got {self.counts.shape}"
+        scaling = self.get_scale(self.counts)
+
+        if grad.ndim == 1:
+            return grad / scaling
+        elif grad.ndim == 2:
+            return grad / scaling[:, None]
+        elif grad.ndim == 3:
+            return grad / scaling[:, None, None]
+        else:
+            raise Exception(f"Gradient shape {grad.shape} not supported! Use either 1D, 2D or 3D tensors.")
+
+
 def scale_gradients(variable: torch.nn.Parameter, scale_fn):
     """Attach a hook, so the gradients are automatically scaled by the GradientScaler for each backward pass."""
 
@@ -87,6 +108,17 @@ def scale_gradients(variable: torch.nn.Parameter, scale_fn):
 
     h = variable.register_post_accumulate_grad_hook(hook)
     return h
+
+
+def unscale_gradients(variable: torch.nn.Parameter, inverse_fn) -> torch.Tensor:
+    """Because we use the gradients when densifying and pruning Gaussians, we might want to use the
+    original gradients, else we easily get stuck with a fixed number of Gaussians and dont densify anymore.
+
+    The densification call lies between loss.backward() and optimizer.step()! Therefore we need to unscale the gradients
+    after computation in backward(), but leave them in place for the following optimizer.step() scall.
+    For this reason we dont change the gradient in place, but return the unscaled value for the densification function.
+    """
+    return inverse_fn(variable.grad)
 
 
 class GaussianModel:
@@ -382,7 +414,7 @@ class GaussianModel:
                         depth_raw = np.ones(rgb_raw.shape[:2]) * neighbors_scale
                     else:
                         depth_raw = (
-                            np.ones_like(rgb_raw.shape[:2])
+                            np.ones(rgb_raw.shape[:2])
                             + (np.random.randn(rgb_raw.shape[0], rgb_raw.shape[1]) - 0.5) * 0.05
                         ) * scale
 
@@ -576,7 +608,7 @@ class GaussianModel:
         # NOTE these operations create a malloc error with wrong pytorch version
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()]
         new_n_obs = self.n_obs[selected_pts_mask.cpu()]
-        # Divide by 100, so that cloned points move faster when we use the grad scaler
+        # Divide by 1000, so that cloned points move faster when we use the grad scaler
         new_n_opt = self.n_optimized[selected_pts_mask.cpu()] / 100
 
         self.densification_postfix(
@@ -617,10 +649,15 @@ class GaussianModel:
         self.prune_points(prune_mask)
         self.info(f"Pruning & densification added {self.get_xyz.shape[0] - n_g} gaussians")
 
-    def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        self.xyz_gradient_accum[update_filter] += torch.norm(
-            viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
-        )
+    def add_densification_stats(self, viewspace_point_tensor, update_filter, scaling_fn=None):
+        if scaling_fn is not None:
+            self.xyz_gradient_accum[update_filter] += torch.norm(
+                scaling_fn(viewspace_point_tensor.grad)[update_filter, :2], dim=-1, keepdim=True
+            )
+        else:
+            self.xyz_gradient_accum[update_filter] += torch.norm(
+                viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
+            )
         self.denom[update_filter] += 1
 
     def save_ply(self, path):
