@@ -13,6 +13,28 @@ This is a deep-learning-based dense visual SLAM framework that achieves **real-t
 - Dense differentiable Rendering with 3D Gaussian Splatting
 
 - We also support the optimization kernel from DROID-Calib, which supports arbitrary camera models and optimizes the camera intrinsics on top of the map and pose graph.
+## :memo: Code
+
+You can create an anaconda environment called `droidsplat`. For linux, you need to install **libopenexr-dev** before creating the environment.
+```bash
+
+git clone --recursive https://github.com/ChenHoy/DROID-Splat.git
+
+sudo apt-get install libopenexr-dev
+    
+conda env create -f environment.yaml
+conda activate droidsplat
+
+pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
+pip install evo --upgrade --no-binary evo
+
+python setup.py install
+```
+
+### Replica
+Download the data from [Google Drive](https://drive.google.com/drive/folders/1RJr38jvmuIV717PCEcBkzV2qkqUua-Fx?usp=sharing)
+
+### TUM-RGBD
 
 # Acknowledgments
 - **DROID-SLAM: Deep Visual SLAM for Monocular, Stereo, and RGB-D Cameras** [Neurips 2021](https://github.com/princeton-vl/DROID-SLAM)
@@ -85,29 +107,3 @@ We would like to acknowledge other works, who had the same idea and apparently b
   year={2024}
 }
 ```
-
-## :memo: Code
-
-You can create an anaconda environment called `droidsplat`. For linux, you need to install **libopenexr-dev** before creating the environment.
-```bash
-
-git clone --recursive https://github.com/ChenHoy/DROID-Splat.git
-
-sudo apt-get install libopenexr-dev
-    
-conda env create -f environment.yaml
-conda activate droidsplat
-
-pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
-pip install evo --upgrade --no-binary evo
-
-python setup.py install
-```
-
-### Replica
-Download the data from [Google Drive](https://drive.google.com/drive/folders/1RJr38jvmuIV717PCEcBkzV2qkqUua-Fx?usp=sharing)
-
-### TUM-RGBD
-
-# Acknowledgment
-We adapted some code from other awesome repositories including [GO-SLAM](https://github.com/youmi-zym/GO-SLAM), [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM), [DROID-Calib](https://github.com/boschresearch/droidcalib), [MonoGS](https://github.com/muskie82/MonoGS) and [Glorie-SLAM](https://github.com/zhangganlin/GlORIE-SLAM)
