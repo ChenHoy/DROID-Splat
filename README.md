@@ -1,16 +1,10 @@
 <p align="center">
   <a href="">
-    <img src="droidsplat.png" width="100%">
+    <img src="droidsplat.png" width="60%">
   </a>
 </p>
 <h1 align="center"> DROID-Splat </h1> 
 Combining dense end-to-end SLAM with 3D Gaussian Splatting.
-
-  
-- "**GO-SLAM: Global Optimization for Consistent 3D Instant Reconstruction, Zhang et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
-- "**Deep geometry-aware camera self-calibration from video, Hagemann et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
-- "**Gaussian Splatting SLAM, Matsuki et al**",  [CVPR 2024](https://cvpr.thecvf.com/)
-
 
 ## :clapper: Introduction
 This is a deep-learning-based dense visual SLAM framework that achieves **real-time global optimization of poses and 3D reconstruction**. This is achieved by the following: 
@@ -19,6 +13,16 @@ This is a deep-learning-based dense visual SLAM framework that achieves **real-t
 - Dense differentiable Rendering with 3D Gaussian Splatting
 
 - We also support the optimization kernel from DROID-Calib, which supports arbitrary camera models and optimizes the camera intrinsics on top of the map and pose graph.
+
+# Acknowledgments
+- **DROID-SLAM: Deep Visual SLAM for Monocular, Stereo, and RGB-D Cameras** [Neurips 2021](https://github.com/princeton-vl/DROID-SLAM)
+- "**GO-SLAM: Global Optimization for Consistent 3D Instant Reconstruction, Zhang et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
+- "**Deep geometry-aware camera self-calibration from video, Hagemann et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
+- "**Gaussian Splatting SLAM, Matsuki et al**",  [CVPR 2024](https://cvpr.thecvf.com/)
+- **GLORIE-SLAM: Globally Optimized RGB-only Implicit Encoding Point Cloud SLAM**, [Glorie-SLAM](https://github.com/zhangganlin/GlORIE-SLAM)
+
+# Concurrent Work
+We would like to acknowledge other works, who had the same idea and apparently blindsided us. Concurrent work [Splat-SLAM](https://github.com/eriksandstroem/Splat-SLAM) is a similar system, that combines DROID-SLAM and Gaussian Splatting. We would like to note, that we released this code earlier with its entire history to proof that we did not intend to copy their work. 
 
 # References
 ```bibtex
