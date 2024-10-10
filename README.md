@@ -107,5 +107,7 @@ python setup.py install
 ### Replica
 Download the data from [Google Drive](https://drive.google.com/drive/folders/1RJr38jvmuIV717PCEcBkzV2qkqUua-Fx?usp=sharing)
 
+### TUM-RGBD
+
 # Acknowledgment
 We adapted some code from other awesome repositories including [GO-SLAM](https://github.com/youmi-zym/GO-SLAM), [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM), [DROID-Calib](https://github.com/boschresearch/droidcalib), [MonoGS](https://github.com/muskie82/MonoGS) and [Glorie-SLAM](https://github.com/zhangganlin/GlORIE-SLAM)
