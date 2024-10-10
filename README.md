@@ -1,6 +1,8 @@
-
-<h1 align="center"> [DROID-Splat](droidsplat.png) </h1> 
-
+<p align="center">
+  <a href="">
+    <img src=".droidsplat.png" alt="Logo" width="100%">
+  </a>
+</p>
 <h1 align="center"> DROID-Splat </h1> 
 Combining dense end-to-end SLAM with 3D Gaussian Splatting.
 
