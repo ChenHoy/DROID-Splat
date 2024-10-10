@@ -1,17 +1,21 @@
 
 
-<h1 align="center"> Our Fork of: GO-SLAM together with DROID-Calib </h1> 
+<h1 align="center"> DROID-Splat </h1> 
+Combining dense end-to-end SLAM with 3D Gaussian Splatting.
 
-
-This repository borrows from the following work  
+  
 - "**GO-SLAM: Global Optimization for Consistent 3D Instant Reconstruction, Zhang et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
 - "**Deep geometry-aware camera self-calibration from video, Hagemann et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
 - "**Gaussian Splatting SLAM, Matsuki et al**",  [CVPR 2024](https://cvpr.thecvf.com/)
 
 
 ## :clapper: Introduction
+This is a deep-learning-based dense visual SLAM framework that achieves **real-time global optimization of poses and 3D reconstruction**. This is achieved by the following: 
+- SotA Tracking from DROID-SLAM
+- Integration of monocular depth estimation priors 
+- Dense differentiable Rendering with 3D Gaussian Splatting
 
-This is a deep-learning-based dense visual SLAM framework that achieves **real-time global optimization of poses and 3D reconstruction**. This is achieved by adding a loop closure mechanism using the Co-Visibility matrix to the DROID-SLAM framework. On top of this, we add the full optimization kernel from DROID-Calib, which supports arbitrary camera models and optimizes the camera intrinsics on top of the map and pose graph.
+- We also support the optimization kernel from DROID-Calib, which supports arbitrary camera models and optimizes the camera intrinsics on top of the map and pose graph.
 
 # References
 ```bibtex
