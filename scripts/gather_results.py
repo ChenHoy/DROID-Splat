@@ -55,6 +55,9 @@ def main(args):
 
     # Go through each experiment subfolder
     for subfolder in data_path.iterdir():
+        if not subfolder.is_dir():
+            continue
+
         eval_dir = subfolder / "evaluation"
         tracking_dir = eval_dir / "odometry"
         tracking_all = read_json(tracking_dir / "all" / "stats_final.json")
@@ -92,12 +95,25 @@ def main(args):
             print(f"Median: {pd.Series(statistics[eval_kind][key]).median()}")
             print(f"Std: {pd.Series(statistics[eval_kind][key]).std()}\n")
 
+    main_print(f"Median Summary")
+    metric_print("tracking_kf tracking_all PSNR_kf LPIPS_kf L1_kf PSNR_all LPIPS_all L1_all", "green")
+    summary_str = [
+        pd.Series(statistics["tracking_kf"]["rmse"]).median(),
+        pd.Series(statistics["tracking_all"]["rmse"]).median(),
+        pd.Series(statistics["rendering_kf"]["psnr"]).median(),
+        pd.Series(statistics["rendering_kf"]["lpips"]).median(),
+        pd.Series(statistics["rendering_kf"]["l1_depth"]).median(),
+        pd.Series(statistics["rendering_nkf"]["psnr"]).median(),
+        pd.Series(statistics["rendering_nkf"]["lpips"]).median(),
+        pd.Series(statistics["rendering_nkf"]["l1_depth"]).median(),
+    ]
+    metric_print(" ".join([str(round(x, 4)) for x in summary_str]), "green")
+
     # save results to csv
     for eval_kind in statistics.keys():
         df = pd.DataFrame(statistics[eval_kind])
         df = df.apply(pd.Series.explode)
         df.to_csv(data_path / f"{eval_kind}_results.csv", index=False)
-
 
 
 if __name__ == "__main__":
