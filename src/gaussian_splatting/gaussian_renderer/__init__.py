@@ -20,7 +20,6 @@ from diff_gaussian_rasterization import (
 )
 
 from ..scene.gaussian_model import GaussianModel
-from ..scene.dynamic_gaussian_model import DynamicGaussianModel
 from ..utils.sh_utils import eval_sh
 
 
