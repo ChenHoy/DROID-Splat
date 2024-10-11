@@ -13,7 +13,7 @@ dependencies:
   - pytorch=2.1
   - cudatoolkit
   - tensorboard
-  - pytorch3d==0.7.7 # This version is very important!
+    # - pytorch3d==0.7.7 # This version is very important!
   - scipy
   - opencv==4.9
   - tqdm
@@ -41,7 +41,7 @@ dependencies:
       # - glm
     - PyGLM # This substitutes glm
     - dask
-    #- faiss-gpu
+    - faiss-gpu
     - gdown
     - einops
     - plyfile
