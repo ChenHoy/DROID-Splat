@@ -32,7 +32,7 @@ from .gaussian_splatting.camera_utils import Camera
 from .gaussian_splatting import eval_utils
 from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
 from .gaussian_splatting.gui import gui_utils, slam_gui
-from .utils import clone_obj, get_all_queue, recursive_to
+from .utils import clone_obj, get_all_queue
 
 # A logger for this file
 log = logging.getLogger(__name__)
@@ -794,13 +794,9 @@ class SLAM:
             all frames of the whole video stream!"""
             tstamps = np.arange(len(est_w2c_all_matr)).tolist()
 
-            # est_c2w_kf_lie, est_w2c_kf_lie = est_c2w_all_lie[kf_ids], est_w2c_all_lie[kf_ids]
-            # est_w2c_kf_matr, est_c2w_kf_matr = est_w2c_all_matr[kf_ids], lie_to_matrix(est_c2w_kf_lie)
             # Take from video directly without interpolation optimization
             est_w2c_kf_lie = vid_w2c_kf_lie = self.video.poses[: self.video.counter.value]
             est_c2w_kf_lie = vid_c2w_kf_lie = SE3.InitFromVec(vid_w2c_kf_lie).inv().vec()
-            # vid_w2c_kf_matr, vid_c2w_kf_matr = lie_to_matrix(vid_w2c_kf_lie), lie_to_matrix(vid_c2w_kf_lie)
-
             kf_tstamps = kf_tstamps.tolist()
 
         else:
@@ -809,8 +805,6 @@ class SLAM:
             est_w2c_all, tstamps = self.traj_filler(stream, return_tstamps=True)
             est_c2w_all_lie = est_w2c_all.inv().vec().cpu()  # 7x1 Lie algebra
 
-            # NOTE the trajectory filler will create keyframe poses, that slightly deviate
-            # est_c2w_kf_lie = est_c2w_all_lie[kf_tstamps]
             # Take from video directly without interpolation optimization
             est_w2c_kf_lie = self.video.poses[: self.video.counter.value]
             est_c2w_kf_lie = SE3.InitFromVec(est_w2c_kf_lie).inv().vec()

@@ -31,7 +31,6 @@ def sys_print(msg, tag="GUI"):
 
 
 from ..scene.gaussian_model import GaussianModel
-from ..scene.dynamic_gaussian_model import DynamicGaussianModel
 
 
 class SLAM_GUI:
