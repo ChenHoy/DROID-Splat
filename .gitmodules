@@ -10,6 +10,10 @@
 	path = thirdparty/simple-knn
 	branch = main
 	url = https://github.com/camenduru/simple-knn.git
+[submodule "thirdparty/FRNN"]
+	path = thirdparty/FRNN
+	branch = main
+	url = https://github.com/lxxue/FRNN
 [submodule "thirdparty/diff-gaussian-rasterization-w-pose"]
 	path = thirdparty/diff-gaussian-rasterization-w-pose
 	branch = main
