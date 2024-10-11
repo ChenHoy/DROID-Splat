@@ -14,16 +14,16 @@
 	path = thirdparty/diff-gaussian-rasterization-w-pose
 	branch = main
 	url = https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose.git
-[submodule "ext/Depth-Anything"]
-	path = ext/Depth-Anything
+[submodule "thirdparty/Depth-Anything"]
+	path = thirdparty/Depth-Anything
 	branch = main
 	url = https://github.com/ChenHoy/Depth-Anything.git
-[submodule "ext/Zoedepth"]
-	path = ext/ZoeDepth
+[submodule "thirdparty/Zoedepth"]
+	path = thirdparty/ZoeDepth
 	branch = master
 	url = https://github.com/ChenHoy/ZoeDepth.git
-[submodule "ext/Metric3D"]
-	path = ext/Metric3D
+[submodule "thirdparty/Metric3D"]
+	path = thirdparty/Metric3D
 	branch = main
 	url = https://github.com/ChenHoy/Metric3D.git
 [submodule "thirdparty/diff-gaussian-rasterization"]
