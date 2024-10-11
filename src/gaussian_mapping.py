@@ -533,7 +533,7 @@ class GaussianMapper(object):
 
         # Gather importance weights by computing the loss over all frames first
         # Because we dont want to waste too much compute, we backpropagate over this large accumulated batch
-        if self.refine_params.w_importance_sampling:
+        if self.refine_params.sampling.weighted:
             self.info("Gathering importance weights for refinement ...")
             self.opt_params.position_lr_init /= 10  # We use a constant lower learning rate for all frames
             self.gaussians.training_setup(self.opt_params)
@@ -565,7 +565,7 @@ class GaussianMapper(object):
                 self.refine_params.bs,
                 weights_kf=weights,
                 nonkf_cams=non_kf_cams,
-                kf_always=self.refine_params.kf_at_least,
+                kf_always=self.refine_params.sampling.kf_at_least,
             )
             # Optimize this batch for a few iterations, so newly added Gaussians can converge
             for iter2 in tqdm(
@@ -1176,12 +1176,6 @@ class GaussianMapper(object):
             if self.update_params.pruning.use_covisibility:
                 # Gaussians should be visible in multiple frames
                 self.covisibility_pruning(n_last_frames=self.n_last_frames, **self.update_params.pruning.covisibility)
-                was_pruned = True
-            if self.update_params.pruning.use_floaters:
-                start = time.time()
-                floaters = self.gaussians.prune_floaters(**self.update_params.pruning.floaters)
-                end = time.time()
-                self.info(f"(Floater) pruning took {(end - start):.2f}s, pruned: {floaters.sum()} floaters")
                 was_pruned = True
 
         ### Feedback new state of map to Tracker
