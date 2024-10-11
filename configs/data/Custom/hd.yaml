@@ -1,0 +1,18 @@
+dataset: "folder"
+input_folder: /media/data/Heidelberg/moebius
+
+### original camera parameters
+cam:
+  H: 1080
+  W: 1920
+  H_out: 272 # 360
+  W_out: 568 # 640 
+  H_edge: 0
+  W_edge: 0 
+  # We calibrate the camera once in prgbd mode without any scale optimization, which roughly gets the right parameters
+  fx: 1816.2024 # heuristic: 1296.0
+  fy: 1812.0416 # heuristic: 1296.0
+  cx: 1028.512 # heuristic: 960
+  cy: 390.0984 # heuristic: 540
+  calibration_txt: ''
+  camera_model: "pinhole"

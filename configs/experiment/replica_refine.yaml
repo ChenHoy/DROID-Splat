@@ -1,0 +1,27 @@
+# @package _global_
+defaults:
+  - override /data: Replica/base
+  - override /tracking: base
+  - override /mapping: replica
+
+## Change the refinement parameters, so we refine the map after Tracking
+
+mapping:
+  # Offline Map Refinement for finetuning
+  refinement:
+    optimize_poses: False
+    use_non_keyframes: False # Use RGB non-keyframes as well during map refinement
+
+    iters: 500 # Optimize over this many different batches
+    batch_iters: 1 # Optimize each batch this many times
+    lr_factor: 0.1 # Change the learning rate for refinement
+    bs: 30 # Batch size for refinement 
+
+    sampling:
+      use_neighborhood: False
+      neighborhood_size: 8 # If this is an even number, we sample more frames in the past
+      weighted: False
+      kf_at_least: 0.5 # Always make sure to have > x% keyframes in a batch
+
+    prune_densify_every: 20 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densificatio# This has to be an uneven number
+    densify_until: 100 # Dont densify/prune after this many iterations, ALL gaussians are well optimized

@@ -8,7 +8,7 @@ online_opt:
   # Local sliding optimization window
   iters: 100 # Optimization iterations for selected views
   n_last_frames: 10 # Always optimize the last n frames
-  n_rand_frames: 15 # Optimize random global frames on top
+  n_rand_frames: 20 # Optimize random global frames on top
 
   prune_every: 4 # Prune every k Render passes
   pruning:
@@ -33,12 +33,12 @@ online_opt:
   # How to Filter the Tracking Map before feeding into Mapper
   filter: # Parameter for filtering incoming points from the SLAM system
     multiview: True # Only initialize Gaussians that are consistent in multiple views
-    uncertainty: False # Only use very certain points for intializing Gaussians
     mv_count_th: 2 # Pixels need to be consistent within bin_thresh distance across these k views
     # NOTE these are in relation to the mean of the distribution
     bin_th: 0.1 # Distance between points for binning, this depends on the scene scale, so be careful!
     min_disp_th: 0.001 # Relative to distribution, e.g. reject the lowest 1%
     hard_disp_th: 0.001 # Absolute, i.e. reject depth > 1000m
+    uncertainty: False # Only use very certain points for intializing Gaussians
     conf_th: 0.1 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
 
 
@@ -53,19 +53,14 @@ opt_params:
   position_lr_max_steps: 100 # Default MonoGS: 30000
 
 loss:
-  supervise_with_prior: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
-  with_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
-  with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
-  with_depth_smoothness: True # Similarity loss between depth and image gradients
-  scale_invariant: False # Whether to use the actual scale of the prior or not, i.e. a scale-invariant loss is computed
   # Weights
-  alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha1: 0.9 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta1: 5.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
   beta2: 0.001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
 # Parameters for transfer SLAM -> Renderer
 input:
-  pcd_downsample_init: 2 # This is a constant downsampling factor
-  pcd_downsample: 2 # You ideally have ~5-10k points per frame
+  pcd_downsample_init: 16 # This is a constant downsampling factor
+  pcd_downsample: 128 # You ideally have ~5-10k points per frame
   point_size: 0.02

@@ -1,0 +1,23 @@
+# @package _global_
+# Make sure we use the tum configuration
+defaults:
+- override /mapping: tum
+
+## Feedback both the optimized Poses and densified Disparities from Renderer -> Tracker
+mapping:
+  online_opt:
+    optimize_poses: True
+
+  # Backpropagate the Render updates into Tracking system
+  feedback:
+    warmup: 3 # Only start feeding back into tracking after we ran the Renderer k times
+    disps: True
+    poses: True
+    only_last_window: False # Dont feedback the random frames, as pose optimization is better conditioned in temporal neighborhood
+    no_refinement: False # Dont feedback after refinement
+    # Filtering args for feedback
+    kwargs:
+      opacity_threshold: 0.05 # Only count Gaussians with opacity > x as valid coverage of a pixel
+      ignore_frames: [0] # Never feedback the initial frames
+      min_coverage: 0.5 # Min. Density of frame after eliminiating outliers
+      max_diff_to_video: 0.2 # Maximum abs. rel. deviation from the dense video depth

@@ -1,0 +1,21 @@
+# @package _global_
+# Make sure we use the tum configuration
+defaults:
+- override /mapping: tum
+
+# Change the loss parameters for the mapping objective
+mapping:
+  loss:
+    supervise_with_prior: False # Use the prior for supervision. If not, then use the current filtered map from SLAM
+    with_ssim: False # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
+    with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
+    with_depth_smoothness: False # Similarity loss between depth and image gradients
+    # Weights
+    alpha1: 0.9 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+    alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
+    beta1: 5.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
+    beta2: 0.001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+
+# NOTE: The value of the depth loss depends on the scale of the scene! This needs to be carefully considered when balancing
+# NOTE: The SSIM loss is very useful for optimnizing the LPIPS metric of the reconstructed images, using only l1 creates very sharp and visually unpleasant images
+# NOTE: Beta1 is absoluted necessary to avoid overfitting and spherical Gaussians, watch out to not use a too big value, because this will encourage growing many more Gaussians to occupy space
