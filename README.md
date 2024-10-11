@@ -44,7 +44,12 @@ Download the data from [Google Drive](https://drive.google.com/drive/folders/1RJ
 - **GLORIE-SLAM: Globally Optimized RGB-only Implicit Encoding Point Cloud SLAM**, [Glorie-SLAM](https://github.com/zhangganlin/GlORIE-SLAM)
 
 # Concurrent Work
-We would like to acknowledge other works, who had the same idea and apparently blindsided us. Concurrent work [Splat-SLAM](https://github.com/eriksandstroem/Splat-SLAM) is a similar system, that combines DROID-SLAM and Gaussian Splatting. We would like to note, that we released this code earlier with its entire history to proof that we did not intend to copy their work. 
+We would like to acknowledge other works, who had the same idea and apparently blindsided us. Concurrent work [Splat-SLAM](https://github.com/eriksandstroem/Splat-SLAM) is a similar system, that combines DROID-SLAM and Gaussian Splatting. We would like to note, that we released this code earlier with its entire history to proof that we did not intend to copy their work. Some notable differences, that we observed after careful reading of their paper: 
+- We support additional camera calibration with unknown intrinsics, which allows inference on in-the-wild video
+- We use [EigenPlaces ICCV 2023](https://github.com/gmberton/EigenPlaces) to compute visual similarity between frames in our factor graph. We then store these features in a [FAISS](https://github.com/facebookresearch/faiss) database to find nearest neighbors and loop candidates. We would like to highlight, that at least on TUM RGBD and Replica we did not find a big improvement when adding these additional loop candidate edges to the factor graph. They seem to handle loop closures similar to [GO-SLAM](https://github.com/youmi-zym/GO-SLAM), where candidates are found from apparent motion. 
+- We keep the keyframe management from [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM) based on apparent motion. They seemed to have more success by using the covisibility criterion from [MonoGS](https://github.com/muskie82/MonoGS)
+- We simply reanchor the Gaussians when a significant map update from the Tracker happens, they seem to have a more involved strategy. 
+- We only account for scale changes of the monocular prior in our Gaussians by reoptimization. Since the map is usually already stable when initializing Gaussians, we never have seen a problem with this. 
 
 # References
 ```bibtex
