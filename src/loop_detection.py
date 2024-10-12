@@ -104,19 +104,6 @@ class LoopDetector:
         elif self.method == "internal":
             self.net = net  # Use the internal droid update network
 
-        ### Use a proper visual similarity method without motion computation
-        elif self.method == "bow":
-            raise Exception(
-                "Bag of words is deprecated! Use a more modern place recognition technique that is compatible with PyTorch and multi-threading"
-            )
-
-            import pydbow3 as bow
-
-            self.db = self.load_dbow(voc_path=self.cfg.vocabulary)
-            self.orb = cv2.ORB_create()
-            # Store orb features for each keyframe
-            self.already_in_db, self.dbow_scores = [], []  # TODO maybe delete this afterwards
-
         elif self.method == "eigen":
             ### Get the database
             # Flat index, i.e. we dont build up a large index over time (this would not amortize <10 000 queries)
@@ -132,13 +119,12 @@ class LoopDetector:
             # self.db = faiss.index_cpu_to_gpu(faiss.StandardGpuResources(), device_id, index_flat)  # Put on GPU 0
             self.db = index_flat  # Use database on the CPU
             t_end = time.time()
-            # self.info(f"Initializing FAISS database on GPU took {t_end - t_start}s !")
             self.info(f"Initializing FAISS database on CPU took {t_end - t_start}s !")
             self.already_in_db, self.dbow_scores = [], []
         else:
             raise Exception(
                 colored(
-                    "Invalid loop detection method! Choose either 'raft', 'internal', 'bow', 'eigen' or 'patchnetvlad',",
+                    "Invalid loop detection method! Choose either 'raft', 'internal' or 'eigen'",
                     "red",
                 )
             )
@@ -172,63 +158,6 @@ class LoopDetector:
 
         padder = InputPadder(self.video.images.shape)
         return model, padder
-
-    ####
-    # DBow3 database based on ORB features
-    ####
-
-    def load_dbow(self, voc_path: str = "DBoW3/orbvoc.dbow3") -> None:
-        """Load a preexisting DBow3 vocabulary and database to use for loop detection."""
-        import pydbow3 as bow
-
-        voc = bow.Vocabulary()
-        self.info(f"Loading vocabulary from {voc_path}")
-        voc.load(voc_path)
-        db = bow.Database()
-        db.setVocabulary(voc)
-        print("\n")
-        return db
-
-    def extract_orb_features(self, img: torch.Tensor) -> torch.Tensor:
-        """Compute ORB features with opencv, this requires going back and forth between numpy and torch"""
-        img = np.float32(img.cpu().numpy())
-        if img.max() <= 1.0:
-            img = 255 * img
-        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        kp, des = self.orb.detectAndCompute(np.uint8(gray_img), None)
-        # NOTE you can visualize the keypoints with:
-        # img_with_kp = cv2.drawKeypoints(np.uint8(gray_img), kp, None, color=(0, 255, 0), flags=0)
-        return des
-
-    def get_orb_features(self, idx: int) -> torch.Tensor:
-        """Get ORB features for a specific frame index"""
-        image = self.video.images[idx]
-        return self.extract_orb_features(image.permute(1, 2, 0))
-
-    def insert_frame_into_dbow(self, idx: int) -> None:
-        """Compute the ORB features for the current keyframe and insert them into the database. We return the
-        computed features for querying later.
-        """
-        image = self.video.images[idx]
-        features = self.extract_orb_features(image.permute(1, 2, 0))
-        self.db.add(features)
-        self.already_in_db.append(idx)
-        return features
-
-    def query_dbow(self, query_features, k_neighbors: int = 2) -> None | Dict:
-        """Make a nearest neighbor lookup with query frame. We return the k best matches and the scores.
-
-        NOTE: if you simply want to compute all matches, you can use the query method with k_neighbors=len(self.db) - 1
-        """
-
-        results = self.db.query(query_features, k_neighbors)
-        matches = {result.Id: result.Score for result in results}
-        if len(matches) > 0:
-            self.dbow_scores.append(max(matches.values()))
-            return matches
-        else:
-            self.dbow_scores.append(-1)
-            return None
 
     def load_eigen(self):
         """Load the EigenPlaces model, see https://github.com/gmberton/EigenPlaces from ICCV23.
@@ -449,17 +378,6 @@ class LoopDetector:
         when optimizing highly similar loop closure candidates, the 3D position may not be the same due to drift, but the orientation
         will still be highly similar."""
 
-        def test_with_quat_directly(g1: lietorch.SE3, g2: lietorch.SE3) -> float:
-            # Get rotation, translation
-            t1, q1 = g1.vec().split([3, 4], -1)
-            t2, q2 = g2.vec().split([3, 4], -1)
-
-            r1, r2 = lietorch.SO3.InitFromVec(q1), lietorch.SO3.InitFromVec(q2)
-            dR = r1 * r2.inv()
-            ang = dR.log().norm(dim=-1)
-            deg = (180 / torch.pi) * ang  # convert radians to degrees
-            return deg
-
         # Compute with SE3 directly
         g1, g2 = lietorch.SE3.InitFromVec(self.video.poses[ii]), lietorch.SE3.InitFromVec(self.video.poses[jj])
         g12 = g1 * g2.inv()
@@ -505,29 +423,6 @@ class LoopDetector:
             df = self.get_motion_distance(delta_i, valid)
             mask_df = df < self.thresh  # Candidates need to have a low optical flow difference
             assert return_matches is False, "Internal DROID does not support place recognition!"
-
-        elif self.method == "bow":
-            i = ii[0]
-            # Compute appearance features and insert the frame into the database
-            # Insert the first frame into the database
-            if i == 1:
-                features = self.get_orb_features(0)
-                self.db.add(features)
-                self.already_in_db.append(0)
-
-            features = self.get_orb_features(i)
-            matches = self.query_dbow(features, k_neighbors=self.cfg.k_nearest)
-            self.db.add(features)
-            self.already_in_db.append(i)
-            # NOTE chen: Query may not return all previous frames, i.e. we need to set infinite distance for all
-            df = -torch.inf * torch.ones(len(self.already_in_db) - 1, device=self.device)
-            if matches is not None:
-                valid_matches = torch.tensor(list(matches.keys()), device=self.device)
-                valid_scores = torch.tensor(list(matches.values()), device=self.device)
-                # Only set finite distance for valid matches
-                df[valid_matches] = valid_scores
-            mask_df = df > self.thresh  # Candidates need to have a high similarity score
-            # self.visualize_place_recognition_matches(i, matches, show_only=self.cfg.k_nearest)
 
         elif self.method == "eigen":
 
