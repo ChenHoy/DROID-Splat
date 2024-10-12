@@ -1,13 +1,14 @@
 defaults:
  - _self_
- - mapping: tum.yaml
- - tracking: tum.yaml
+ - mapping: wild.yaml
+ - tracking: base.yaml
  - loop_closure: eigen.yaml
  - data: TUM_RGBD/fr1.yaml
 
 hydra:
   run:
-    dir: /home/chen/code/discriminative/Reconstruction/sfm/droidsplat/outputs/temp/${now:%Y-%m-%d_%H-%M-%S}_${mode}
+    # dir: /home/chen/code/discriminative/Reconstruction/sfm/droidsplat/outputs/temp/${now:%Y-%m-%d_%H-%M-%S}_${mode}
+    dir: /home/chen/code/discriminative/Reconstruction/sfm/droidsplat/outputs/tum_rgbd/tracking_and_rendering/sota_refine/mono/new/fr1_desk2/${now:%Y-%m-%d_%H-%M-%S}_${mode}
   job:
     chdir: False
     name: droidsplat # Change this to your experiment run name, e.g. the dataset you run on or the run of a configuration
@@ -19,30 +20,32 @@ output_folder: ./outputs/
 stride: 1
 mode: "mono"  # 'mono', 'prgbd', 'rgbd'
 mono_depth: "metric3d-vit_giant2" # 'lotus_d' 'zoed-nk', 'metric3d-vit_giant2', 'depthany-vitl-outdoor', 'depthany-vitl-indoor'
-with_dyn: False
+with_dyn: False # Filter out dynamic objects if masks are provided in the dataset
 opt_intr: False # Optimizes additional intrinsic parameters
-sleep_delay: 0.25 # Sleep timer to cool off the system sometimtes
+sleep_delay: 0.45 # Sleep timer to cool off the system sometimes
 
 ## Components
 run_frontend: True # This should always be True!
 run_backend: True # Global optimization
-run_loop_detection: True # Loop closure detection
+run_loop_detection: False # Loop closure detection
 run_mapping: True # Rendering 
+
 ## Visualizations / GUIs
 run_visualization: False
-render_images: True
-run_mapping_gui: False
+run_mapping_gui: True
 show_stream: False
+# plot_uncertainty: True # To show the uncertainty of the pose graph optimization
 
 # Flag for saving all rendered predictions for later purpose like visualization
+render_images: False # Render a comparison figure for each keyframe and kth non-keyframe
 save_rendered_predictions: False
 
 ## Frequencies for synchronizing the different main parts of the pipeline
 # In an optimal setup, the Frontend would be the bottlenck, which can run at ~20-30FPS
 # Mapping takes ~5-7 iters/s, i.e. with a well tuned system each Render update hits <= 0.4fps
-backend_every: 8 # Run global bundle adjustment only every k Frontend updates
+backend_every: 20 # Run global bundle adjustment only every k Frontend updates
 # NOTE this is a trade-off between accuracy and speed, we can also add more compute to refinement!
-mapper_every: 20  # Run Renderer every k Frontend updates
+mapper_every: 10 # Run Renderer every k Frontend updates
 
 ## Evaluation
-evaluate: True
+evaluate: False
