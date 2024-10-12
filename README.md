@@ -127,8 +127,12 @@ we recommend a two-stage strategy:
 This will return converged intrinsics. When using the [Metric3D](https://github.com/YvanYin/Metric3D) predictions, the results can even be scale-accurate! 
 2. Update the intrinsics and run the whole system in :first_quarter_moon: ```prgbd``` mode $\color{Pink}{\textbf{with scale-optimization}}$. 
 
-_PS_: Default Splatting only supports a pinhole camera model. We rectify images from non-linear camera models in our data pipeline.  
-_PSS_: We did not experiment with calibration of other models, so you might need to tweak the code
+#### :bulb: Advice
+- It is useful to first run the Tracking without Mapping, to see if the scene is correctly reconstructed. The Tracker is very robust, but failures can still happen.
+  
+#### etc.
+- Default Splatting only supports a pinhole camera model. We rectify images from non-linear camera models in our data pipeline.  
+- We did not experiment with calibration of other models, so you might need to tweak the code
 
 ### Replica
 Download the data from [Google Drive](https://drive.google.com/drive/folders/1RJr38jvmuIV717PCEcBkzV2qkqUua-Fx?usp=sharing) and adjust the input in the ```configs/Replica.base.yaml```
