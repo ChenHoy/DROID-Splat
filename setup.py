@@ -92,6 +92,7 @@ setup(
 setup(
     name="diff_gaussian_rasterization",
     packages=["diff_gaussian_rasterization"],
+    package_dir={"": "thirdparty/diff-gaussian-rasterization-w-pose"},
     ext_modules=[
         CUDAExtension(
             name="diff_gaussian_rasterization._C",
