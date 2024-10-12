@@ -40,7 +40,7 @@ dependencies:
     - imgviz
       # - glm
     - PyGLM # This substitutes glm
-    - dask
+    - dask # TODO do we really need this?
     - faiss-gpu
     - gdown
     - einops
@@ -53,10 +53,9 @@ dependencies:
     - imageio
     - networkx
     - pandas
-    - trimesh
+    - trimesh # TODO do we really need this?
     - termcolor
     - webencodings
     - pyrender
     - timm==0.6.7
     - pyliblzfse
-    - git+https://github.com/lxxue/FRNN.git
