@@ -7,7 +7,7 @@
 Combining dense end-to-end SLAM with dense 3D Gaussian Splatting.
 
 ## :clapper: Introduction
-This is a deep-learning-based dense visual SLAM framework that achieves **real-time global optimization of poses and 3D reconstruction**. This is achieved by the following: 
+This is a deep-learning-based dense visual SLAM framework that achieves **real-time global optimization of poses and 3D reconstruction**.   
 - SotA Tracking from [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM)
 - Integration of monocular depth estimation priors like [Metric3D](https://github.com/YvanYin/Metric3D)
 - Dense differentiable Rendering with [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting)
@@ -32,13 +32,15 @@ python setup.py install
 ```
 We recommend to create a separate virtual environment for depth inference, see their respective repositories. 
 
-## How to use this framework?
+## :question: How to use this framework?
 We support multiple input modes in our paper: :new_moon: mono, :first_quarter_moon: prgbd, :full_moon: rgbd. 
 
-PRGBD refers to Pseudo RGBD, where we use a monocular depth prediction from an off-the-shelf network, e.g. [Metric3D](https://github.com/YvanYin/Metric3D), [ZoeDepth](https://github.com/isl-org/ZoeDepth) or [DepthAnything](https://github.com/LiheYoung/Depth-Anything). 
-Basic inference can be run with e.g. 
+P-RGBD refers to Pseudo-RGBD, where we use a monocular depth prediction from an off-the-shelf network  
+like [Metric3D](https://github.com/YvanYin/Metric3D), [ZoeDepth](https://github.com/isl-org/ZoeDepth) or [DepthAnything](https://github.com/LiheYoung/Depth-Anything). 
+
+Basic inference can be run with
 ```
-python run.py data=Replica.base tracking=base stride=1 mode=rgbd
+python run.py data=Replica.base data.input_folder=/media/data/Replica/office0 tracking=base stride=1 mode=rgbd
 ```
 Our configuration system is based on [Hydra](https://github.com/facebookresearch/hydra), which allows elegant command line manipulation. Since our system is quite complex, we are showing a few basic use cases below. Feel free to dig into the ```/configs/...``` files to see options for each component!
 
@@ -69,46 +71,63 @@ My Dataset
 
 Monocular depth inference can be run by using the ```demo.py``` scripts in the respective forks.
 
-We run multiple components in parallel based on concurrency. All threads follow the leading Frontend. The Loop Detector will check visual similarity to past frames for each incoming frame. How often the Backend and Renderer are run is determined by ```backend_every``` and ```mapper_every```. We synchronize the threads, such that the Backend truly runs in parallel, but the Frontend will wait until a Rendering pass is finished. This sacrifies a few FPS for additional stability/robustness.
+### Multi-threading
+We run multiple components in parallel based on concurrency. 
+- All threads follow the leading _Frontend_. 
+- The _Loop Detector_ will check visual similarity to past frames for each incoming frame.
+- How often the _Backend_ and _Renderer_ are run is determined by ```backend_every``` and ```mapper_every```. 
 
-### How to configure your tracker
-Our Tracker consists of three components: i) Frontend ii) Backend iii) Loop Detector. 
+We synchronize the threads, such that the Backend truly runs in parallel, but the Frontend will wait until a Rendering pass is finished.  
+This sacrifies a few FPS for additional stability/robustness.
+
+### How to configure your Tracker
+Our Tracker consists of three components: 
+- $\color{BurntOrange}{\textbf{Frontend}}$
+- $\color{BurntOrange}{\textbf{Backend}}$
+- $\color{BurntOrange}{\textbf{Loop Detector}}$.
+ 
 They can be disabled with ```run_backend=False```, ```run_loop_detection=False```. 
-The tracker can be modified flexibly. For example: the scale optimization in prgbd mode can be activated by using ```tracking.frontend.optimize_scales=True```.
+
+The system can be modified flexibly. **Example**:  
+<p align="center"> Optimize the scales of a depth prior in :first_quarter_moon: prgbd mode by using <code>tracking.frontend.optimize_scales=True</code> </p>
+
 
 #### Tips & Tricks 
-The most important properties of the Tracker are how to build and maintain the factor graph:
+The most important properties of the Tracker are how to build and maintain the $\color{BurntOrange}{\textbf{Factor Graph}}$:
 - The motion threshold and keyframe thresholds determine when keyframes are considered and kept: ```tracking.motion_filter.thresh```, ```tracking.frontend.keyframe_thresh``` and ```tracking.frontend.thresh```
 - Factors are only kept in the optimization window for a ```tracking.frontend.max_age```. If the Frontend is not accurate, increasing this age will usually increase the window at the cost of memory and speed.  
 - Limiting the number of factors determines how big the global backend optimization will finally be ```tracking.backend.max_factor_mult```, ```tracking.backend.window```
 
-When we use the loop detector to detect visually similar frames, we add these edges in addition to our global backend optimization. 
-- We also support the loop closure updates from [GO-SLAM](https://github.com/youmi-zym/GO-SLAM)
-```tracking.backend.use_loop_closure```
+When we use the $\color{BurntOrange}{\textbf{Loop Detector}}$ to detect visually similar frames, we add these edges in addition to our global backend optimization. 
+- We also support the loop closure updates from [GO-SLAM](https://github.com/youmi-zym/GO-SLAM) with
+```tracking.backend.use_loop_closure```.
 However, we could not achieve better results with this. We can also not confirm, that it is trivial to add more edges to the graph without affecting the optimization.
 
-### Using the Renderer
+### How to use the Renderer
 There are few very important parameters, that need to be tuned in order to achieve good performance: 
-- **Optimization** time and optimization window: ```mapping.online_opt.iters```, ```mapping.online_opt.n_last_frames```, ```mapping.online_opt.n_rand_frames```. We recommend large batch sizes with a decent number of random frames for optimal results. The number of iterations can be set in accordance to the ```run_mapper_every```-frequency. We made the experience, that it is easier to run the Renderer with a lower frequency, but optimize for longer. Be careful to additionally change ```mapping.opt_params.position_lr_max_steps```, which determines the learning rate scheduler.
-- **Filtering** the Tracker map before feeding the Renderer:  ```mapping.online_opt.filter.bin_th```. This filter can perform a multiview-consistency check to remove inconsistent 3D points or remove uncertain pixels, determined by the neural network. Additionally it is very important to use an appropriate downsampling factor: ```mapping.input.pcd_downsample```, ```mapping.input.pcd_downsample_init```. Depending on how aggressive we filter and how we grow Gaussians, we can determine the final number of Gaussians in a scene. We made the experience, that sometimes less Gaussians means better results and usually aim for ~200 - 300k Gaussians in complex indoor scenes. 
+- $\color{Purple}{\textbf{Optimization}}$ time and optimization window: ```mapping.online_opt.iters```, ```mapping.online_opt.n_last_frames```, ```mapping.online_opt.n_rand_frames```. We recommend large batch sizes with a decent number of random frames for optimal results. The number of iterations can be set in accordance to the ```run_mapper_every```-frequency. We made the experience, that it is easier to run the Renderer with a lower frequency, but optimize for longer. Be careful to additionally change ```mapping.opt_params.position_lr_max_steps```, which determines the learning rate scheduler.
+- $\color{Purple}{\textbf{Filtering}}$ the Tracker map before feeding the Renderer:  ```mapping.online_opt.filter.bin_th```. This filter can perform a multiview-consistency check to remove inconsistent 3D points or remove uncertain pixels, determined by the neural network. Additionally it is very important to use an appropriate downsampling factor: ```mapping.input.pcd_downsample```, ```mapping.input.pcd_downsample_init```. Depending on how aggressive we filter and how we grow Gaussians, we can determine the final number of Gaussians in a scene. We made the experience, that sometimes less Gaussians means better results and usually aim for ~200 - 300k Gaussians in complex indoor scenes. 
 PS: If you are not careful, the system can OOM.
-- How to **grow and prune** Gaussians: ```mapping.online_opt.densify.vanilla``` describes the parameters of the original [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) strategy. ```mapping.online_opt.pruning``` can be used for Covisibility based pruning used in [MonoGS](https://github.com/muskie82/MonoGS)
-- **Refinement**: Our online mode can already achieve strong results at decent FPS. If you want more, you can always refine the map once the Tracker is finished with ```mapping.refinement```. We already achieve strong results with just 500 refinement iterations.
+- How to $\color{Purple}{\textbf{grow and prune}}$ Gaussians: ```mapping.online_opt.densify.vanilla``` describes the parameters of the original [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) strategy. ```mapping.online_opt.pruning``` can be used for Covisibility based pruning used in [MonoGS](https://github.com/muskie82/MonoGS)
+- $\color{Purple}{\textbf{Refinement}}$: Our online mode can already achieve strong results at decent FPS. If you want more, you can always refine the map once the Tracker is finished with ```mapping.refinement```. We already achieve strong results with just 500 refinement iterations.
 
 ### In-the-wild inference
-We leverage an additional calibration optimization, explored in [DroidCalib](https://github.com/boschresearch/DroidCalib) to optimize additional camera paremeters. This allows to do inference on any video with unknown camera intrinsics. You can activate it with ```opt_intr=True```. If no camera intrinsics are provided in ```configs/data/Dataset/data.yaml```, then we use a heuristic according to the image dimensions. 
+We support $\color{Pink}{\textbf{Camera Calibration}}$, explored in [DroidCalib](https://github.com/boschresearch/DroidCalib) for videos with unknown intrinsics. This allows you to run on any cell phone video. You can activate it with ```opt_intr=True```. If no camera intrinsics are provided in ```configs/data/Dataset/data.yaml```, then we use a heuristic according to the image dimensions. Given enough diverse motion in the scene, this already allows to converge to correct intrinsics. 
 
-Given enough diverse motion in the scene, this already allows to converge to correct intrinsics on top of odometry and structure on most scenes. However, since this is much easier in ```rgbd``` mode than ```mono```, we recommend to use monocular depth predictions on in-the-wild video. Using the scale-optimization together with intrinsics will result in degenerate solutions. Therefore, similar to other papers [RobustDynaNeRF](https://github.com/facebookresearch/robust-dynrf), 
+However, since this is much easier in :full_moon: ```rgbd``` mode, we recommend to use monocular depth predictions on in-the-wild video. Using the scale-optimization together with intrinsics will result in degenerate solutions. Therefore, similar to other papers [RobustDynaNeRF](https://github.com/facebookresearch/robust-dynrf), 
 we recommend a two-stage strategy: 
-1. Run the system without scale-optimization in ```prgbd``` mode: ```python run.py tracking=base stride=1 mode=rgbd opt_intr=True```. This will return converged intrinsics. When using the [Metric3D](https://github.com/YvanYin/Metric3D) predictions, the results can even be scale-accurate! 
-2. Update the intrinsics and run the whole system in ```prgbd``` mode. 
+1. Run the system $\color{Pink}{\textbf{without scale-optimization}}$ in :first_quarter_moon: ```prgbd``` mode: ```python run.py tracking=base stride=1 mode=rgbd opt_intr=True tracking.frontend.optimize_scales=False```.  
+This will return converged intrinsics. When using the [Metric3D](https://github.com/YvanYin/Metric3D) predictions, the results can even be scale-accurate! 
+2. Update the intrinsics and run the whole system in :first_quarter_moon: ```prgbd``` mode $\color{Pink}{\textbf{with scale-optimization}}$. 
 
-PS: Since we use the default 3D Gaussian Splatting, our Renderer only supports a pinhole camera model even though calibration of other models e.g. fisheye would be possible in the Tracker.    
+_PS_: Default Splatting only supports a pinhole camera model. We rectify images from non-linear camera models in our data pipeline.  
+_PSS_: We did not experiment with calibration of other models, so you might need to tweak the code
 
 ### Replica
-Download the data from [Google Drive](https://drive.google.com/drive/folders/1RJr38jvmuIV717PCEcBkzV2qkqUua-Fx?usp=sharing)
+Download the data from [Google Drive](https://drive.google.com/drive/folders/1RJr38jvmuIV717PCEcBkzV2qkqUua-Fx?usp=sharing) and adjust the input in the ```configs/Replica.base.yaml```
 
 ### TUM-RGBD
+Download the data from [TUM](https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download) and adjust the input path in the ```configs/TUM_RGBD/base.yaml```. 
 
 # Acknowledgments
 - "**DROID-SLAM: Deep Visual SLAM for Monocular, Stereo, and RGB-D Cameras, Teed etl. al**" [Neurips 2021](https://github.com/princeton-vl/DROID-SLAM)
