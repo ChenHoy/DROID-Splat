@@ -19,17 +19,25 @@ You can create an anaconda environment called `droidsplat`. For linux, you need 
 ```bash
 
 git clone --recursive https://github.com/ChenHoy/DROID-Splat.git
+cd DROID-Splat
 
 sudo apt-get install libopenexr-dev
     
 conda env create -f environment.yaml
 conda activate droidsplat
 
-pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
-pip install evo --upgrade --no-binary evo
-
 python setup.py install
 ```
+Grab a coffee :coffee:, because this will take a while (~15 min.).
+
+### CUDA
+We recommend to use a higher version of CUDA > 12.1. We observe an _nvcc_ bug in 12.1, which is resolved by changing 
+```
+-    return caster.operator typename make_caster<T>::template cast_op_type<T>();
++    return caster;
+```
+in line 45 of ```torch/include/pybind11/cast.h```, see [issue](https://github.com/pybind/pybind11/issues/4606).
+
 We recommend to create a separate virtual environment for depth inference, see their respective repositories. 
 
 ## :question: How to use this framework?
@@ -127,8 +135,13 @@ we recommend a two-stage strategy:
 This will return converged intrinsics. When using the [Metric3D](https://github.com/YvanYin/Metric3D) predictions, the results can even be scale-accurate! 
 2. Update the intrinsics and run the whole system in :first_quarter_moon: ```prgbd``` mode $\color{Pink}{\textbf{with scale-optimization}}$. 
 
-_PS_: Default Splatting only supports a pinhole camera model. We rectify images from non-linear camera models in our data pipeline.  
-_PSS_: We did not experiment with calibration of other models, so you might need to tweak the code
+#### :bulb: Advice
+- It is useful to first run the Tracking without Mapping, to see if the scene is correctly reconstructed. The Tracker is very robust, but failures can still happen.
+- There is a large difference between indoor and outdoor scenes. While you dont have to be careful in indoor scenes with the depth supervision and map initialization, outdoor scenes introduce many floaters and have much larger depth variance.
+
+#### :camera: Non-linear Camera models
+- Default Splatting only supports a pinhole camera model. We rectify images from non-linear camera models in our data pipeline.  
+- We did not experiment with calibration of other models, so you might need to tweak the code
 
 ### Replica
 Download the data from [Google Drive](https://drive.google.com/drive/folders/1RJr38jvmuIV717PCEcBkzV2qkqUua-Fx?usp=sharing) and adjust the input in the ```configs/Replica.base.yaml```
@@ -144,6 +157,8 @@ bash scripts/evaluation/evaluate_on_tum.sh mode name_experiment
 where mode can be either ```mono```, ```prgbd``` or ```rgbd```. When ```evaluate=True```, the results will be automatically stored in the experiment subfolders of a scene.
 
 # Acknowledgments
+We are standing on the shoulder of giants and would like to thank all the people, who have open-sourced their Code! 
+
 - "**DROID-SLAM: Deep Visual SLAM for Monocular, Stereo, and RGB-D Cameras, Teed etl. al**" [Neurips 2021](https://github.com/princeton-vl/DROID-SLAM)
 - "**GO-SLAM: Global Optimization for Consistent 3D Instant Reconstruction, Zhang et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
 - "**Deep geometry-aware camera self-calibration from video, Hagemann et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
