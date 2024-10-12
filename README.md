@@ -116,6 +116,8 @@ You can inspect the system in three ways:
 - Visualize the Tracking system: ```run_visualization=True```. This is the native Open3D Visualizer from [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM).
 - Visualize Renderer: ```run_mapping_gui=True```. This is the Open3D Visualizer from [MonoGS](https://github.com/muskie82/MonoGS). 
 
+We dont recommend to run these all at once.
+
 ### In-the-wild inference
 We support $\color{Pink}{\textbf{Camera Calibration}}$, explored in [DroidCalib](https://github.com/boschresearch/DroidCalib) for videos with unknown intrinsics. This allows you to run on any cell phone video. You can activate it with ```opt_intr=True```. If no camera intrinsics are provided in ```configs/data/Dataset/data.yaml```, then we use a heuristic according to the image dimensions. Given enough diverse motion in the scene, this already allows to converge to correct intrinsics. 
 
