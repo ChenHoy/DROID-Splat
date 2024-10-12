@@ -157,6 +157,8 @@ bash scripts/evaluation/evaluate_on_tum.sh mode name_experiment
 where mode can be either ```mono```, ```prgbd``` or ```rgbd```. When ```evaluate=True```, the results will be automatically stored in the experiment subfolders of a scene.
 
 # Acknowledgments
+We are standing on the shoulder of giants and would like to thank all the people, who have open-sourced their Code! 
+
 - "**DROID-SLAM: Deep Visual SLAM for Monocular, Stereo, and RGB-D Cameras, Teed etl. al**" [Neurips 2021](https://github.com/princeton-vl/DROID-SLAM)
 - "**GO-SLAM: Global Optimization for Consistent 3D Instant Reconstruction, Zhang et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
 - "**Deep geometry-aware camera self-calibration from video, Hagemann et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
