@@ -26,9 +26,6 @@ sudo apt-get install libopenexr-dev
 conda env create -f environment.yaml
 conda activate droidsplat
 
-pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
-pip install evo --upgrade --no-binary evo
-
 python setup.py install
 ```
 Grab a coffee :coffee:, because this will take a while (~15 min.).
