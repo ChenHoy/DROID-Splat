@@ -31,6 +31,8 @@ pip install evo --upgrade --no-binary evo
 
 python setup.py install
 ```
+Grab a coffee :coffee:, because this will take a while (~15 min.).
+
 We recommend to create a separate virtual environment for depth inference, see their respective repositories. 
 
 ## :question: How to use this framework?
