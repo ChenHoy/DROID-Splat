@@ -30,6 +30,14 @@ python setup.py install
 ```
 Grab a coffee :coffee:, because this will take a while (~15 min.).
 
+### CUDA
+We recommend to use a higher version of CUDA > 12.1. We observe an _nvcc_ bug in 12.1, which is resolved by changing 
+```
+-    return caster.operator typename make_caster<T>::template cast_op_type<T>();
++    return caster;
+```
+in line 45 of ```torch/include/pybind11/cast.h```, see [issue](https://github.com/pybind/pybind11/issues/4606).
+
 We recommend to create a separate virtual environment for depth inference, see their respective repositories. 
 
 ## :question: How to use this framework?
