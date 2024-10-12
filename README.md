@@ -71,7 +71,7 @@ My Dataset
 
 Monocular depth inference can be run by using the ```demo.py``` scripts in the respective forks.
 
-### Multi-threading
+### :zap: Multi-threading
 We run multiple components in parallel based on concurrency. 
 - All threads follow the leading _Frontend_. 
 - The _Loop Detector_ will check visual similarity to past frames for each incoming frame.
@@ -80,7 +80,7 @@ We run multiple components in parallel based on concurrency.
 We synchronize the threads, such that the Backend truly runs in parallel, but the Frontend will wait until a Rendering pass is finished.  
 This sacrifies a few FPS for additional stability/robustness.
 
-### How to configure your Tracker
+### :diamonds: How to configure your Tracker
 Our Tracker consists of three components: 
 - $\color{BurntOrange}{\textbf{Frontend}}$
 - $\color{BurntOrange}{\textbf{Backend}}$
@@ -91,7 +91,7 @@ They can be disabled with ```run_backend=False```, ```run_loop_detection=False``
 The system can be modified flexibly. **Example**:  
 <p align="center"> Optimize the scales of a depth prior in :first_quarter_moon: prgbd mode by using <code>tracking.frontend.optimize_scales=True</code> </p>
 
-#### Tips & Tricks 
+#### :crossed_fingers: Tips & Tricks 
 The most important properties of the Tracker are how to build and maintain the $\color{BurntOrange}{\textbf{Factor Graph}}$:
 - The motion threshold and keyframe thresholds determine when keyframes are considered and kept: ```tracking.motion_filter.thresh```, ```tracking.frontend.keyframe_thresh``` and ```tracking.frontend.thresh```
 - Factors are only kept in the optimization window for a ```tracking.frontend.max_age```. If the Frontend is not accurate, increasing this age will usually increase the window at the cost of memory and speed.  
@@ -102,7 +102,7 @@ When we use the $\color{BurntOrange}{\textbf{Loop Detector}}$ to detect visually
 ```tracking.backend.use_loop_closure```.
 However, we could not achieve better results with this. We can also not confirm, that it is trivial to add more edges to the graph without affecting the optimization.
 
-### How to use the Renderer
+### :clubs: How to use the Renderer
 There are few very important parameters, that need to be tuned in order to achieve good performance: 
 - $\color{Purple}{\textbf{Optimization}}$ time and optimization window: ```mapping.online_opt.iters```, ```mapping.online_opt.n_last_frames```, ```mapping.online_opt.n_rand_frames```. We recommend large batch sizes with a decent number of random frames for optimal results. The number of iterations can be set in accordance to the ```run_mapper_every```-frequency. We made the experience, that it is easier to run the Renderer with a lower frequency, but optimize for longer. Be careful to additionally change ```mapping.opt_params.position_lr_max_steps```, which determines the learning rate scheduler.
 - $\color{Purple}{\textbf{Filtering}}$ the Tracker map before feeding the Renderer:  ```mapping.online_opt.filter.bin_th```. This filter can perform a multiview-consistency check to remove inconsistent 3D points or remove uncertain pixels, determined by the neural network. Additionally it is very important to use an appropriate downsampling factor: ```mapping.input.pcd_downsample```, ```mapping.input.pcd_downsample_init```. Depending on how aggressive we filter and how we grow Gaussians, we can determine the final number of Gaussians in a scene. We made the experience, that sometimes less Gaussians means better results and usually aim for ~200 - 300k Gaussians in complex indoor scenes. 
@@ -110,7 +110,7 @@ PS: If you are not careful, the system can OOM.
 - How to $\color{Purple}{\textbf{grow and prune}}$ Gaussians: ```mapping.online_opt.densify.vanilla``` describes the parameters of the original [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) strategy. ```mapping.online_opt.pruning``` can be used for Covisibility based pruning used in [MonoGS](https://github.com/muskie82/MonoGS)
 - $\color{Purple}{\textbf{Refinement}}$: Our online mode can already achieve strong results at decent FPS. If you want more, you can always refine the map once the Tracker is finished with ```mapping.refinement```. We already achieve strong results with just 500 refinement iterations.
 
-### Visualization
+### :movie_camera: Visualization
 You can inspect the system in three ways: 
 - Visualize the input stream and pose confidence: ```show_stream=True```, ```plot_uncertainty=True```. This shows the data in an opencv stream.
 - Visualize the Tracking system: ```run_visualization=True```. This is the native Open3D Visualizer from [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM).
@@ -118,7 +118,7 @@ You can inspect the system in three ways:
 
 We dont recommend to run these all at once.
 
-### In-the-wild inference
+### :sunrise_over_mountains: In-the-wild inference
 We support $\color{Pink}{\textbf{Camera Calibration}}$, explored in [DroidCalib](https://github.com/boschresearch/DroidCalib) for videos with unknown intrinsics. This allows you to run on any cell phone video. You can activate it with ```opt_intr=True```. If no camera intrinsics are provided in ```configs/data/Dataset/data.yaml```, then we use a heuristic according to the image dimensions. Given enough diverse motion in the scene, this already allows to converge to correct intrinsics. 
 
 However, since this is much easier in :full_moon: ```rgbd``` mode, we recommend to use monocular depth predictions on in-the-wild video. Using the scale-optimization together with intrinsics will result in degenerate solutions. Therefore, similar to other papers [RobustDynaNeRF](https://github.com/facebookresearch/robust-dynrf), 
@@ -136,7 +136,7 @@ Download the data from [Google Drive](https://drive.google.com/drive/folders/1RJ
 ### TUM-RGBD
 Download the data from [TUM](https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download) and adjust the input path in the ```configs/TUM_RGBD/base.yaml```. 
 
-### Evaluation
+### :chart_with_upwards_trend: Evaluation
 You can evaluate by running
 ```
 bash scripts/evaluation/evaluate_on_tum.sh mode name_experiment
