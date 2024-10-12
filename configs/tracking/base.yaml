@@ -24,7 +24,8 @@ frontend:
   radius: 5 # Always build edges between nearby frames
   nms: 1
 
-  release_cache: False # Tradeoff: memory vs. speed, This can save up to ~5GB
+  # NOTE: Warning. This can slightly change results as well for some reason
+  release_cache: True # Tradeoff: memory vs. speed, This can save up to ~5GB
   
 backend:
   warmup: 15

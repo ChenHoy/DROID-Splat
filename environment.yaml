@@ -13,7 +13,7 @@ dependencies:
   - pytorch=2.1
   - cudatoolkit
   - tensorboard
-  - pytorch3d==0.7.7 # This version is very important!
+    # - pytorch3d==0.7.7 # This version is very important!
   - scipy
   - opencv==4.9
   - tqdm
@@ -40,8 +40,8 @@ dependencies:
     - imgviz
       # - glm
     - PyGLM # This substitutes glm
-    - dask
-    #- faiss-gpu
+    - dask # TODO do we really need this?
+    - faiss-gpu
     - gdown
     - einops
     - plyfile
@@ -53,10 +53,9 @@ dependencies:
     - imageio
     - networkx
     - pandas
-    - trimesh
+    - trimesh # TODO do we really need this?
     - termcolor
     - webencodings
     - pyrender
     - timm==0.6.7
     - pyliblzfse
-    - git+https://github.com/lxxue/FRNN.git
