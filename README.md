@@ -129,8 +129,9 @@ This will return converged intrinsics. When using the [Metric3D](https://github.
 
 #### :bulb: Advice
 - It is useful to first run the Tracking without Mapping, to see if the scene is correctly reconstructed. The Tracker is very robust, but failures can still happen.
-  
-#### etc.
+- There is a large difference between indoor and outdoor scenes. While you dont have to be careful in indoor scenes with the depth supervision and map initialization, outdoor scenes introduce many floaters and have much larger depth variance.
+
+#### :camera: Non-linear Camera models
 - Default Splatting only supports a pinhole camera model. We rectify images from non-linear camera models in our data pipeline.  
 - We did not experiment with calibration of other models, so you might need to tweak the code
 
