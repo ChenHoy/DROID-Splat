@@ -129,6 +129,13 @@ Download the data from [Google Drive](https://drive.google.com/drive/folders/1RJ
 ### TUM-RGBD
 Download the data from [TUM](https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download) and adjust the input path in the ```configs/TUM_RGBD/base.yaml```. 
 
+### Evaluation
+You can evaluate by running
+```
+bash scripts/evaluation/evaluate_on_tum.sh mode name_experiment
+```
+where mode can be either ```mono```, ```prgbd``` or ```rgbd```. When ```evaluate=True```, the results will be automatically stored in the experiment subfolders of a scene.
+
 # Acknowledgments
 - "**DROID-SLAM: Deep Visual SLAM for Monocular, Stereo, and RGB-D Cameras, Teed etl. al**" [Neurips 2021](https://github.com/princeton-vl/DROID-SLAM)
 - "**GO-SLAM: Global Optimization for Consistent 3D Instant Reconstruction, Zhang et al**",  [ICCV 2023](https://iccv2023.thecvf.com/)
