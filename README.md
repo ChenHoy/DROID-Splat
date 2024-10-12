@@ -19,6 +19,7 @@ You can create an anaconda environment called `droidsplat`. For linux, you need 
 ```bash
 
 git clone --recursive https://github.com/ChenHoy/DROID-Splat.git
+cd DROID-Splat
 
 sudo apt-get install libopenexr-dev
     
