@@ -91,7 +91,6 @@ They can be disabled with ```run_backend=False```, ```run_loop_detection=False``
 The system can be modified flexibly. **Example**:  
 <p align="center"> Optimize the scales of a depth prior in :first_quarter_moon: prgbd mode by using <code>tracking.frontend.optimize_scales=True</code> </p>
 
-
 #### Tips & Tricks 
 The most important properties of the Tracker are how to build and maintain the $\color{BurntOrange}{\textbf{Factor Graph}}$:
 - The motion threshold and keyframe thresholds determine when keyframes are considered and kept: ```tracking.motion_filter.thresh```, ```tracking.frontend.keyframe_thresh``` and ```tracking.frontend.thresh```
@@ -110,6 +109,12 @@ There are few very important parameters, that need to be tuned in order to achie
 PS: If you are not careful, the system can OOM.
 - How to $\color{Purple}{\textbf{grow and prune}}$ Gaussians: ```mapping.online_opt.densify.vanilla``` describes the parameters of the original [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) strategy. ```mapping.online_opt.pruning``` can be used for Covisibility based pruning used in [MonoGS](https://github.com/muskie82/MonoGS)
 - $\color{Purple}{\textbf{Refinement}}$: Our online mode can already achieve strong results at decent FPS. If you want more, you can always refine the map once the Tracker is finished with ```mapping.refinement```. We already achieve strong results with just 500 refinement iterations.
+
+### Visualization
+You can inspect the system in three ways: 
+- Visualize the input stream and pose confidence: ```show_stream=True```, ```plot_uncertainty=True```. This shows the data in an opencv stream.
+- Visualize the Tracking system: ```run_visualization=True```. This is the native Open3D Visualizer from [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM).
+- Visualize Renderer: ```run_mapping_gui=True```. This is the Open3D Visualizer from [MonoGS](https://github.com/muskie82/MonoGS). 
 
 ### In-the-wild inference
 We support $\color{Pink}{\textbf{Camera Calibration}}$, explored in [DroidCalib](https://github.com/boschresearch/DroidCalib) for videos with unknown intrinsics. This allows you to run on any cell phone video. You can activate it with ```opt_intr=True```. If no camera intrinsics are provided in ```configs/data/Dataset/data.yaml```, then we use a heuristic according to the image dimensions. Given enough diverse motion in the scene, this already allows to converge to correct intrinsics. 
