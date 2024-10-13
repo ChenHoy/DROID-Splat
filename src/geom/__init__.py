@@ -25,10 +25,8 @@ def matrix_to_lie(matrix: torch.Tensor) -> torch.Tensor:
 
     quat = matrix_to_quaternion(matrix[:, :3, :3])
     quat = torch.cat((quat[:, 1:], quat[:, 0][:, None]), 1)  # swap real first to real last
-
     trans = matrix[:, :3, 3]
-    # FIXME this does not work in all cases, there seems to be something significantly wrong with pytorch3d
-    vec = torch.cat((trans, quat), 1)  # FIX PyTorch3D diff. coordinate system
+    vec = torch.cat((trans, quat), 1)
     return vec
 
 
@@ -157,7 +155,6 @@ def check_and_correct_transform(g1: lietorch.SE3 | torch.Tensor, g2: lietorch.SE
         return g1.squeeze(0)
 
 
-# TODO make thread-safe by avoiding unsqueze for artificial batch dimensions of 1
 @torch.no_grad()
 def align_scale_and_shift(
     prediction: torch.Tensor, target: torch.Tensor, weights: torch.Tensor

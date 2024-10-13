@@ -79,7 +79,6 @@ class SLAM_GUI:
 
     def init_widget(self):
         self.window_w, self.window_h = 1600, 900
-
         self.window = gui.Application.instance.create_window("MonoGS", self.window_w, self.window_h)
         self.window.set_on_layout(self._on_layout)
         self.window.set_on_close(self._on_close)
@@ -91,15 +90,12 @@ class SLAM_GUI:
             rendering.ColorGrading.ToneMapping.LINEAR,
         )
         self.widget3d.scene.view.set_color_grading(cg_settings)
-
         self.window.add_child(self.widget3d)
 
         self.lit = rendering.MaterialRecord()
         self.lit.shader = "unlitLine"
-
         self.lit_geo = rendering.MaterialRecord()
         self.lit_geo.shader = "defaultUnlit"
-
         self.specular_geo = rendering.MaterialRecord()
         self.specular_geo.shader = "defaultLit"
 
@@ -128,7 +124,7 @@ class SLAM_GUI:
         chbox_tile.add_child(self.staybehind_chbox)
         vp_subtile1.add_child(chbox_tile)
 
-        ##Combo panels
+        ## Combo panels
         combo_tile = gui.Vert(0.5 * em, gui.Margins(margin))
 
         ## Jump to the camera viewpoint
@@ -182,23 +178,38 @@ class SLAM_GUI:
 
         # Scale the Gaussians
         slider_tile = gui.Horiz(0.5 * em, gui.Margins(margin))
-        slider_label = gui.Label("Gaussian Scale (0-1)")
         self.scaling_slider = gui.Slider(gui.Slider.DOUBLE)
         self.scaling_slider.set_limits(0.001, 1.0)
         self.scaling_slider.double_value = 1.0
-        slider_tile.add_child(slider_label)
+        slider_tile.add_child(gui.Label("Gaussian Scale (0-1)"))
         slider_tile.add_child(self.scaling_slider)
         self.panel.add_child(slider_tile)
 
         # Scale the Cameras
         slider_tile2 = gui.Horiz(0.5 * em, gui.Margins(margin))
-        slider_label2 = gui.Label("Camera Scale")
         self.camera_slider = gui.Slider(gui.Slider.DOUBLE)
         self.camera_slider.set_limits(0.001, 0.1)
         self.camera_slider.double_value = 0.001
-        slider_tile2.add_child(slider_label2)
+        slider_tile2.add_child(gui.Label("Camera Scale"))
         slider_tile2.add_child(self.camera_slider)
         self.panel.add_child(slider_tile2)
+
+        self._arcball_button = gui.Button("Arcball")
+        self._arcball_button.horizontal_padding_em = 0.5
+        self._arcball_button.vertical_padding_em = 0
+        self._arcball_button.set_on_clicked(self._set_mouse_mode_rotate)
+        self._fly_button = gui.Button("Fly")
+        self._fly_button.horizontal_padding_em = 0.5
+        self._fly_button.vertical_padding_em = 0
+        self._fly_button.set_on_clicked(self._set_mouse_mode_fly)
+        self.panel.add_child(gui.Label("Mouse controls"))
+
+        h = gui.Horiz(0.25 * em)  # row 1
+        h.add_stretch()
+        h.add_child(self._arcball_button)
+        h.add_child(self._fly_button)
+        h.add_stretch()
+        self.panel.add_child(h)
 
         # screenshot buttom
         self.screenshot_btn = gui.Button("Screenshot")
@@ -279,6 +290,13 @@ class SLAM_GUI:
     def _on_close(self):
         self.is_done = True
         return True  # False would cancel the close
+
+    def _set_mouse_mode_rotate(self):
+        self.widget3d.set_view_controls(gui.SceneWidget.Controls.ROTATE_CAMERA)
+
+    # FIXME why can we not fly with AWSD like proclaimed?
+    def _set_mouse_mode_fly(self):
+        self.widget3d.set_view_controls(gui.SceneWidget.Controls.FLY)
 
     def _on_combo_model(self, new_val, new_idx):
         model_idx = self.model_dict[new_val]
