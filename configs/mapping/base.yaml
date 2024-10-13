@@ -28,12 +28,6 @@ online_opt:
       dont_prune_latest: 0 # Never prune the latest Gaussians as this leads to unnecessary add / delete
       visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
 
-    use_floaters: False
-    # This is a proxy for density
-    floaters:
-      search_radius: 0.5 # Search radius for fixed radius nearest neighbor search
-      min_nn_distance: 0.05 # Minimum distance to the nearest neighbor for pruning
-
   # How often to prune and densify gaussians during optimization
   prune_densify_every: 5 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
   prune_densify_until: 20 # dont do this after this iteration
@@ -118,9 +112,8 @@ refinement:
   lr_factor: 0.1 # Change the learning rate for refinement
   bs: 30 # Batch size for refinement 
 
+  # Sample according to loss order of frames and include non-keyframes if wanted
   sampling:
-    use_neighborhood: True
-    neighborhood_size: 10 # If this is an even number, we sample more frames in the past
     weighted: False
     kf_at_least: 0.5 # Always make sure to have > x% keyframes in a batch
 
