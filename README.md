@@ -1,6 +1,6 @@
 <p align="center">
   <a href="">
-    <img src="droidsplat.png" width="60%">
+    <img src="assets/droidsplat.png" width="60%">
   </a>
 </p>
 <h1 align="center"> DROID-Splat </h1> 
