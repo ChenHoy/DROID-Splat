@@ -73,7 +73,7 @@ def backup_source_code(backup_directory):
 
 def get_in_the_wild_heuristics(ht: int, wd: int, strategy: str = "generic") -> torch.Tensor:
     """We do not have camera intrinsics on in-the-wild data. In order for this to converge, we
-    need a good initialize guess. There are two strategies to do this: i) generc ii) teeds from DeepV2D
+    need a good initialize guess. There are two strategies to do this: i) generc ii) Teeds from DeepV2D
     """
     if strategy == "generic":
         fx = fy = (wd + ht) / 2
@@ -100,6 +100,12 @@ def run_slam(cfg):
 
     sys_print(f"\n\n** Running {cfg.data.input_folder} in {cfg.mode} mode!!! **\n\n")
     dataset = get_dataset(cfg, device=cfg.device)
+
+    if cfg.data.cam.fx is None or cfg.data.cam.fy is None:
+        sys_print("Using generic intrinsics for in-the-wild data")
+        cfg.data.cam.fx, cfg.data.cam.fy, cfg.data.cam.cx, cfg.data.cam.cy = get_in_the_wild_heuristics(
+            ht=cfg.data.cam.H, wd=cfg.data.cam.W
+        )
     slam = SLAM(cfg, dataset=dataset, output_folder=output_folder)
 
     sys_print(f"Running on {len(dataset)} frames")
