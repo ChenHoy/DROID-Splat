@@ -127,6 +127,11 @@ You can inspect the system in three ways:
 We dont recommend to run these all at once.
 
 ### :sunrise_over_mountains: In-the-wild inference
+<p align="center">
+  <img src="./assets/plant.gif" alt="Plant" width="45%">
+  <img src="./assets/nana4_4.gif" alt="Nana" width="45%">
+</p>
+
 We support $\color{Pink}{\textbf{Camera Calibration}}$, explored in [DroidCalib](https://github.com/boschresearch/DroidCalib) for videos with unknown intrinsics. This allows you to run on any cell phone video. You can activate it with ```opt_intr=True```. If no camera intrinsics are provided in ```configs/data/Dataset/data.yaml```, then we use a heuristic according to the image dimensions. Given enough diverse motion in the scene, this already allows to converge to correct intrinsics. 
 
 However, since this is much easier in :full_moon: ```rgbd``` mode, we recommend to use monocular depth predictions on in-the-wild video. Using the scale-optimization together with intrinsics will result in degenerate solutions. Therefore, similar to other papers [RobustDynaNeRF](https://github.com/facebookresearch/robust-dynrf), 
