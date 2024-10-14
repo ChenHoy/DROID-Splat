@@ -80,6 +80,8 @@ class SLAM:
         self.do_evaluate = cfg.evaluate
         # Render every 5-th frame during optimization, so we can see the development of our scene representation
         self.save_renders = cfg.get("save_renders", False)
+        self.save_predictions = cfg.get("save_rendered_predictions", False)
+        self.save_every = cfg.get("save_every", 5)
 
         self.create_out_dirs(output_folder)
         self.update_cam(cfg)  # Update output resolution, intrinsics, etc.
@@ -721,7 +723,17 @@ class SLAM:
             ### Evalaute only keyframes, which we overfit to see how good that fit is
             save_dir = os.path.join(render_eval_path, "keyframes")
             kf_rnd_metrics = eval_utils.eval_rendering(
-                kf_cams, kf_tstamps, gaussians, stream, render_cfg, background, save_dir, True, monocular
+                kf_cams,
+                kf_tstamps,
+                gaussians,
+                stream,
+                render_cfg,
+                background,
+                save_dir,
+                1,
+                monocular,
+                True,
+                self.save_predictions,
             )
             self.info(
                 "(Keyframes) Rendering: mean PSNR: {}, SSIM: {}, LPIPS: {}".format(
@@ -736,7 +748,17 @@ class SLAM:
             nonkf_cams = [all_cams[i] for i in nonkf_tstamps]
             save_dir = os.path.join(render_eval_path, "non-keyframes")
             nonkf_rnd_metrics = eval_utils.eval_rendering(
-                nonkf_cams, nonkf_tstamps, gaussians, stream, render_cfg, background, save_dir, True, monocular
+                nonkf_cams,
+                nonkf_tstamps,
+                gaussians,
+                stream,
+                render_cfg,
+                background,
+                save_dir,
+                self.save_every,
+                monocular,
+                True,
+                self.save_predictions,
             )
             self.info(
                 "(Non-Keyframes) Rendering: mean PSNR: {}, SSIM: {}, LPIPS: {}".format(

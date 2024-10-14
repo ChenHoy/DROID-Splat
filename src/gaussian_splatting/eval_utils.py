@@ -344,6 +344,32 @@ def create_comparison_figure(
     return fig
 
 
+def save_dense_predictions(
+    save_dir: str, idx: int, est_depth: torch.Tensor, est_img: torch.Tensor, gt_depth: Optional[torch.Tensor] = None
+) -> None:
+    fig1, ax1 = plt.subplots(1, 1)
+    # Display the ground truth image
+    ax1.imshow(est_img.squeeze()[..., ::-1])
+    ax1.axis("off")
+    fig1.tight_layout()
+
+    fig2, ax2 = plt.subplots(1, 1)
+    # Display the ground truth image
+    if gt_depth is not None:
+        min_depth = min(gt_depth.min(), est_depth.min())
+        max_depth = max(gt_depth.max(), est_depth.max())
+    else:
+        min_depth, max_depth = est_depth.min(), est_depth.max()
+    ax2.imshow(est_depth.squeeze(), cmap="Spectral", vmin=min_depth, vmax=max_depth)
+    ax2.axis("off")
+    fig2.tight_layout()
+
+    fig1.savefig(os.path.join(save_dir, f"est_img_{str(idx).zfill(4)}.png"))
+    fig2.savefig(os.path.join(save_dir, f"est_depth_{str(idx).zfill(4)}.png"))
+    plt.close(fig1)
+    plt.close(fig2)
+
+
 def plot_metric_statistics(psnr_array, ssim_array, lpips_array, plot_dir: str):
     """1 bar plot per metric"""
 
@@ -434,8 +460,10 @@ def eval_rendering(
     render_pipeline_cfg: Dict,
     background: torch.Tensor,
     save_dir: str,
-    save_renders: bool = True,
+    save_every: int = 1,
     monocular: bool = True,
+    save_renders: bool = True,
+    save_predictions: bool = True,
 ):
     """Evaluate the rendering quality of the estimated Scene model and Camera poses by comparing with the dataset groundtruth.
 
@@ -459,6 +487,9 @@ def eval_rendering(
     mkdir_p(plot_dir)
 
     for i, idx in tqdm(enumerate(tstamps)):
+
+        if i % save_every != 0:
+            continue
 
         saved_frame_idx.append(idx)
         cam = cams[i]  # NOTE chen: Make sure that the order of tstamps and cams is the same and corresponding!
@@ -489,11 +520,16 @@ def eval_rendering(
         ### Plot a comparison for inspection
         if save_renders:
             if has_gt_depth:
-                fig = create_comparison_figure(gt_img_np, est_img_np, gt_depth.numpy(), depth_est.numpy())
+                fig = create_comparison_figure(gt_img_np, est_img_np, gt_depth.cpu().numpy(), depth_est.cpu().numpy())
             else:
                 fig = create_comparison_figure(gt_img_np, est_img_np)
             plt.savefig(os.path.join(plot_dir, "rendered_vs_gt_" + str(idx) + ".png"))
             plt.close(fig)
+        if save_predictions:
+            if has_gt_depth:
+                save_dense_predictions(save_dir, idx, depth_est.cpu().numpy(), est_img_np, gt_depth.cpu().numpy())
+            else:
+                save_dense_predictions(save_dir, idx, depth_est.cpu().numpy(), est_img_np)
 
         ### Image similarity metrics
         valid_img = gt_image > 0
