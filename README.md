@@ -12,6 +12,8 @@
   </a>
 </p>
 
+<p align="center"> SotA results for monocular video by integrating depth of an unknown scale! </p>
+
 ## :clapper: Introduction
 This is a deep-learning-based dense visual SLAM framework that achieves **real-time global optimization of poses and 3D reconstruction**.   
 - SotA Tracking from [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM)
