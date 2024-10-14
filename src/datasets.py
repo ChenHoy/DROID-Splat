@@ -133,7 +133,7 @@ class BaseDataset(Dataset):
         self.has_dyn_masks = False
         self.background_value = 0
         self.dilate_masks = True  # NOTE chen: some datasets (e.g. Sintel) have masks too small
-        self.dilation_kernel_size = 5
+        self.dilation_kernel_size = 1
         self.return_stat_masks = cfg.get("with_dyn", False)
         self.n_img = len(self.color_paths)
 
@@ -664,6 +664,8 @@ class TUM_RGBD(BaseDataset):
         self.color_paths, self.depth_paths, self.poses = self.loadtum(
             self.input_folder, cfg, frame_rate=32, mode=cfg.mode
         )
+
+        self.cfg = cfg
         self.color_paths = self.color_paths[:: self.stride]
         self.depth_paths = self.depth_paths[:: self.stride]
         self.indices = self.indices[:: self.stride]
@@ -1123,7 +1125,6 @@ class Sintel(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(Sintel, self).__init__(cfg, device)
 
-        self.cfg = cfg
         self.has_dyn_masks = True
         self.background_value = 255
 
@@ -1175,9 +1176,8 @@ class Sintel(BaseDataset):
 
     def switch_to_rgbd_gt(self):
         """When evaluating, we want to use the ground truth depth maps."""
-        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", self.cfg.data.scene, "*.dpt")))[
-            :-1
-        ]
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/depth*.png")))
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", cfg.data.scene, "*.dpt")))[:-1]
         self.depth_paths = self.depth_paths[:: self.stride]
 
     def load_poses(self, paths: List[str]):
