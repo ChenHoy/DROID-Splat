@@ -4,7 +4,13 @@
   </a>
 </p>
 <h1 align="center"> DROID-Splat </h1> 
-Combining dense end-to-end SLAM with dense 3D Gaussian Splatting.
+<h2 align="center"> Combining dense end-to-end SLAM with dense 3D Gaussian Splatting. </h2> 
+
+<p align="center">
+  <a href="">
+    <img src="assets/output_cropped.gif" width="75%">
+  </a>
+</p>
 
 ## :clapper: Introduction
 This is a deep-learning-based dense visual SLAM framework that achieves **real-time global optimization of poses and 3D reconstruction**.   
