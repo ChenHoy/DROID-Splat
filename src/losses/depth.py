@@ -20,7 +20,8 @@ def depth_loss(
     original_image: Optional[torch.Tensor] = None,
     mask: Optional[torch.Tensor] = None,
     scale_invariant: bool = False,
-) -> float:
+    return_diff: bool = False,
+):
     if mask is None:
         mask = torch.ones_like(depth_est, device=depth_est.device)
 
@@ -33,7 +34,10 @@ def depth_loss(
     if (depth_gt > 0).sum() < MIN_NUM_POINTS or mask.sum() < MIN_NUM_POINTS:
         l1_depth = 0.0
     else:
-        l1_depth = loss_func(depth_est, depth_gt, mask)
+        if return_diff:
+            l1_depth, diff = loss_func(depth_est, depth_gt, mask, return_diff=True)
+        else:
+            l1_depth = loss_func(depth_est, depth_gt, mask)
 
     # Sanity check to avoid division by zero
     if with_smoothness and original_image is not None and mask.sum() > 0:
@@ -41,7 +45,10 @@ def depth_loss(
     else:
         depth_loss = l1_depth
 
-    return depth_loss
+    if return_diff:
+        return depth_loss, diff
+    else:
+        return depth_loss
 
 
 class ScaleAndShiftInvariantLoss(torch.nn.Module):
@@ -96,6 +103,7 @@ class ScaleAndShiftInvariantLoss(torch.nn.Module):
         target: torch.Tensor,
         mask: torch.Tensor,
         interpolate: bool = True,
+        return_diff: bool = False,
     ) -> torch.Tensor:
         if prediction.shape[-1] != target.shape[-1] and interpolate:
             prediction = F.interpolate(prediction, target.shape[-2:], mode="bilinear", align_corners=True)
@@ -107,7 +115,13 @@ class ScaleAndShiftInvariantLoss(torch.nn.Module):
 
         scale, shift = self.compute_scale_and_shift(prediction, target, mask)
         scaled_prediction = scale * prediction + shift
-        return F.l1_loss(scaled_prediction[mask], target[mask])
+
+        if return_diff:
+            diff = torch.abs(scaled_prediction - target)
+            diff[mask] = 0
+            return F.l1_loss(scaled_prediction[mask], target[mask]), diff
+        else:
+            return F.l1_loss(scaled_prediction[mask], target[mask])
 
 
 def depth_reg(depth, gt_image, huber_eps=0.1, mask=None):

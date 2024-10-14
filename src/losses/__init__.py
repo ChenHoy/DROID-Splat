@@ -28,8 +28,10 @@ def mapping_rgbd_loss(
     rgb_boundary_threshold: float = 0.01,
     supervise_with_prior: bool = False,
     scale_invariant: bool = False,
+    return_diff: bool = False,
     **kwargs,
-) -> float:
+):
+
     if (cam.depth is not None and not supervise_with_prior) or (cam.depth_prior is not None and supervise_with_prior):
         has_depth = True
         if supervise_with_prior:  # NOTE leon: this can be active on mono mode, but both depths are the same
@@ -42,7 +44,6 @@ def mapping_rgbd_loss(
     # Transform with exposure (done in other papers)
     # image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
     image_gt = cam.original_image
-
     # Mask out pixels with little information and invalid depth pixels
     rgb_pixel_mask = (image_gt.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
 
@@ -57,18 +58,44 @@ def mapping_rgbd_loss(
     else:
         rgb_mask = rgb_pixel_mask.float()
 
-    loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask)
+    if return_diff:
+        loss_rgb, diff_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask, return_diff=return_diff)
+    else:
+        loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask, return_diff=return_diff)
+
     if has_depth:
         # Only use valid depths for supervision
         depth_pixel_mask = ((depth_gt > MIN_DEPTH) * (depth_gt < MAX_DEPTH)).view(*depth.shape)
         if cam.mask is not None:
             depth_pixel_mask = depth_pixel_mask & cam.mask
-        loss_depth = depth_loss(
-            depth, depth_gt, with_depth_smoothness, beta2, image_gt, depth_pixel_mask, scale_invariant=scale_invariant
-        )
-        return alpha1 * loss_rgb + (1 - alpha1) * loss_depth
+        if return_diff:
+            loss_depth, diff_depth = depth_loss(
+                depth,
+                depth_gt,
+                with_depth_smoothness,
+                beta2,
+                image_gt,
+                depth_pixel_mask,
+                scale_invariant=scale_invariant,
+                return_diff=return_diff,
+            )
+        else:
+            loss_depth = depth_loss(
+                depth,
+                depth_gt,
+                with_depth_smoothness,
+                beta2,
+                image_gt,
+                depth_pixel_mask,
+                scale_invariant=scale_invariant,
+                return_diff=return_diff,
+            )
+        loss = alpha1 * loss_rgb + (1 - alpha1) * loss_depth
+
+    if return_diff:
+        return loss, {"rgb": diff_rgb, "depth": diff_depth}
     else:
-        return loss_rgb
+        return loss
 
 
 def plot_losses(
