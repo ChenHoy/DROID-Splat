@@ -1,7 +1,7 @@
 import os
 import ipdb
 import gc
-from time import sleep, time
+from time import sleep, time, perf_counter
 from typing import List, Optional, Tuple
 from tqdm import tqdm
 import logging
@@ -664,6 +664,78 @@ class SLAM:
         self.all_finished += 1
         self.info("Show stream Done!")
 
+    def get_cams_for_rendering(
+        self,
+        stream,
+        est_c2w_all_lie: np.ndarray,
+        tstamps: List[int],
+        kf_tstamps: List[int],
+        gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None,
+    ) -> List[Camera]:
+        """Go over all [B, 7] lie algebra poses and convert these into renderable Camera objects. If we
+        already refined using non-keyframes during GaussianMapper Refinement, then we simply return the
+        last state of the Mapper.
+        """
+
+        # NOTE this is pretty hacky
+        # Tum has not a depth groundtruth for all frames, so we need to use these indices to get the right frames
+        # Map the indices to frames with actual groundtruth for TUM, we have a reference depth for each frame
+        if "tum" in stream.input_folder:
+            indices = np.where(np.isin(np.array(self.tum_idx), np.array(self.tum_rgbd_idx)))[0]
+            kf_idx = np.where(np.isin(np.array(indices), np.array(kf_tstamps)))[0]
+            kf_tstamps = [tstamps[i] for i in kf_idx]
+            _, _, nonkf_tstamps = eval_utils.torch_intersect1d(torch.tensor(kf_tstamps), torch.tensor(indices))
+            nonkf_tstamps = [int(i) for i in nonkf_tstamps]
+            nonkf_idx = np.where(np.isin(np.array(indices), np.array(nonkf_tstamps)))[0]
+        else:
+            indices = range(est_c2w_all_lie)
+            _, _, nonkf_tstamps = eval_utils.torch_intersect1d(torch.tensor(kf_tstamps), torch.tensor(tstamps))
+            nonkf_tstamps = [int(i) for i in nonkf_tstamps]
+            kf_idx = kf_tstamps
+            nonkf_idx = nonkf_tstamps
+
+        if self.cfg.mapping.refinement.use_non_keyframes:
+            # FIXME this does not work for tum anymore if we evaluate in rgbd mode, but do inference in another mode :/
+            if self.mode == "prgbd" and "tum" in stream.input_folder:
+                raise Exception("TUM evaluation does not work with non-keyframes in PRGBD mode right now!")
+            all_cams = gaussian_mapper_last_state.cameras
+        else:
+            all_cams = []
+            intrinsics = self.video.intrinsics[0]  # We always have the right global intrinsics stored here
+            if self.video.upsample:
+                intrinsics = intrinsics * self.video.scale_factor
+
+            for i, idx in tqdm(enumerate(indices)):
+                view = est_c2w_all_lie[idx]
+                _, gt_image, gt_depth, _, _ = stream[i]
+
+                # c2w -> w2c for initialization
+                view = SE3.InitFromVec(view.float().to(device=self.device)).inv().matrix()
+                fx, fy, cx, cy = intrinsics
+                height, width = gt_image.shape[-2:]
+                fovx, fovy = focal2fov(fx, width), focal2fov(fy, height)
+                projection_matrix = getProjectionMatrix2(
+                    self.gaussian_mapper.z_near, self.gaussian_mapper.z_far, cx, cy, fx, fy, width, height
+                )
+                projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
+                new_cam = Camera(
+                    i,
+                    gt_image.contiguous(),
+                    gt_depth,
+                    gt_depth,
+                    view,
+                    projection_matrix,
+                    (fx, fy, cx, cy),
+                    (fovx, fovy),
+                    (height, width),
+                    device=self.device,
+                )
+                all_cams.append(new_cam)
+
+        kf_cams = [all_cams[i] for i in kf_idx]
+        nonkf_cams = [all_cams[i] for i in nonkf_idx]
+        return kf_cams, nonkf_cams, kf_idx, nonkf_idx
+
     def evaluate(self, stream, gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None) -> None:
         """Based on the current state of the video buffer and maybe on the last state of the Gaussian Mapper,
         evaluate the following against the ground truth from the (RGBD-) Dataset:
@@ -706,6 +778,19 @@ class SLAM:
         ### Rendering  evaluation ###
         #### ------------------- ####
         if self.cfg.run_mapping:
+            if self.mode == "prgbd":
+                if hasattr(stream, "switch_to_rgbd_gt") and callable(stream.switch_to_rgbd_gt):
+                    self.info("Switching to RGBD groundtruth for evaluation ...", logger=log)
+                    self.tum_idx = stream.indices
+                    stream.switch_to_rgbd_gt()
+                    self.tum_rgbd_idx = stream.indices
+                else:
+                    stream.depth_paths = None
+                    self.info(
+                        "Warning: No RGBD groundtruth available for evaluation!",
+                        logger=log,
+                    )
+
             render_eval_path = os.path.join(eval_path, "rendering")
 
             gaussians = gaussian_mapper_last_state.gaussians
@@ -715,10 +800,10 @@ class SLAM:
             self.info(f"Rendering finished with {len(gaussians)} Gaussians!", logger=log)
 
             # Get the whole trajectory as Camera objects, so we can render them
-            all_cams = self.get_all_cams_for_rendering(stream, est_c2w_all_lie, gaussian_mapper_last_state)
-            # Renderer needs timestamps as int for indexing
             kf_tstamps, tstamps = [int(i) for i in kf_tstamps], [int(i) for i in tstamps]
-            kf_cams = [all_cams[i] for i in kf_tstamps]
+            kf_cams, nonkf_cams, kf_tstamps, nonkf_tstamps = self.get_cams_for_rendering(
+                stream, est_c2w_all_lie, tstamps, kf_tstamps, gaussian_mapper_last_state
+            )
 
             ### Evalaute only keyframes, which we overfit to see how good that fit is
             save_dir = os.path.join(render_eval_path, "keyframes")
@@ -743,9 +828,6 @@ class SLAM:
             )
 
             ### Evalaute on non-keyframes, which we have never seen during training (NOTE this is the proper metric, that people compare in papers)
-            _, _, nonkf_tstamps = eval_utils.torch_intersect1d(torch.tensor(kf_tstamps), torch.tensor(tstamps))
-            nonkf_tstamps = [int(i) for i in nonkf_tstamps]
-            nonkf_cams = [all_cams[i] for i in nonkf_tstamps]
             save_dir = os.path.join(render_eval_path, "non-keyframes")
             nonkf_rnd_metrics = eval_utils.eval_rendering(
                 nonkf_cams,
@@ -977,6 +1059,9 @@ class SLAM:
         for p in processes:
             p.start()
 
+        start_time = perf_counter()
+        self.info(str(start_time), logger=log)
+
         # Wait for all processes to have finished before terminating and for final mapping update to be transmitted
         if self.cfg.run_mapping:
             while self.mapping_queue.empty():
@@ -1000,15 +1085,19 @@ class SLAM:
         else:
             gaussian_mapper_last_state = None
 
+        if gaussian_mapper_last_state is not None:
+            gaussian_mapper_last_state.cameras_to(self.device)
+
         while self.all_finished < self.num_running_thread:
             pass
 
-        self.end_time = time() * self.end_time
         self.info("##########", logger=log)
-        self.info(
-            "Total time elapsed: {:.2f} minutes".format((self.end_time - self.start_time).item() / 60), logger=log
-        )
-        self.info("Total FPS: {:.2f}".format(len(stream) / (self.end_time - self.start_time).item()), logger=log)
+        end_time = perf_counter()
+        self.info("Total time elapsed: {:.2f} minutes".format((end_time - start_time) / 60), logger=log)
+        self.info(str(start_time), logger=log)
+        self.info(str(end_time), logger=log)
+        if (end_time - start_time) > 1e-10:
+            self.info("Total FPS: {:.2f}".format(len(stream) / (end_time - start_time)), logger=log)
         self.info("##########", logger=log)
 
         self.terminate(processes, stream, gaussian_mapper_last_state)
