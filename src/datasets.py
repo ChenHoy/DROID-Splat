@@ -1123,6 +1123,7 @@ class Sintel(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(Sintel, self).__init__(cfg, device)
 
+        self.cfg = cfg
         self.has_dyn_masks = True
         self.background_value = 255
 
@@ -1171,6 +1172,13 @@ class Sintel(BaseDataset):
         self.set_intrinsics()
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
+
+    def switch_to_rgbd_gt(self):
+        """When evaluating, we want to use the ground truth depth maps."""
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", self.cfg.data.scene, "*.dpt")))[
+            :-1
+        ]
+        self.depth_paths = self.depth_paths[:: self.stride]
 
     def load_poses(self, paths: List[str]):
         self.poses = []
