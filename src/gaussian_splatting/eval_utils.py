@@ -356,8 +356,7 @@ def save_dense_predictions(
     fig2, ax2 = plt.subplots(1, 1)
     # Display the ground truth image
     if gt_depth is not None:
-        min_depth = min(gt_depth.min(), est_depth.min())
-        max_depth = max(gt_depth.max(), est_depth.max())
+        min_depth, max_depth = gt_depth.min(), gt_depth.max()
     else:
         min_depth, max_depth = est_depth.min(), est_depth.max()
     ax2.imshow(est_depth.squeeze(), cmap="Spectral", vmin=min_depth, vmax=max_depth)
