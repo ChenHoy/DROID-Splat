@@ -133,7 +133,7 @@ class BaseDataset(Dataset):
         self.has_dyn_masks = False
         self.background_value = 0
         self.dilate_masks = True  # NOTE chen: some datasets (e.g. Sintel) have masks too small
-        self.dilation_kernel_size = 5
+        self.dilation_kernel_size = 1
         self.return_stat_masks = cfg.get("with_dyn", False)
         self.n_img = len(self.color_paths)
 
@@ -369,6 +369,11 @@ class Replica(BaseDataset):
         # Adjust number of images according to strides
         self.n_img = len(self.color_paths)
 
+    def switch_to_rgbd_gt(self):
+        """When evaluating, we want to use the ground truth depth maps."""
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/depth*.png")))
+        self.depth_paths = self.depth_paths[:: self.stride]
+
     def load_poses(self, path):
         self.poses = []
         with open(path, "r") as f:
@@ -407,6 +412,11 @@ class TartanAir(BaseDataset):
 
         # Adjust number of images according to strides
         self.n_img = len(self.color_paths)
+
+    def switch_to_rgbd_gt(self):
+        """When evaluating, we want to use the ground truth depth maps."""
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth_left", "*.png")))
+        self.depth_paths = self.depth_paths[:: self.stride]
 
     def load_poses(self, path):
         self.poses = []
@@ -493,6 +503,11 @@ class TotalRecon(BaseDataset):
 
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
+
+    def switch_to_rgbd_gt(self):
+        """When evaluating, we want to use the ground truth depth maps."""
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depths", "*.depth")))
+        self.depth_paths = self.depth_paths[:: self.stride]
 
     def load_poses(self, paths):
         self.poses = []
@@ -590,6 +605,13 @@ class ScanNet(BaseDataset):
         self.n_img = len(self.color_paths)
         print("INFO: {} images got!".format(self.n_img))
 
+    def switch_to_rgbd_gt(self):
+        """When evaluating, we want to use the ground truth depth maps."""
+        self.depth_paths = sorted(
+            glob.glob(os.path.join(self.input_folder, "depth_gt", "*.png")),
+            key=lambda x: int(os.path.basename(x)[:-4]),
+        )[:: self.stride]
+
     def load_poses(self, path):
         self.poses = []
         pose_paths = sorted(
@@ -619,6 +641,11 @@ class CoFusion(BaseDataset):
         self.n_img = len(self.color_paths)
         self.load_poses(os.path.join(self.input_folder, "trajectories"))
 
+    def switch_to_rgbd_gt(self):
+        """When evaluating, we want to use the ground truth depth maps."""
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth_noise", "*.exr")))
+        self.depth_paths = self.depth_paths[:: self.stride]
+
     def load_poses(self, path):
         # We tried, but cannot align the coordinate frame of cofusion to ours.
         # So here we provide identity matrix as proxy.
@@ -632,9 +659,30 @@ class CoFusion(BaseDataset):
 class TUM_RGBD(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(TUM_RGBD, self).__init__(cfg, device)
-        self.color_paths, self.depth_paths, self.poses = self.loadtum(self.input_folder, cfg, frame_rate=32)
+
+        self.indices = None  # Since we have a different number of frames in rgbd and prgbd mode, we have to map this
+        self.color_paths, self.depth_paths, self.poses = self.loadtum(
+            self.input_folder, cfg, frame_rate=32, mode=cfg.mode
+        )
+
+        self.cfg = cfg
         self.color_paths = self.color_paths[:: self.stride]
         self.depth_paths = self.depth_paths[:: self.stride]
+        self.indices = self.indices[:: self.stride]
+        self.poses = None if self.poses is None else self.poses[:: self.stride]
+        self.n_img = len(self.color_paths)
+
+    def switch_to_rgbd_gt(self):
+        """We dont have the same number of depth and image frames. When we evaluate mono or prgbd, we
+        will therefore end up with a different number of frames. Since we want to evaluate the geometry with a gt reference,
+        we do a switch here to the gt depth maps.
+        """
+        self.color_paths, self.depth_paths, self.poses = self.loadtum(
+            self.input_folder, self.cfg, frame_rate=32, mode="rgbd"
+        )
+        self.color_paths = self.color_paths[:: self.stride]
+        self.depth_paths = self.depth_paths[:: self.stride]
+        self.indices = self.indices[:: self.stride]
         self.poses = None if self.poses is None else self.poses[:: self.stride]
         self.n_img = len(self.color_paths)
 
@@ -661,7 +709,7 @@ class TUM_RGBD(BaseDataset):
 
         return associations
 
-    def loadtum(self, datapath: str, cfg: DictConfig, frame_rate: int = -1):
+    def loadtum(self, datapath: str, cfg: DictConfig, frame_rate: int = -1, mode: str = "rgbd"):
         """read video data in tum-rgbd format"""
         if os.path.isfile(os.path.join(datapath, "groundtruth.txt")):
             pose_list = os.path.join(datapath, "groundtruth.txt")
@@ -672,7 +720,7 @@ class TUM_RGBD(BaseDataset):
         depth_list = os.path.join(datapath, "depth.txt")
 
         image_data = self.parse_list(image_list)
-        if cfg.mode == "prgbd":
+        if mode == "prgbd":
             depth_paths = sorted(glob.glob(os.path.join(datapath, self.mono_model, "*.npy")))
             assert len(depth_paths) == len(
                 image_data
@@ -699,15 +747,18 @@ class TUM_RGBD(BaseDataset):
             if t1 - t0 > 1.0 / frame_rate:
                 indicies += [i]
 
+        self.indices = []  # Memoize which actual global frame we use for a given depth
         images, poses, depths, intrinsics = [], [], [], []
         inv_pose = None
         for ix in indicies:
             (i, j, k) = associations[ix]
+
             images += [os.path.join(datapath, image_data[i, 1])]
-            if cfg.mode == "prgbd":
+            if mode == "prgbd":
                 depths += [os.path.join(datapath, depth_paths[j])]
             else:
                 depths += [os.path.join(datapath, depth_data[j, 1])]
+            self.indices.append(i)  # Memoize which actual frame we are using for a given depth
             # timestamp tx ty tz qx qy qz qw
             c2w = self.pose_matrix_from_quaternion(pose_vecs[k])
 
@@ -1122,6 +1173,12 @@ class Sintel(BaseDataset):
         self.set_intrinsics()
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
+
+    def switch_to_rgbd_gt(self):
+        """When evaluating, we want to use the ground truth depth maps."""
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/depth*.png")))
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", cfg.data.scene, "*.dpt")))[:-1]
+        self.depth_paths = self.depth_paths[:: self.stride]
 
     def load_poses(self, paths: List[str]):
         self.poses = []

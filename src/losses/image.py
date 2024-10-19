@@ -14,14 +14,19 @@ def color_loss(
     alpha2: float = 0.85,
     mask: Optional[torch.Tensor] = None,
     use_ms_ssim: bool = False,
-) -> float:
+    return_diff: bool = False,
+):
     """Compute the color loss between the rendered image and the ground truth image.
     This uses a weighted sum of l1 and ssim loss.
     """
     if mask is None:
         mask = torch.ones_like(image_est, device=image_est.device)
 
-    l1_rgb = l1_loss(image_est, image_gt, mask)
+    if return_diff:
+        l1_rgb, diff_rgb = l1_loss(image_est, image_gt, mask, return_diff=True)
+    else:
+        l1_rgb = l1_loss(image_est, image_gt, mask, return_diff=False)
+
     if with_ssim:
         if use_ms_ssim:
             ssim_loss = ms_ssim(
@@ -39,7 +44,11 @@ def color_loss(
         rgb_loss = 0.5 * alpha2 * (1 - ssim_loss) + (1 - alpha2) * l1_rgb
     else:
         rgb_loss = l1_rgb
-    return rgb_loss
+
+    if return_diff:
+        return rgb_loss, diff_rgb.mean(dim=0)
+    else:
+        return rgb_loss
 
 
 def _fspecial_gauss_1d(size: int, sigma: float) -> torch.Tensor:

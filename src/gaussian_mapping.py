@@ -3,6 +3,7 @@ import ipdb
 from copy import deepcopy
 from typing import List, Dict, Optional, Tuple
 import time
+import ipdb
 import math
 import gc
 from termcolor import colored
@@ -722,16 +723,23 @@ class GaussianMapper(object):
                 view.cam_rot_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
                 view.cam_trans_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
 
-    def render_compare(self, view: Camera) -> Tuple[float, Dict]:
+    def render_compare(self, view: Camera, return_diff: bool = False) -> Tuple[float, Dict, Dict]:
         """Render current view and compute loss by comparing with groundtruth"""
         render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
         # NOTE chen: this can be None when self.gaussians is 0. This can happen in some cases
         if render_pkg is None:
-            return 0.0, None
+            if return_diff:
+                return 0.0, None, None
+            else:
+                return 0.0, None
 
         image, depth = render_pkg["render"], render_pkg["depth"]
-        current_loss = mapping_rgbd_loss(image, depth, view, **self.loss_params)
-        return current_loss, render_pkg
+        if return_diff:
+            current_loss, diff = mapping_rgbd_loss(image, depth, view, **self.loss_params, return_diff=True)
+            return current_loss, render_pkg, diff
+        else:
+            current_loss = mapping_rgbd_loss(image, depth, view, **self.loss_params)
+            return current_loss, render_pkg
 
     def mapping_step(
         self,
@@ -756,10 +764,16 @@ class GaussianMapper(object):
         loss = 0.0
         # Collect for densification and pruning
         opacity_acm, radii_acm = [], []
+        rgb_diff, depth_diff = [], []
         visibility_filter_acm, viewspace_point_tensor_acm = [], []
         for view in frames:
 
-            current_loss, render_pkg = self.render_compare(view)
+            if opacity_densify:
+                current_loss, render_pkg, diffs = self.render_compare(view, return_diff=True)
+                rgb_diff.append(diffs["rgb"])
+                depth_diff.append(diffs["depth"])
+            else:
+                current_loss, render_pkg = self.render_compare(view)
             if render_pkg is None:
                 self.info(f"Skipping view {view.uid} as no gaussians are present ...")
                 continue
@@ -817,8 +831,14 @@ class GaussianMapper(object):
             # (else we waste compute, because densify_and_prune will fill initial holes quickly)
             if prune_densify and opacity_densify and self.count > self.update_params.densify.opacity.after:
                 ng_before = len(self.gaussians)
-                for view, opacity in opacity_acm:
-                    mask = opacity.squeeze() < self.update_params.densify.opacity.th
+                for i, acm_item in enumerate(opacity_acm):
+                    view, opacity = acm_item
+                    # Only densify in regions with: i) with low opacity, ii) with high rgb difference, iii) with high depth difference
+                    # see https://arxiv.org/pdf/2403.12535
+                    opacity_mask = opacity.squeeze() < self.update_params.densify.opacity.th
+                    rgb_mask = rgb_diff[i].mean(dim=0) > self.update_params.densify.opacity.rgb_th
+                    depth_mask = depth_diff[i] > self.update_params.densify.opacity.depth_th
+                    mask = torch.logical_and(opacity_mask, torch.logical_and(rgb_mask, depth_mask)).squeeze()
                     # if this mask has too many pixels, then subsample to acceptable lower number
                     if mask.sum() > self.update_params.densify.opacity.max_pixels:
                         mask = random_subsample_mask(mask, self.update_params.densify.opacity.max_pixels)
@@ -836,6 +856,8 @@ class GaussianMapper(object):
         del radii_acm
         del visibility_filter_acm
         del viewspace_point_tensor_acm
+        del rgb_diff
+        del depth_diff
 
         if self.update_params.grad_scaler.do_scale:
             for hook in grad_hooks:
