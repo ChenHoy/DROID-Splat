@@ -462,6 +462,48 @@ class GaussianMapper(object):
 
             return batch
 
+        def draw_random_neighborhood_batch(
+            cams: List[Camera], batch_size: int = 16, neighborhood_size: int = 5
+        ) -> List[Camera]:
+            """Draw multiple mini batches of neighborhood frames from a List of Cameras. Combine these into
+            a single batch for optimization. Neighborhoods are non-overlapping and build around an index.
+            If the neighborhood size is even, we take more frames from the left side of the index.
+
+            NOTE: we assume that cams is sorted according to the timestamp!
+            """
+
+            def draw_neighborhood(cams: List, n_samples: int, idx: int):
+                if n_samples % 2 == 0:
+                    left = max(0, idx - n_samples // 2)
+                    right = min(len(cams), idx + n_samples // 2 - 1)
+                else:
+                    left = max(0, idx - n_samples // 2)
+                    right = min(len(cams), idx + n_samples // 2)
+                return cams[left : right + 1], list(range(left, right + 1))
+
+            # Draw batch_size // neighborhood_size non-overlapping neighborhoods
+            # Include check to not have overlap
+            batch, idxs = [], []
+            rest = batch_size % neighborhood_size
+            for i in range(batch_size // neighborhood_size):
+                if neighborhood_size % 2 == 0:
+                    idx = np.random.randint(neighborhood_size // 2 + 1, len(cams) - neighborhood_size // 2)
+                else:
+                    idx = np.random.randint(neighborhood_size // 2, len(cams) - neighborhood_size // 2)
+                while idx in idxs:
+                    idx = np.random.randint(len(cams))
+
+                # In case we have a rest, we draw a larger neighborhood rather than have one very small one
+                if i == batch_size // neighborhood_size - 1 and rest > 0:
+                    cams_neigh, idx_neigh = draw_neighborhood(cams, neighborhood_size + rest, idx)
+                else:
+                    cams_neigh, idx_neigh = draw_neighborhood(cams, neighborhood_size, idx)
+
+                batch.extend(cams_neigh)
+                idxs.extend(idx_neigh)
+
+            return batch
+
         @torch.no_grad()
         def maybe_fill_holes(render_pkg, view_id: int, size_hole: int = 100, max_mem: float = 0.95) -> bool:
             """We sometimes still have "white holes" left in our Renderings, because we only take covisible areas
@@ -561,13 +603,28 @@ class GaussianMapper(object):
             opacity_densify = self.refine_params.densify.use_opacity
 
             ### Optimize a random batch from all frames
-            batch = draw_random_batch(
-                kf_cams,
-                self.refine_params.bs,
-                weights_kf=weights,
-                nonkf_cams=non_kf_cams,
-                kf_always=self.refine_params.sampling.kf_at_least,
-            )
+            # In prgbd mode we cant densify non-keyframes which have the wrong scale information!
+            if self.mode == "prgbd" and (do_densify or opacity_densify):
+                batch = draw_random_batch(kf_cams, batch_size=self.refine_params.bs)
+            ### Optimize a random batch from all frames
+            elif self.refine_params.sampling.use_neighborhood:
+                # Use multiple random temporal neighborhood, so we have overlap between frames
+                batch = draw_random_neighborhood_batch(
+                    kf_cams,
+                    batch_size=self.refine_params.bs,
+                    neighborhood_size=self.refine_params.sampling.neighborhood_size,
+                )
+            else:
+                # Use completely random frames which might not have overlap
+                # NOTE this method can have a guarantee to use x% keyframes
+                batch = draw_random_batch(
+                    kf_cams,
+                    self.refine_params.bs,
+                    weights_kf=weights,
+                    nonkf_cams=non_kf_cams,
+                    kf_always=self.refine_params.sampling.kf_at_least,
+                )
+
             # Optimize this batch for a few iterations, so newly added Gaussians can converge
             for iter2 in tqdm(
                 range(self.refine_params.batch_iters), desc=colored("Batch Optimization", "magenta"), colour="magenta"
@@ -723,23 +780,16 @@ class GaussianMapper(object):
                 view.cam_rot_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
                 view.cam_trans_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
 
-    def render_compare(self, view: Camera, return_diff: bool = False) -> Tuple[float, Dict, Dict]:
+    def render_compare(self, view: Camera) -> Tuple[float, Dict, Dict]:
         """Render current view and compute loss by comparing with groundtruth"""
         render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
         # NOTE chen: this can be None when self.gaussians is 0. This can happen in some cases
         if render_pkg is None:
-            if return_diff:
-                return 0.0, None, None
-            else:
-                return 0.0, None
+            return 0.0
 
         image, depth = render_pkg["render"], render_pkg["depth"]
-        if return_diff:
-            current_loss, diff = mapping_rgbd_loss(image, depth, view, **self.loss_params, return_diff=True)
-            return current_loss, render_pkg, diff
-        else:
-            current_loss = mapping_rgbd_loss(image, depth, view, **self.loss_params)
-            return current_loss, render_pkg
+        current_loss = mapping_rgbd_loss(image, depth, view, **self.loss_params)
+        return current_loss, render_pkg
 
     def mapping_step(
         self,
@@ -764,16 +814,9 @@ class GaussianMapper(object):
         loss = 0.0
         # Collect for densification and pruning
         opacity_acm, radii_acm = [], []
-        rgb_diff, depth_diff = [], []
         visibility_filter_acm, viewspace_point_tensor_acm = [], []
         for view in frames:
-
-            if opacity_densify:
-                current_loss, render_pkg, diffs = self.render_compare(view, return_diff=True)
-                rgb_diff.append(diffs["rgb"])
-                depth_diff.append(diffs["depth"])
-            else:
-                current_loss, render_pkg = self.render_compare(view)
+            current_loss, render_pkg = self.render_compare(view)
             if render_pkg is None:
                 self.info(f"Skipping view {view.uid} as no gaussians are present ...")
                 continue
@@ -835,10 +878,7 @@ class GaussianMapper(object):
                     view, opacity = acm_item
                     # Only densify in regions with: i) with low opacity, ii) with high rgb difference, iii) with high depth difference
                     # see https://arxiv.org/pdf/2403.12535
-                    opacity_mask = opacity.squeeze() < self.update_params.densify.opacity.th
-                    rgb_mask = rgb_diff[i].mean(dim=0) > self.update_params.densify.opacity.rgb_th
-                    depth_mask = depth_diff[i] > self.update_params.densify.opacity.depth_th
-                    mask = torch.logical_and(opacity_mask, torch.logical_and(rgb_mask, depth_mask)).squeeze()
+                    mask = opacity.squeeze() < self.update_params.densify.opacity.th
                     # if this mask has too many pixels, then subsample to acceptable lower number
                     if mask.sum() > self.update_params.densify.opacity.max_pixels:
                         mask = random_subsample_mask(mask, self.update_params.densify.opacity.max_pixels)
@@ -1029,7 +1069,7 @@ class GaussianMapper(object):
 
             self.info(f"Gaussians before Map Refinement: {len(self.gaussians)}")
             # Add more information for refinement if wanted
-            if self.slam.dataset is not None and self.refine_params.use_non_keyframes:
+            if self.slam.dataset is not None and self.refine_params.sampling.use_non_keyframes:
                 self.add_nonkeyframe_cameras()
 
             self.info("\nMapping refinement starting")

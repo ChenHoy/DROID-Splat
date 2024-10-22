@@ -34,13 +34,15 @@ online_opt:
 
   ## Densification parameters
   densify:
-    # Densify Gaussians based on opacity only after k Mapper updates
+    # Densify Gaussians based on opacity only after k Mapper updates from https://arxiv.org/pdf/2403.12535
     use_opacity: False # Use opacity based densification
     opacity:
       after: 5 # NOTE we usually run the Mapper ~30-40 times on normal videos
       # NOTE we limit this because in unmapped areas, we suddenly would add 100k Gaussians
       max_pixels: 2000 # Maximum number of pixels to densify
-      th: 0.01 # Opacity value below which we densify
+      th: 0.05 # Opacity value below which we densify
+      rgb_th: 0.6 # Only densify if the | I_ref - I_pred | > rgb_th
+      depth_th: 0.1 # Only densify if the | D_ref - D_pred | > depth_th
 
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
@@ -105,7 +107,6 @@ loss:
 # Offline Map Refinement for finetuning
 refinement:
   optimize_poses: False
-  use_non_keyframes: False # Use RGB non-keyframes as well during map refinement
 
   iters: 0 # Optimize over this many different batches
   batch_iters: 50 # Optimize each batch this many times
@@ -114,8 +115,11 @@ refinement:
 
   # Sample according to loss order of frames and include non-keyframes if wanted
   sampling:
-    weighted: False
+    use_non_keyframes: False # Use RGB non-keyframes as well during map refinement
     kf_at_least: 0.5 # Always make sure to have > x% keyframes in a batch
+    weighted: False # Sample frames according to their loss, i.e. frames with higher loss have a higher probability
+    use_neighborhood: False # Use neighborhoods around random frames to have more spatial overlap
+    neighborhood_size: 5 # How many frames to include in the neighborhood
 
   prune_densify_every: 3 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densificatio# This has to be an uneven number
   densify_until: 10 # Dont densify/prune after this many iterations, ALL gaussians are well optimized

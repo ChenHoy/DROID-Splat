@@ -28,8 +28,7 @@ def mapping_rgbd_loss(
     rgb_boundary_threshold: float = 0.01,
     supervise_with_prior: bool = False,
     scale_invariant: bool = False,
-    return_diff: bool = False,
-    **kwargs,
+    **kwargs
 ):
 
     if (cam.depth is not None and not supervise_with_prior) or (cam.depth_prior is not None and supervise_with_prior):
@@ -58,44 +57,20 @@ def mapping_rgbd_loss(
     else:
         rgb_mask = rgb_pixel_mask.float()
 
-    if return_diff:
-        loss_rgb, diff_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask, return_diff=return_diff)
-    else:
-        loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask, return_diff=return_diff)
-
+    loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask)
     if has_depth:
         # Only use valid depths for supervision
         depth_pixel_mask = ((depth_gt > MIN_DEPTH) * (depth_gt < MAX_DEPTH)).view(*depth.shape)
         if cam.mask is not None:
             depth_pixel_mask = depth_pixel_mask & cam.mask
-        if return_diff:
-            loss_depth, diff_depth = depth_loss(
-                depth,
-                depth_gt,
-                with_depth_smoothness,
-                beta2,
-                image_gt,
-                depth_pixel_mask,
-                scale_invariant=scale_invariant,
-                return_diff=return_diff,
-            )
-        else:
-            loss_depth = depth_loss(
-                depth,
-                depth_gt,
-                with_depth_smoothness,
-                beta2,
-                image_gt,
-                depth_pixel_mask,
-                scale_invariant=scale_invariant,
-                return_diff=return_diff,
-            )
+        loss_depth = depth_loss(
+            depth, depth_gt, with_depth_smoothness, beta2, image_gt, depth_pixel_mask, scale_invariant=scale_invariant
+        )
         loss = alpha1 * loss_rgb + (1 - alpha1) * loss_depth
-
-    if return_diff:
-        return loss, {"rgb": diff_rgb, "depth": diff_depth}
     else:
-        return loss
+        loss = loss_rgb
+
+    return loss
 
 
 def plot_losses(

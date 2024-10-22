@@ -10,7 +10,7 @@ online_opt:
   n_last_frames: 10 # Always optimize the last n frames
   n_rand_frames: 20 # Optimize random global frames on top
 
-  prune_every: 4 # Prune every k Render passes
+  prune_every: 2 # Prune every k Render passes
   pruning:
     use_covisibility: True
     covisibility:
@@ -26,7 +26,7 @@ online_opt:
     vanilla:
       max_grad: 0.001 # Gaussians with gradients above this are split (smaller -> denser)
       extent: 5  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
-      min_opacity: 0.05 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
+      min_opacity: 0.05 # Gaussians with opacity lower than this get pruned (bigger -> more pruning) # NOTE: Splat-SLAM uses somehow 0.7 here
       max_screen_size: 15 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
       scale_std: 1.0 # How much variance when perturbating old Gaussians during densify_and_split()
 
