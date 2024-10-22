@@ -7,8 +7,7 @@ defaults:
 
 hydra:
   run:
-    # dir: /home/chen/code/discriminative/Reconstruction/sfm/droidsplat/outputs/temp/${now:%Y-%m-%d_%H-%M-%S}_${mode}
-    dir: /home/chen/code/discriminative/Reconstruction/sfm/droidsplat/outputs/tum_rgbd/tracking_and_rendering/sota_refine/mono/new/fr1_desk2/${now:%Y-%m-%d_%H-%M-%S}_${mode}
+    dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}_${mode}
   job:
     chdir: False
     name: droidsplat # Change this to your experiment run name, e.g. the dataset you run on or the run of a configuration
