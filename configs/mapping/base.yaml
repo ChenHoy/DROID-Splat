@@ -41,8 +41,6 @@ online_opt:
       # NOTE we limit this because in unmapped areas, we suddenly would add 100k Gaussians
       max_pixels: 2000 # Maximum number of pixels to densify
       th: 0.05 # Opacity value below which we densify
-      rgb_th: 0.6 # Only densify if the | I_ref - I_pred | > rgb_th
-      depth_th: 0.1 # Only densify if the | D_ref - D_pred | > depth_th
 
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
