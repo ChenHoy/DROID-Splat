@@ -1,5 +1,6 @@
 from typing import Optional, Tuple
 from omegaconf import DictConfig
+import numpy as np
 
 import torch
 from torch import nn
@@ -39,6 +40,11 @@ class Camera(nn.Module):
         self.depth = depth_est
         self.depth_prior = depth_gt
         self.grad_mask = None
+
+        tan_fovx = np.tan(self.FoVx / 2.0)
+        tan_fovy = np.tan(self.FoVy / 2.0)
+        self.focal_y = self.image_height / (2.0 * tan_fovy)
+        self.focal_x = self.image_width / (2.0 * tan_fovx)
 
         self.mask = mask
 

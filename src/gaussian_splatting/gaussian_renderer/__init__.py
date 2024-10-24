@@ -19,7 +19,7 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianR
 
 from ..scene.gaussian_model import GaussianModel
 from ..utils.sh_utils import eval_sh
-from ..utils.point_utils import depth_to_normal
+#from ..utils.point_utils import depth_to_normal
 
 
 def check_nan(tensor: torch.Tensor) -> bool:
@@ -49,6 +49,7 @@ def render(
     override_color=None,
     mask=None,
     device: str = "cuda",
+    use_3d_filter: bool = False,
 ):
     """
     Render the scene.
@@ -90,7 +91,7 @@ def render(
 
     means3D = pc.get_xyz
     means2D = screenspace_points
-    opacity = pc.get_opacity
+    opacity = pc.get_opacity_with_3D_filter if use_3d_filter else pc.get_opacity
 
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
     # scaling / rotation by the rasterizer.
@@ -104,7 +105,7 @@ def render(
         if pc.get_scaling.shape[-1] == 1:
             scales = pc.get_scaling.repeat(1, 3)
         else:
-            scales = pc.get_scaling
+            scales = pc.get_scaling_with_3D_filter if use_3d_filter else pc.get_scaling
         rotations = pc.get_rotation
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors

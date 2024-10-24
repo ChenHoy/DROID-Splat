@@ -856,3 +856,102 @@ class GaussianModel:
 
     def info(self, msg: str) -> None:
         print(colored(f"[Gaussian Mapping] {msg}", "magenta"))
+
+    @property
+    def get_scaling_with_3D_filter(self):
+        scales = self.get_scaling
+        
+        scales = torch.square(scales) + torch.square(self.filter_3D)
+        scales = torch.sqrt(scales)
+        return scales
+    
+    @property
+    def get_opacity_with_3D_filter(self):
+        opacity = self.opacity_activation(self._opacity)
+        # apply 3D filter
+        scales = self.get_scaling
+        
+        scales_square = torch.square(scales)
+        det1 = scales_square.prod(dim=1)
+        
+        scales_after_square = scales_square + torch.square(self.filter_3D) 
+        det2 = scales_after_square.prod(dim=1) 
+        coef = torch.sqrt(det1 / det2)
+        return opacity * coef[..., None]
+
+
+    @torch.no_grad()
+    def compute_3D_filter(self, cameras):
+        #print("Computing 3D filter")
+        #TODO consider focal length and image width
+        xyz = self.get_xyz
+        #print(xyz.shape)
+        distance = torch.ones((xyz.shape[0]), device=xyz.device) * 100000.0
+        valid_points = torch.zeros((xyz.shape[0]), device=xyz.device, dtype=torch.bool)
+        
+        # we should use the focal length of the highest resolution camera
+        focal_length = 0.
+
+        H, W = cameras[0].image_height, cameras[0].image_width
+
+        centers3d = self.get_xyz
+        centers3d = torch.cat((centers3d, torch.ones(centers3d.shape[0], 1, device=self.device)), dim=1)
+
+        for cam in cameras:
+
+            # NOTE leon: this is their implementation of the projection
+
+            # transform points to camera space
+            # R = torch.tensor(camera.R, device=xyz.device, dtype=torch.float32)
+            # T = torch.tensor(camera.T, device=xyz.device, dtype=torch.float32)
+            #  # R is stored transposed due to 'glm' in CUDA code so we don't neet transopse here
+            # xyz_cam = torch.matmul(R, xyz.T).T + T
+            # print(T.shape)
+            
+            # #xyz_to_cam = torch.norm(xyz_cam, dim=1)
+            # print(xyz_cam.shape)
+            # # project to screen space
+            # valid_depth = xyz_cam[:, 2] > 0.2
+            # print(valid_depth.shape)
+            
+            
+            # x, y, z = xyz_cam[:, 0], xyz_cam[:, 1], xyz_cam[:, 2]
+            # z = torch.clamp(z, min=0.001)
+            
+            # x = x / z * camera.focal_x + camera.image_width / 2.0
+            # y = y / z * camera.focal_y + camera.image_height / 2.0
+            
+            # in_screen = torch.logical_and(torch.logical_and(x >= 0, x < camera.image_width), torch.logical_and(y >= 0, y < camera.image_height))
+            
+            
+            K = torch.tensor([[cam.fx, 0, cam.cx], [0, cam.fy, cam.cy], [0, 0, 1]], device=self.device)
+            RT = torch.cat((cam.R.squeeze(), cam.T.view(3, 1)), dim=1)
+            proj = K @ RT
+
+            centers2d = centers3d @ proj.t()
+        
+            valid_depth = centers2d[:, 2] > 0.2
+
+
+            x,y,z = centers2d[:, 0], centers2d[:, 1], centers2d[:, 2]
+            x,y = x / z, y / z
+
+            # use similar tangent space filtering as in the paper
+            in_screen = torch.logical_and(torch.logical_and(x >= -0.15 * W, x <= W * 1.15), torch.logical_and(y >= -0.15 * H, y <= 1.15 * H))
+            
+        
+            valid = torch.logical_and(valid_depth, in_screen)
+
+
+            # distance[valid] = torch.min(distance[valid], xyz_to_cam[valid])
+            distance[valid] = torch.min(distance[valid], z[valid])
+            valid_points = torch.logical_or(valid_points, valid)
+            if focal_length < cam.focal_x:
+                focal_length = cam.focal_x
+        
+        distance[~valid_points] = distance[valid_points].max()
+        
+        #TODO remove hard coded value
+        #TODO box to gaussian transform
+        filter_3D = distance / focal_length * (0.2 ** 0.5)
+        self.filter_3D = filter_3D[..., None]

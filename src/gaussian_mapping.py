@@ -61,6 +61,7 @@ class GaussianMapper(object):
 
         # Given an external mask for dyn. objects, remove these from the optimization
         self.filter_dyn = cfg.get("with_dyn", False)
+        self.use_3d_filter = cfg.mapping.use_3D_filter
 
         self.save_renders = cfg.mapping.save_renders
 
@@ -135,7 +136,7 @@ class GaussianMapper(object):
 
     def save_render(self, cam: Camera, render_path: str) -> None:
         """Save a rendered frame"""
-        render_pkg = render(cam, self.gaussians, self.pipeline_params, self.background, device=self.device)
+        render_pkg = render(cam, self.gaussians, self.pipeline_params, self.background, device=self.device, use_3d_filter=self.use_3D_filter)
         rgb = np.uint8(255 * render_pkg["render"].detach().cpu().numpy().transpose(1, 2, 0))
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         cv2.imwrite(render_path, bgr)
@@ -712,6 +713,9 @@ class GaussianMapper(object):
         # Sanity check
         if not feedback_disps and not feedback_poses:
             return {"index": index, "poses": poses, "depths": depths}
+        
+        if self.use_3d_filter:
+            self.gaussians.compute_3D_filter(frames)
 
         # Render frames to extract depth
         rejected, accepted = [], []
@@ -721,7 +725,8 @@ class GaussianMapper(object):
             if self.cam2buffer[view.uid] in ignore_frames:
                 rejected.append(view.uid)
                 continue
-            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
+
+            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device, use_3d_filter=self.use_3d_filter)
 
             # We computed covisibility and can therefore count how many Gaussians were observed in how many frames
             if was_pruned:
@@ -782,7 +787,7 @@ class GaussianMapper(object):
 
     def render_compare(self, view: Camera) -> Tuple[float, Dict, Dict]:
         """Render current view and compute loss by comparing with groundtruth"""
-        render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
+        render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device, use_3d_filter=self.use_3d_filter)
         # NOTE chen: this can be None when self.gaussians is 0. This can happen in some cases
         if render_pkg is None:
             return 0.0
@@ -810,6 +815,9 @@ class GaussianMapper(object):
 
         if optimize_poses:
             pose_optimizer = self.get_pose_optimizer(frames)
+
+        if self.use_3d_filter:
+            self.gaussians.compute_3D_filter(frames)
 
         loss = 0.0
         # Collect for densification and pruning
@@ -896,8 +904,8 @@ class GaussianMapper(object):
         del radii_acm
         del visibility_filter_acm
         del viewspace_point_tensor_acm
-        del rgb_diff
-        del depth_diff
+        # del rgb_diff
+        # del depth_diff
 
         if self.update_params.grad_scaler.do_scale:
             for hook in grad_hooks:
@@ -949,7 +957,7 @@ class GaussianMapper(object):
         occ_aware_visibility = {}
         self.gaussians.n_obs.fill_(0)  # Reset observation count
         for view in frames:
-            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background)
+            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, use_3d_filter=self.use_3d_filter)
             visibility = (render_pkg["n_touched"] > 0).long()
             occ_aware_visibility[view.uid] = visibility
             # Count when at least one pixel was touched by the Gaussian
