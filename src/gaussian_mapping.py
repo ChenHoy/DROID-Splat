@@ -438,6 +438,10 @@ class GaussianMapper(object):
             """
 
             def draw_frames(cams, n_samples, weights: Optional[List[float]] = None):
+                # Sanity check for when the batch size is bigger than our number of keyframes
+                if n_samples >= len(cams):
+                    return cams
+                
                 if weights is not None:
                     idx = list(WeightedRandomSampler(weights, n_samples, replacement=False))
                 else:
