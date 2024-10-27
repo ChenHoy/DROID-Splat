@@ -49,13 +49,6 @@ online_opt:
       min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
       max_screen_size: 10 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
     
-  ## Scale gradients of already optimized Gaussians to battle catastrophic forgetting
-  grad_scaler:
-    do_scale: False # Scale gradients of Gaussians by how many times they already have been optimized
-    min_scale: 0.0001 # Reduce learning rate only to e.g. max. 1/10
-    decay_rate: 0.001 # Decay rate of exponential function
-    min_counte: 200 # Only scale after a Gaussian was already optimized for this many iterations
-
   # How to Filter the Tracking Map before feeding into Mapper
   filter: # Parameter for filtering incoming points from the SLAM system
     multiview: True # Only initialize Gaussians that are consistent in multiple views
