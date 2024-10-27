@@ -441,7 +441,7 @@ class GaussianMapper(object):
                 # Sanity check for when the batch size is bigger than our number of keyframes
                 if n_samples >= len(cams):
                     return cams
-                
+
                 if weights is not None:
                     idx = list(WeightedRandomSampler(weights, n_samples, replacement=False))
                 else:
@@ -591,12 +591,13 @@ class GaussianMapper(object):
 
         ### Refinement loop
         # Reset scheduler and optimizer for refinement
-        self.opt_params.position_lr_max_steps = self.refine_params.batch_iters
+        self.opt_params.position_lr_max_steps = self.refine_params.batch_iters * self.refine_params.iters
         # Reduce the learning rate by wanted factor for refinement since we already have a good map
         self.opt_params.position_lr_init *= self.refine_params.lr_factor
         self.opt_params.position_lr_final *= self.refine_params.lr_factor
         self.gaussians.training_setup(self.opt_params)
 
+        total_iter = 0
         for iter1 in tqdm(
             range(self.refine_params.iters), desc=colored("Gaussian Refinement", "magenta"), colour="magenta"
         ):
@@ -612,7 +613,7 @@ class GaussianMapper(object):
                 batch = draw_random_batch(kf_cams, batch_size=self.refine_params.bs)
             ### Optimize a random batch from all frames
             elif self.refine_params.sampling.use_neighborhood:
-                # Use multiple random temporal neighborhood, so we have overlap between frames
+                # Use multiple random temporal neighborhood, so we have at least overlap between some frames
                 batch = draw_random_neighborhood_batch(
                     kf_cams,
                     batch_size=self.refine_params.bs,
@@ -634,7 +635,7 @@ class GaussianMapper(object):
                 range(self.refine_params.batch_iters), desc=colored("Batch Optimization", "magenta"), colour="magenta"
             ):
                 loss = self.mapping_step(
-                    iter2,
+                    total_iter, # Use the globa iteration for annedaling the learning rate!
                     batch,
                     self.refine_params.densify.vanilla,
                     prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
@@ -650,6 +651,8 @@ class GaussianMapper(object):
                             gaussians=clone_obj(self.gaussians), keyframes=[frame.detach() for frame in batch]
                         )
                     )
+                
+                total_iter += 1
 
             del batch
 
@@ -838,12 +841,6 @@ class GaussianMapper(object):
             self.last_frame_loss[view.uid] = current_loss.item()
             loss += current_loss
 
-        if self.update_params.grad_scaler.do_scale:
-            # Scale gradients dependent on how often a Gaussian was already optimized in the past
-            grad_hooks = self.gaussians.set_scale_grads(
-                self.update_params.grad_scaler.min_scale, self.update_params.grad_scaler.decay_rate
-            )
-
         # Scale the loss with the number of frames so we adjust the learning rate dependent on batch size,
         # (naive adding for huge batches would result on bigger updates)
         # NOTE chen: MonoGS scales their loss with len(frames)
@@ -900,12 +897,6 @@ class GaussianMapper(object):
         del radii_acm
         del visibility_filter_acm
         del viewspace_point_tensor_acm
-        del rgb_diff
-        del depth_diff
-
-        if self.update_params.grad_scaler.do_scale:
-            for hook in grad_hooks:
-                hook.remove()  # Remove again for sanity, the hook needs to be set every iteration again
 
         if optimize_poses:
             pose_optimizer.step()
