@@ -635,7 +635,7 @@ class GaussianMapper(object):
                 range(self.refine_params.batch_iters), desc=colored("Batch Optimization", "magenta"), colour="magenta"
             ):
                 loss = self.mapping_step(
-                    total_iter, # Use the globa iteration for annedaling the learning rate!
+                    total_iter,  # Use the globa iteration for annedaling the learning rate!
                     batch,
                     self.refine_params.densify.vanilla,
                     prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
@@ -651,7 +651,7 @@ class GaussianMapper(object):
                             gaussians=clone_obj(self.gaussians), keyframes=[frame.detach() for frame in batch]
                         )
                     )
-                
+
                 total_iter += 1
 
             del batch
@@ -659,7 +659,6 @@ class GaussianMapper(object):
     def get_mapping_update(
         self,
         frames: List[Camera],
-        was_pruned: bool = False,
         feedback_poses: bool = True,
         feedback_disps: bool = False,
         opacity_threshold: float = 0.1,
@@ -729,16 +728,6 @@ class GaussianMapper(object):
                 rejected.append(view.uid)
                 continue
             render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
-
-            # We computed covisibility and can therefore count how many Gaussians were observed in how many frames
-            if was_pruned:
-                in_frame = self.gaussians.unique_kfIDs == view.uid
-                n_observed = self.gaussians.n_obs[in_frame]
-                # Bad frames usually dont have many covisible Gaussians attached to them
-                if (n_observed < 1).sum() / n_observed.numel() > max_lonely_gaussians:
-                    rejected.append(view.uid)
-                    # self.info(f"Skipping view {view.uid} during Feedback as it has too few covisible Gaussians ...")
-                    continue
 
             # NOTE chen: this can be None when self.gaussians is 0. This could happen in some cases
             if render_pkg is None:
@@ -912,12 +901,7 @@ class GaussianMapper(object):
         return avg_loss.detach().item()
 
     def covisibility_pruning(
-        self,
-        n_last_frames: int = 10,
-        mode: str = "new",
-        last: int = 5,
-        dont_prune_latest: int = 1,
-        visibility_th: int = 2,
+        self, mode: str = "new", last: int = 10, dont_prune_latest: int = 1, visibility_th: int = 2
     ):
         """Covisibility based pruning.
 
@@ -937,9 +921,9 @@ class GaussianMapper(object):
         if mode == "new":
             # Dont prune the Last/last-1 frame, since we then would add and prune Gaussians immediately -> super wasteful
             if dont_prune_latest > 0:
-                frames = frames[-n_last_frames:-dont_prune_latest]
+                frames = frames[-last:-dont_prune_latest]
             else:
-                frames = frames[-n_last_frames:]
+                frames = frames[-last:]
 
         occ_aware_visibility = {}
         self.gaussians.n_obs.fill_(0)  # Reset observation count
@@ -1228,12 +1212,10 @@ class GaussianMapper(object):
         print(colored("\n[Gaussian Mapper] ", "magenta"), colored(f"Loss: {self.loss_list[-1]}", "cyan"))
 
         ### Prune unreliable Gaussians
-        was_pruned = False
         if len(self.iteration_info) % self.update_params.prune_every == 0 and delay_to_tracking:
             if self.update_params.pruning.use_covisibility:
                 # Gaussians should be visible in multiple frames
-                self.covisibility_pruning(n_last_frames=self.n_last_frames, **self.update_params.pruning.covisibility)
-                was_pruned = True
+                self.covisibility_pruning(**self.update_params.pruning.covisibility)
 
         ### Feedback new state of map to Tracker
         if (self.feedback_poses or self.feedback_disps) and self.count > self.feedback_params.warmup:
@@ -1243,7 +1225,6 @@ class GaussianMapper(object):
                 update_cams = frames
             to_set = self.get_mapping_update(
                 update_cams,
-                was_pruned,
                 feedback_poses=self.feedback_poses and self.update_params.optimize_poses,
                 feedback_disps=self.feedback_disps,
                 **self.feedback_params.kwargs,
