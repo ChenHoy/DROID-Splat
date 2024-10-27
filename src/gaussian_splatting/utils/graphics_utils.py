@@ -73,8 +73,11 @@ def getProjectionMatrix(znear, zfar, fovX, fovY):
     P[0, 2] = (right + left) / (right - left)
     P[1, 2] = (top + bottom) / (top - bottom)
     P[3, 2] = z_sign
-    P[2, 2] = -(zfar + znear) / (zfar - znear)
-    P[2, 3] = -2 * (zfar * znear) / (zfar - znear)
+    # NOTE chen: this is a difference to the on-paper formula I think
+    # P[2, 2] = -(zfar + znear) / (zfar - znear)
+    # P[2, 3] = -2 * (zfar * znear) / (zfar - znear)
+    P[2, 2] = z_sign * zfar / (zfar - znear)
+    P[2, 3] = -(zfar * znear) / (zfar - znear)
     return P
 
 
@@ -110,3 +113,13 @@ def fov2focal(fov, pixels):
 
 def focal2fov(focal, pixels):
     return 2 * math.atan(pixels / (2 * focal))
+
+
+def geom_transform_points(points: torch.Tensor, transf_matrix: torch.Tensor) -> torch.Tensor:
+    P, _ = points.shape
+    ones = torch.ones(P, 1, dtype=points.dtype, device=points.device)
+    points_hom = torch.cat([points, ones], dim=1)
+    points_out = torch.matmul(points_hom, transf_matrix.unsqueeze(0))
+
+    denom = points_out[..., 3:] + 0.0000001
+    return (points_out[..., :3] / denom).squeeze(dim=0)

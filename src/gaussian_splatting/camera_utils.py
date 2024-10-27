@@ -8,6 +8,10 @@ from .utils.graphics_utils import getProjectionMatrix2, getWorld2View2, focal2fo
 from ..utils import image_gradient, image_gradient_mask
 
 
+# FIXME: they have different attributes likely due to a different projection
+# TODO zfar, znear is already stored here
+# TODO They dont use the intrinsics here for some reason
+# TODO They have an additional alpha mask, maybe to blend things? is this really the same as our mask?
 class Camera(nn.Module):
     def __init__(
         self,

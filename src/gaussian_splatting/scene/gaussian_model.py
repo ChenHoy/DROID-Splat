@@ -36,90 +36,6 @@ from ..utils.graphics_utils import BasicPointCloud, getWorld2View2
 from ..utils.sh_utils import RGB2SH
 
 
-class GradientScaler(object):
-    """
-    Tracks the number of times each variable has been optimized and scales gradients with diminishing effect.
-    We use an exponential decay schedule here.
-    """
-
-    def __init__(self, min_scale: float = 0.1, decay_rate: float = 0.01, counts: torch.Tensor = None):
-        self.min_scale = min_scale  # Dont lower gradients below 1/10, so we never stop optimizing some old gaussians
-        self.decay_rate = decay_rate
-        self.counts = counts if counts is not None else torch.ones(1)
-
-    def get_scale(self, counts: torch.Tensor) -> torch.Tensor:
-        """
-        Scales the gradients of a variable based on its optimization count with diminishing effect.
-
-        Args:
-            variable: The torch.Tensor variable for which to scale gradients.
-
-        Returns:
-            The scaling factor as a Tensor of floats.
-        """
-        decay = torch.exp(-self.decay_rate * counts)
-        scale = self.min_scale + (1 - self.min_scale) * decay
-        return scale
-
-    def __call__(self, grad: torch.Tensor) -> torch.Tensor:
-        # Apply scaling factor to gradients during backward pass
-        assert len(grad) == len(
-            self.counts
-        ), f"Gradient and count shape mismatch! Expected shape {grad.shape}, got {self.counts.shape}"
-        scaling = self.get_scale(self.counts)
-
-        if grad.ndim == 1:
-            return grad * scaling
-        elif grad.ndim == 2:
-            return grad * scaling[:, None]
-        elif grad.ndim == 3:
-            return grad * scaling[:, None, None]
-        else:
-            raise Exception(f"Gradient shape {grad.shape} not supported! Use either 1D, 2D or 3D tensors.")
-
-
-class InverseScaler(GradientScaler):
-    def __init__(self, min_scale: float = 0.1, decay_rate: float = 0.01, counts: torch.Tensor = None):
-        super().__init__(min_scale, decay_rate, counts)
-
-    def __call__(self, grad: torch.Tensor) -> torch.Tensor:
-        # Apply scaling factor to gradients during backward pass
-        assert len(grad) == len(
-            self.counts
-        ), f"Gradient and count shape mismatch! Expected shape {grad.shape}, got {self.counts.shape}"
-        scaling = self.get_scale(self.counts)
-
-        if grad.ndim == 1:
-            return grad / scaling
-        elif grad.ndim == 2:
-            return grad / scaling[:, None]
-        elif grad.ndim == 3:
-            return grad / scaling[:, None, None]
-        else:
-            raise Exception(f"Gradient shape {grad.shape} not supported! Use either 1D, 2D or 3D tensors.")
-
-
-def scale_gradients(variable: torch.nn.Parameter, scale_fn):
-    """Attach a hook, so the gradients are automatically scaled by the GradientScaler for each backward pass."""
-
-    def hook(parameter):
-        parameter.grad = scale_fn(parameter.grad)
-
-    h = variable.register_post_accumulate_grad_hook(hook)
-    return h
-
-
-def unscale_gradients(variable: torch.nn.Parameter, inverse_fn) -> torch.Tensor:
-    """Because we use the gradients when densifying and pruning Gaussians, we might want to use the
-    original gradients, else we easily get stuck with a fixed number of Gaussians and dont densify anymore.
-
-    The densification call lies between loss.backward() and optimizer.step()! Therefore we need to unscale the gradients
-    after computation in backward(), but leave them in place for the following optimizer.step() scall.
-    For this reason we dont change the gradient in place, but return the unscaled value for the densification function.
-    """
-    return inverse_fn(variable.grad)
-
-
 class GaussianModel:
     def __init__(self, sh_degree: int, config=None, device: str = "cuda:0"):
         self.active_sh_degree = 0
@@ -487,19 +403,6 @@ class GaussianModel:
         self.n_obs = self.n_obs[valid_points_mask.cpu()]
         self.n_optimized = self.n_optimized[valid_points_mask.cpu()]
 
-    # def prune_floaters(
-    #     self, search_radius: float = 0.1, min_nn_distance: float = 0.05, return_mask: bool = True
-    # ) -> None:
-    #     """Prune isolated outlier points which are floaters without any neighbors"""
-    #     pcd_temp = self._xyz.unsqueeze(0)
-    #     # NOTE since we search within the same point cloud, we will always get the original point as the closest neighbor with distance 0.0
-    #     all_dists, idxs, _, _ = frnn.frnn_grid_points(pcd_temp, pcd_temp, K=2, r=search_radius)
-    #     nn_dists = all_dists[..., 1]  # Get the actual nearest neighbor distance
-    #     floaters = nn_dists > min_nn_distance  # Points without a nearest neighbor in this radius are likely floaters
-    #     self.prune_points(floaters.squeeze())
-    #     if return_mask:
-    #         return floaters
-
     def densification_postfix(
         self,
         new_xyz,
@@ -842,17 +745,6 @@ class GaussianModel:
         avg_scale = factor * torch.median(depth, dim=0)[0]
         print(f"Using average scale: {avg_scale}")
         return avg_scale.item()
-
-    def set_scale_grads(self, min_scale: float = 0.1, decay_rate: float = 0.01) -> None:
-        """Attach a hook with the scaling factor to scale the gradients during the backward pass dependent on self.n_optimized."""
-        scale_fn = GradientScaler(min_scale=min_scale, decay_rate=decay_rate, counts=self.n_optimized.to(self.device))
-        h_xyz = scale_gradients(self._xyz, scale_fn)
-        h_features_dc = scale_gradients(self._features_dc, scale_fn)
-        h_features_rest = scale_gradients(self._features_rest, scale_fn)
-        h_opacity = scale_gradients(self._opacity, scale_fn)
-        h_scaling = scale_gradients(self._scaling, scale_fn)
-        h_rot = scale_gradients(self._rotation, scale_fn)
-        return [h_xyz, h_features_dc, h_features_rest, h_opacity, h_scaling, h_rot]
 
     def info(self, msg: str) -> None:
         print(colored(f"[Gaussian Mapping] {msg}", "magenta"))

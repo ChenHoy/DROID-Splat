@@ -124,7 +124,9 @@ class ScaleAndShiftInvariantLoss(torch.nn.Module):
             return F.l1_loss(scaled_prediction[mask], target[mask])
 
 
-def depth_reg(depth, gt_image, huber_eps=0.1, mask=None):
+# NOTE chen: this is our self written code similar to MonoGS
+def our_depth_reg(depth: torch.Tensor, gt_image: torch.Tensor, mask: Optional[torch.Tensor] = None) -> float:
+    """Ensure that the depth is smooth in regions where the image gradient is low."""
 
     mask_v, mask_h = image_gradient_mask(depth)
     if mask is not None:
@@ -139,6 +141,18 @@ def depth_reg(depth, gt_image, huber_eps=0.1, mask=None):
     w_v = torch.exp(-10 * gray_grad_v**2)
     err = (w_h * torch.abs(depth_grad_h)).mean() + (w_v * torch.abs(depth_grad_v)).mean()
     return err
+
+
+# NOTE chen: this is called smooth_loss in the 2D Gaussian Splatting Repo
+def depth_reg(disp: torch.Tensor, img: torch.Tensor) -> float:
+    """Ensure that the depth is smooth in regions where the image gradient is low."""
+    grad_disp_x = torch.abs(disp[:, 1:-1, :-2] + disp[:, 1:-1, 2:] - 2 * disp[:, 1:-1, 1:-1])
+    grad_disp_y = torch.abs(disp[:, :-2, 1:-1] + disp[:, 2:, 1:-1] - 2 * disp[:, 1:-1, 1:-1])
+    grad_img_x = torch.mean(torch.abs(img[:, 1:-1, :-2] - img[:, 1:-1, 2:]), 0, keepdim=True) * 0.5
+    grad_img_y = torch.mean(torch.abs(img[:, :-2, 1:-1] - img[:, 2:, 1:-1]), 0, keepdim=True) * 0.5
+    grad_disp_x *= torch.exp(-grad_img_x)
+    grad_disp_y *= torch.exp(-grad_img_y)
+    return grad_disp_x.mean() + grad_disp_y.mean()
 
 
 def get_median_depth(depth, opacity=None, mask=None, return_std=False):

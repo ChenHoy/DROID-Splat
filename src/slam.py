@@ -680,7 +680,7 @@ class SLAM:
         # NOTE this is pretty hacky
         # Tum has not a depth groundtruth for all frames, so we need to use these indices to get the right frames
         # Map the indices to frames with actual groundtruth for TUM, we have a reference depth for each frame
-        if "tum" in stream.input_folder:
+        if "tum" in stream.input_folder and self.mode == "prgbd":
             indices = np.where(np.isin(np.array(self.tum_idx), np.array(self.tum_rgbd_idx)))[0]
             kf_idx = np.where(np.isin(np.array(indices), np.array(kf_tstamps)))[0]
             kf_tstamps = [tstamps[i] for i in kf_idx]
@@ -688,7 +688,7 @@ class SLAM:
             nonkf_tstamps = [int(i) for i in nonkf_tstamps]
             nonkf_idx = np.where(np.isin(np.array(indices), np.array(nonkf_tstamps)))[0]
         else:
-            indices = range(est_c2w_all_lie)
+            indices = range(len(est_c2w_all_lie))
             _, _, nonkf_tstamps = eval_utils.torch_intersect1d(torch.tensor(kf_tstamps), torch.tensor(tstamps))
             nonkf_tstamps = [int(i) for i in nonkf_tstamps]
             kf_idx = kf_tstamps
