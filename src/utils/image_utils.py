@@ -19,27 +19,24 @@ def psnr(img1, img2):
     mse = ((img1 - img2) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
     return 20 * torch.log10(1.0 / torch.sqrt(mse))
 
+def gradient_map(image: torch.Tensor, operator: str = "sobel"):
+    """Compute the image gradient with a differntial operator."""
 
-def image_gradient(image: torch.Tensor):
-    # Compute image gradient using Scharr Filter
-    c = image.shape[0]
-    conv_y = torch.tensor([[3, 0, -3], [10, 0, -10], [3, 0, -3]], dtype=torch.float32, device=image.device)
-    conv_x = torch.tensor([[3, 10, 3], [0, 0, 0], [-3, -10, -3]], dtype=torch.float32, device=image.device)
-    normalizer = 1.0 / torch.abs(conv_y).sum()
-    p_img = torch.nn.functional.pad(image, (1, 1, 1, 1), mode="reflect")[None]
-    img_grad_v = normalizer * torch.nn.functional.conv2d(p_img, conv_x.view(1, 1, 3, 3).repeat(c, 1, 1, 1), groups=c)
-    img_grad_h = normalizer * torch.nn.functional.conv2d(p_img, conv_y.view(1, 1, 3, 3).repeat(c, 1, 1, 1), groups=c)
-    return img_grad_v[0], img_grad_h[0]
+    if operator == "sobel":
+        operator_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]).float().unsqueeze(0).unsqueeze(0).cuda() / 4
+        operator_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]).float().unsqueeze(0).unsqueeze(0).cuda() / 4
+    elif operator == "scharr":
+        operator_x = torch.tensor([[3, 0, -3], [10, 0, -10], [3, 0, -3]]).float().unsqueeze(0).unsqueeze(0).cuda() / 16
+        operator_y = torch.tensor([[3, 10, 3], [0, 0, 0], [-3, -10, -3]]).float().unsqueeze(0).unsqueeze(0).cuda() / 16
+    else:
+        raise Exception(f"Operator {operator} not supported. Use 'sobel' or 'scharr'.")
 
-
-def image_gradient_mask(image: torch.Tensor, eps=0.01):
-    # Compute image gradient mask
-    c = image.shape[0]
-    conv_y = torch.ones((1, 1, 3, 3), dtype=torch.float32, device=image.device)
-    conv_x = torch.ones((1, 1, 3, 3), dtype=torch.float32, device=image.device)
-    p_img = torch.nn.functional.pad(image, (1, 1, 1, 1), mode="reflect")[None]
-    p_img = torch.abs(p_img) > eps
-    img_grad_v = torch.nn.functional.conv2d(p_img.float(), conv_x.repeat(c, 1, 1, 1), groups=c)
-    img_grad_h = torch.nn.functional.conv2d(p_img.float(), conv_y.repeat(c, 1, 1, 1), groups=c)
-
-    return img_grad_v[0] == torch.sum(conv_x), img_grad_h[0] == torch.sum(conv_y)
+    grad_x = torch.cat(
+        [torch.nn.functional.conv2d(image[i].unsqueeze(0), operator_x, padding=1) for i in range(image.shape[0])]
+    )
+    grad_y = torch.cat(
+        [torch.nn.functional.conv2d(image[i].unsqueeze(0), operator_y, padding=1) for i in range(image.shape[0])]
+    )
+    magnitude = torch.sqrt(grad_x**2 + grad_y**2)
+    magnitude = magnitude.norm(dim=0, keepdim=True)
+    return magnitude
