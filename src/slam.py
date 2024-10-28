@@ -781,9 +781,13 @@ class SLAM:
             if self.mode == "prgbd":
                 if hasattr(stream, "switch_to_rgbd_gt") and callable(stream.switch_to_rgbd_gt):
                     self.info("Switching to RGBD groundtruth for evaluation ...", logger=log)
-                    self.tum_idx = stream.indices
-                    stream.switch_to_rgbd_gt()
-                    self.tum_rgbd_idx = stream.indices
+                    # TUM only has depth for specific frames, so we will remap the indices to the right frames
+                    if "tum" in stream.input_folder:
+                        self.tum_idx = stream.indices # Indices our our frames in prgbd mode
+                        stream.switch_to_rgbd_gt()
+                        self.tum_rgbd_idx = stream.indices # Indices of the rgbd frames
+                    else:
+                        stream.switch_to_rgbd_gt()
                 else:
                     stream.depth_paths = None
                     self.info(
