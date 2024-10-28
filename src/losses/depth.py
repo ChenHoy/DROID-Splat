@@ -104,9 +104,21 @@ class ScaleAndShiftInvariantLoss(torch.nn.Module):
         scale, shift = self.compute_scale_and_shift(prediction, target, mask)
         scaled_prediction = scale * prediction + shift
         return F.l1_loss(scaled_prediction[mask], target[mask])
+    
+def monogs_depth_reg(depth: torch.Tensor, gt_image: torch.Tensor, mask: Optional[torch.Tensor] = None) -> float:
+    """Ensure that the depth is smooth in regions where the image gradient is low."""
 
+    def image_gradient_mask(image: torch.Tensor, eps=0.01):
+        # Compute image gradient mask
+        c = image.shape[0]
+        conv_y = torch.ones((1, 1, 3, 3), dtype=torch.float32, device=image.device)
+        conv_x = torch.ones((1, 1, 3, 3), dtype=torch.float32, device=image.device)
+        p_img = torch.nn.functional.pad(image, (1, 1, 1, 1), mode="reflect")[None]
+        p_img = torch.abs(p_img) > eps
+        img_grad_v = torch.nn.functional.conv2d(p_img.float(), conv_x.repeat(c, 1, 1, 1), groups=c)
+        img_grad_h = torch.nn.functional.conv2d(p_img.float(), conv_y.repeat(c, 1, 1, 1), groups=c)
 
-def depth_reg(depth, gt_image, huber_eps=0.1, mask=None):
+        return img_grad_v[0] == torch.sum(conv_x), img_grad_h[0] == torch.sum(conv_y)
 
     mask_v, mask_h = image_gradient_mask(depth)
     if mask is not None:
@@ -122,6 +134,20 @@ def depth_reg(depth, gt_image, huber_eps=0.1, mask=None):
     err = (w_h * torch.abs(depth_grad_h)).mean() + (w_v * torch.abs(depth_grad_v)).mean()
     return err
 
+# NOTE chen: this is called smooth_loss in the 2D Gaussian Splatting Repo
+# TODO use higher order image gradient operators flexibly
+def depth_reg(disp: torch.Tensor, img: torch.Tensor, mask: Optional[torch.Tensor] = None) -> float:
+    """Ensure that the depth is smooth in regions where the image gradient is low."""
+    if mask is not None:
+        mask = torch.ones_like(disp, device=disp.device)
+
+    grad_disp_x = torch.abs(disp[:, 1:-1, :-2] + disp[:, 1:-1, 2:] - 2 * disp[:, 1:-1, 1:-1])
+    grad_disp_y = torch.abs(disp[:, :-2, 1:-1] + disp[:, 2:, 1:-1] - 2 * disp[:, 1:-1, 1:-1])
+    grad_img_x = torch.mean(torch.abs(img[:, 1:-1, :-2] - img[:, 1:-1, 2:]), 0, keepdim=True) * 0.5
+    grad_img_y = torch.mean(torch.abs(img[:, :-2, 1:-1] - img[:, 2:, 1:-1]), 0, keepdim=True) * 0.5
+    grad_disp_x *= torch.exp(-grad_img_x)
+    grad_disp_y *= torch.exp(-grad_img_y)
+    return mask * grad_disp_x.mean() + mask * grad_disp_y.mean()
 
 def get_median_depth(depth, opacity=None, mask=None, return_std=False):
     depth = depth.detach().clone()
