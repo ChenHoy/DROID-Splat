@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from ..gaussian_splatting.camera_utils import Camera
 
-from ..utils import image_gradient_mask
+from ..utils import gradient_map
 from .depth import depth_loss
 from .image import color_loss
 
@@ -51,8 +51,7 @@ def mapping_rgbd_loss(
         rgb_pixel_mask = rgb_pixel_mask & cam.mask
 
     if with_edge_weight:
-        edge_mask_x, edge_mask_y = image_gradient_mask(image_gt)  # Use gt reference image for edge weight
-        edge_mask = edge_mask_x | edge_mask_y  # Combine with logical OR
+        edge_mask = gradient_map(image_gt)  # Use gt reference image for edge weight
         rgb_mask = rgb_pixel_mask.float() * edge_mask.float()
     else:
         rgb_mask = rgb_pixel_mask.float()
