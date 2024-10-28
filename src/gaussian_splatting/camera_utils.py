@@ -4,13 +4,12 @@ from omegaconf import DictConfig
 import torch
 from torch import nn
 
-from .utils.graphics_utils import getProjectionMatrix2, getWorld2View2, focal2fov
-from ..utils import image_gradient, image_gradient_mask
+import numpy as np
+from .utils.graphics_utils import getProjectionMatrix, getWorld2View2, focal2fov, fov2focal
+from ..utils.image_utils import PILtoTorch
 
 
 # FIXME: they have different attributes likely due to a different projection
-# TODO zfar, znear is already stored here
-# TODO They dont use the intrinsics here for some reason
 # TODO They have an additional alpha mask, maybe to blend things? is this really the same as our mask?
 class Camera(nn.Module):
     def __init__(
@@ -24,6 +23,8 @@ class Camera(nn.Module):
         intrinsics: Tuple[float, float, float, float],
         fov: Tuple[float, float],
         img_size: Tuple[int, int],
+        trans=np.array([0.0, 0.0, 0.0]),
+        scale=1.0,
         device: str = "cuda:0",
         mask: Optional[torch.Tensor] = None,
     ):
@@ -32,32 +33,36 @@ class Camera(nn.Module):
         self.device = device
 
         self.fx, self.fy, self.cx, self.cy = intrinsics
-        self.FoVx, self.FoVy = fov
+        self.fov_x, self.fov_y = fov
         self.image_height, self.image_width = img_size
 
         self.R_gt = pose_w2c[:3, :3]
         self.T_gt = pose_w2c[:3, 3]
         self.update_RT(self.R_gt, self.T_gt)
 
-        self.original_image = color
-        self.depth = depth_est
-        self.depth_prior = depth_gt
+        self.original_image = color.clamp(0.0, 1.0).to(self.device)
+        self.depth = depth_est.to(self.device)
+        self.depth_prior = depth_gt.to(self.device)
+
         self.grad_mask = None
-
-        self.mask = mask
-
-        # Always fix first frame!
-        if self.uid == 0:
-            self.cam_rot_delta = nn.Parameter(torch.zeros(3, requires_grad=False, device=device))
-            self.cam_trans_delta = nn.Parameter(torch.zeros(3, requires_grad=False, device=device))
+        self.mask = mask  # NOTE chen: this is used for dynamic objects if we know that info
+        if mask is not None:
+            # FIXME chen: so this is not really used? Why do I need this mask?
+            # self.original_image *= mask.to(self.data_device)
+            self.mask = mask.to(self.device)
         else:
-            self.cam_rot_delta = nn.Parameter(torch.zeros(3, requires_grad=True, device=device))
-            self.cam_trans_delta = nn.Parameter(torch.zeros(3, requires_grad=True, device=device))
+            self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
+            self.mask = None
 
-        self.exposure_a = nn.Parameter(torch.tensor([0.0], requires_grad=True, device=device))
-        self.exposure_b = nn.Parameter(torch.tensor([0.0], requires_grad=True, device=device))
+        # TODO chen: when do we use these?
+        self.trans = trans
+        self.scale = scale
 
         self.projection_matrix = projection_matrix.to(device=device)
+        self.full_proj_transform = (
+            self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))
+        ).squeeze(0)
+        self.camera_center = self.world_view_transform.inverse()[3, :3]
 
     def image_tensors_to(self, new_device: str) -> None:
         self.original_image = self.original_image.to(new_device)
@@ -74,11 +79,7 @@ class Camera(nn.Module):
 
         self.R = self.R.to(device=device)
         self.T = self.T.to(device=device)
-        self.cam_rot_delta = self.cam_rot_delta.to(device=device)
-        self.cam_trans_delta = self.cam_trans_delta.to(device=device)
 
-        self.exposure_a = self.exposure_a.to(device=device)
-        self.exposure_b = self.exposure_b.to(device=device)
         self.projection_matrix = self.projection_matrix.to(device=device)
 
         if self.grad_mask is not None:
@@ -94,7 +95,7 @@ class Camera(nn.Module):
             self.pose.clone().detach(),
             self.projection_matrix.clone().detach(),
             (self.fx, self.fy, self.cx, self.cy),
-            (self.FoVx, self.FoVy),
+            (self.fov_x, self.fov_y),
             (self.image_height, self.image_width),
             self.device,
             self.mask.clone().detach() if self.mask is not None else None,
@@ -117,10 +118,12 @@ class Camera(nn.Module):
         )
 
     @staticmethod
-    def init_from_gui(uid, T, FoVx, FoVy, fx, fy, cx, cy, H, W):
-        projection_matrix = getProjectionMatrix2(
-            znear=0.001, zfar=10000.0, fx=fx, fy=fy, cx=cx, cy=cy, W=W, H=H
-        ).transpose(0, 1)
+    def init_from_gui(uid, T, fov_x, fov_y, fx, fy, cx, cy, H, W):
+        # projection_matrix = getProjectionMatrix2(
+        #     znear=0.001, zfar=10000.0, fx=fx, fy=fy, cx=cx, cy=cy, W=W, H=H
+        # ).transpose(0, 1)
+        projection_matrix = getProjectionMatrix(znear=0.001, zfar=10000.0, fovX=fov_x, fovY=fov_y).transpose(0, 1)
+
         return Camera(
             uid,
             None,
@@ -129,7 +132,7 @@ class Camera(nn.Module):
             T,
             projection_matrix,
             (fx, fy, cx, cy),
-            (FoVx, FoVy),
+            (fov_x, fov_y),
             (H, W),
         )
 
@@ -161,38 +164,10 @@ class Camera(nn.Module):
         self.fx, self.fy, self.cx, self.cy = intrinsics
         height, width = image_shape
 
-        self.FoVx, self.FoVy = focal2fov(self.fx, width), focal2fov(self.fy, height)
-        projection_matrix = getProjectionMatrix2(znear, zfar, self.cx, self.cy, self.fx, self.fy, width, height)
+        self.fov_x, self.fov_y = focal2fov(self.fx, width), focal2fov(self.fy, height)
+        # projection_matrix = getProjectionMatrix2(znear, zfar, self.cx, self.cy, self.fx, self.fy, width, height)
+        projection_matrix = getProjectionMatrix(znear, zfar, self.fov_x, self.fov_y)
         self.projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
-
-    def compute_grad_mask(self, config):
-        edge_threshold = config["Training"]["edge_threshold"]
-
-        gray_img = self.original_image.mean(dim=0, keepdim=True)
-        gray_grad_v, gray_grad_h = image_gradient(gray_img)
-        mask_v, mask_h = image_gradient_mask(gray_img)
-        gray_grad_v = gray_grad_v * mask_v
-        gray_grad_h = gray_grad_h * mask_h
-        img_grad_intensity = torch.sqrt(gray_grad_v**2 + gray_grad_h**2)
-
-        if config["Dataset"]["type"] == "replica":
-            row, col = 32, 32
-            multiplier = edge_threshold
-            _, h, w = self.original_image.shape
-            for r in range(row):
-                for c in range(col):
-                    block = img_grad_intensity[
-                        :,
-                        r * int(h / row) : (r + 1) * int(h / row),
-                        c * int(w / col) : (c + 1) * int(w / col),
-                    ]
-                    th_median = block.median()
-                    block[block > (th_median * multiplier)] = 1
-                    block[block <= (th_median * multiplier)] = 0
-            self.grad_mask = img_grad_intensity
-        else:
-            median_img_grad_intensity = img_grad_intensity.median()
-            self.grad_mask = img_grad_intensity > median_img_grad_intensity * edge_threshold
 
     def clean(self):
         self.original_image = None
@@ -200,8 +175,82 @@ class Camera(nn.Module):
         self.depth_prior = None
         self.grad_mask = None
 
-        self.cam_rot_delta = None
-        self.cam_trans_delta = None
 
-        self.exposure_a = None
-        self.exposure_b = None
+# TODO when is this used?
+# TODO delete if not needed
+def loadCam(args, id, cam_info, resolution_scale):
+    orig_w, orig_h = cam_info.image.size
+
+    if args.resolution in [1, 2, 4, 8]:
+        resolution = round(orig_w / (resolution_scale * args.resolution)), round(
+            orig_h / (resolution_scale * args.resolution)
+        )
+    else:  # should be a type that converts to float
+        if args.resolution == -1:
+            if orig_w > 1600:
+                global WARNED
+                if not WARNED:
+                    print(
+                        "[ INFO ] Encountered quite large input images (>1.6K pixels width), rescaling to 1.6K.\n "
+                        "If this is not desired, please explicitly specify '--resolution/-r' as 1"
+                    )
+                    WARNED = True
+                global_down = orig_w / 1600
+            else:
+                global_down = 1
+        else:
+            global_down = orig_w / args.resolution
+
+        scale = float(global_down) * float(resolution_scale)
+        resolution = (int(orig_w / scale), int(orig_h / scale))
+
+    if len(cam_info.image.split()) > 3:
+        import torch
+
+        resized_image_rgb = torch.cat([PILtoTorch(im, resolution) for im in cam_info.image.split()[:3]], dim=0)
+        loaded_mask = PILtoTorch(cam_info.image.split()[3], resolution)
+        gt_image = resized_image_rgb
+    else:
+        resized_image_rgb = PILtoTorch(cam_info.image, resolution)
+        loaded_mask = None
+        gt_image = resized_image_rgb
+
+    return Camera(
+        uid=id,
+        R=cam_info.R,
+        T=cam_info.T,
+        fov_x=cam_info.fov_x,
+        fov_y=cam_info.fov_y,
+        image=gt_image,
+        gt_alpha_mask=loaded_mask,
+        data_device=args.data_device,
+    )
+
+
+def cameraList_from_camInfos(cam_infos, resolution_scale, args):
+    camera_list = []
+    for id, c in enumerate(cam_infos):
+        camera_list.append(loadCam(args, id, c, resolution_scale))
+    return camera_list
+
+
+def camera_to_JSON(id, camera: Camera):
+    Rt = np.zeros((4, 4))
+    Rt[:3, :3] = camera.R.transpose()
+    Rt[:3, 3] = camera.T
+    Rt[3, 3] = 1.0
+
+    W2C = np.linalg.inv(Rt)
+    pos = W2C[:3, 3]
+    rot = W2C[:3, :3]
+    serializable_array_2d = [x.tolist() for x in rot]
+    camera_entry = {
+        "id": id,
+        "width": camera.image_width,
+        "height": camera.image_height,
+        "position": pos.tolist(),
+        "rotation": serializable_array_2d,
+        "fy": fov2focal(camera.fov_x, camera.image_height),
+        "fx": fov2focal(camera.fov_y, camera.image_width),
+    }
+    return camera_entry

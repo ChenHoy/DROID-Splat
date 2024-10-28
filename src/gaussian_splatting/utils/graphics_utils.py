@@ -81,32 +81,6 @@ def getProjectionMatrix(znear, zfar, fovX, fovY):
     return P
 
 
-def getProjectionMatrix2(znear, zfar, cx, cy, fx, fy, W, H):
-    """Get a frustrum culled Projection matrix like in OpenGL.
-    This sets a limit for near and far planes at [z_near, z_far]"""
-    left = ((2 * cx - W) / W - 1.0) * W / 2.0
-    right = ((2 * cx - W) / W + 1.0) * W / 2.0
-    top = ((2 * cy - H) / H + 1.0) * H / 2.0
-    bottom = ((2 * cy - H) / H - 1.0) * H / 2.0
-    left = znear / fx * left
-    right = znear / fx * right
-    top = znear / fy * top
-    bottom = znear / fy * bottom
-    P = torch.zeros(4, 4)
-
-    z_sign = 1.0
-
-    P[0, 0] = 2.0 * znear / (right - left)
-    P[1, 1] = 2.0 * znear / (top - bottom)
-    P[0, 2] = (right + left) / (right - left)
-    P[1, 2] = (top + bottom) / (top - bottom)
-    P[3, 2] = z_sign
-    P[2, 2] = z_sign * zfar / (zfar - znear)
-    P[2, 3] = -(zfar * znear) / (zfar - znear)
-
-    return P
-
-
 def fov2focal(fov, pixels):
     return pixels / (2 * math.tan(fov / 2))
 

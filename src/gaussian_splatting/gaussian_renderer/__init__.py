@@ -18,7 +18,7 @@ from diff_surfel_rasterization import GaussianRasterizationSettings, GaussianRas
 
 from ..scene.gaussian_model import GaussianModel
 from ..utils.sh_utils import eval_sh
-from utils.point_utils import depth_to_normal
+from ..utils.point_utils import depth_to_normal
 
 
 def check_nan(tensor: torch.Tensor) -> bool:
@@ -197,7 +197,7 @@ def render(
 
     rets.update(
         {
-            "rend_alpha": render_alpha,
+            "rend_alpha": render_alpha,  # TODO chen: is this just the opacity?
             "rend_normal": render_normal,  # Normal map
             "rend_dist": render_dist,  # Distortion map
             "surf_depth": surf_depth,  # Proper surface depth

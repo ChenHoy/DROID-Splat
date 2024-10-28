@@ -30,7 +30,7 @@ from .gaussian_mapping import GaussianMapper
 
 from .gaussian_splatting.camera_utils import Camera
 from .gaussian_splatting import eval_utils
-from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
+from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix, focal2fov
 from .gaussian_splatting.gui import gui_utils, slam_gui
 from .utils import clone_obj, get_all_queue
 
@@ -714,8 +714,12 @@ class SLAM:
                 fx, fy, cx, cy = intrinsics
                 height, width = gt_image.shape[-2:]
                 fovx, fovy = focal2fov(fx, width), focal2fov(fy, height)
-                projection_matrix = getProjectionMatrix2(
-                    self.gaussian_mapper.z_near, self.gaussian_mapper.z_far, cx, cy, fx, fy, width, height
+                # NOTE chen: we can change this to the projection used in MonoGS if we want to
+                # projection_matrix = getProjectionMatrix2(
+                #     self.gaussian_mapper.z_near, self.gaussian_mapper.z_far, cx, cy, fx, fy, width, height
+                # )
+                projection_matrix = getProjectionMatrix(
+                    self.gaussian_mapper.z_near, self.gaussian_mapper.z_far, fovx, fovy
                 )
                 projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
                 new_cam = Camera(
@@ -781,9 +785,13 @@ class SLAM:
             if self.mode == "prgbd":
                 if hasattr(stream, "switch_to_rgbd_gt") and callable(stream.switch_to_rgbd_gt):
                     self.info("Switching to RGBD groundtruth for evaluation ...", logger=log)
-                    self.tum_idx = stream.indices
-                    stream.switch_to_rgbd_gt()
-                    self.tum_rgbd_idx = stream.indices
+                    # Only TUM_RGBD has not the a groundtruth depth for all frames
+                    if "tum" in stream.input_folder:
+                        self.tum_idx = stream.indices
+                        stream.switch_to_rgbd_gt()
+                        self.tum_rgbd_idx = stream.indices
+                    else:
+                        stream.switch_to_rgbd_gt()
                 else:
                     stream.depth_paths = None
                     self.info(
@@ -952,8 +960,12 @@ class SLAM:
                 fx, fy, cx, cy = intrinsics
                 height, width = gt_image.shape[-2:]
                 fovx, fovy = focal2fov(fx, width), focal2fov(fy, height)
-                projection_matrix = getProjectionMatrix2(
-                    self.gaussian_mapper.z_near, self.gaussian_mapper.z_far, cx, cy, fx, fy, width, height
+                # NOTE chen: we can change this to the projection used in MonoGS if we want to
+                # projection_matrix = getProjectionMatrix(
+                #     self.gaussian_mapper.z_near, self.gaussian_mapper.z_far, cx, cy, fx, fy, width, height
+                # )
+                projection_matrix = getProjectionMatrix(
+                    self.gaussian_mapper.z_near, self.gaussian_mapper.z_far, fovx, fovy
                 )
                 projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
                 new_cam = Camera(

@@ -26,8 +26,7 @@ from .gaussian_splatting.scene.gaussian_model import GaussianModel
 from .gaussian_splatting.camera_utils import Camera
 from .losses import mapping_rgbd_loss, plot_losses
 
-from .gaussian_splatting.pose_utils import update_pose
-from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov, getWorld2View2
+from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix, focal2fov
 from .utils.multiprocessing_utils import clone_obj
 from .geom import lie_to_matrix
 from .trajectory_filler import PoseTrajectoryFiller
@@ -39,6 +38,8 @@ We create new Gaussians based on incoming new views and optimize them for dense 
 Since they are initialized with the 3D locations of a VSLAM system, this process converges really fast. 
 
 NOTE this could a be standalone SLAM system itself, but we use it on top of an optical flow based SLAM system.
+NOTE chen: we cannot optimize the poses with the native Surfel Cuda Kernel, but we did not observe a benefit of this anyway!
+-> This branch therefore contains no Feedback mechanism
 """
 
 
@@ -86,19 +87,6 @@ class GaussianMapper(object):
 
         # Offline Refinement
         self.refine_params = cfg.mapping.refinement
-
-        # Feedback the map to the Tracker if wanted
-        self.feedback_params = cfg.mapping.feedback
-        self.feedback_disps = cfg.mapping.feedback.disps
-        if self.feedback_disps:
-            self.info("Feeding back scene geometry from Renderer -> Tracker!")
-        self.feedback_poses = cfg.mapping.feedback.poses
-        if self.feedback_poses:
-            self.info("Feeding back local pose graph from Renderer -> Tracker!")
-        if self.feedback_poses and not (self.update_params.optimize_poses or self.refine_params.optimize_poses):
-            self.info(
-                "Warning. You are feeding back poses from Mapper to Tracker without optimizing them (either during Tracking or Refinement)!"
-            )
 
         self.gaussians = GaussianModel(self.sh_degree, config=cfg.mapping.input)
         self.gaussians.init_lr(self.opt_params.init_lr)
@@ -173,7 +161,7 @@ class GaussianMapper(object):
 
         height, width = image.shape[-2:]
         fovx, fovy = focal2fov(fx, width), focal2fov(fy, height)
-        projection_matrix = getProjectionMatrix2(self.z_near, self.z_far, cx, cy, fx, fy, width, height)
+        projection_matrix = getProjectionMatrix(self.z_near, self.z_far, cx, cy, fx, fy, width, height)
         projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
 
         return Camera(
@@ -224,33 +212,6 @@ class GaussianMapper(object):
 
             self.new_cameras.append(cam)
 
-    def get_pose_optimizer(self, frames: List) -> torch.optim.Optimizer:
-        """Creates an optimizer for the camera poses for all provided frames.
-        Since we usually keep the first pose fixed in SLAM, we manually force the require.grad=False in Camera()!
-        """
-        opt_params = []
-        already_in_optimizer = []
-        for cam in frames:
-            # Dont add duplicates in case we have multiple samples of the same frame in a batch!
-            # (this can happen during refinement)
-            if cam.uid in already_in_optimizer:
-                continue
-            opt_params.append(
-                {"params": [cam.cam_rot_delta], "lr": self.opt_params.cam_rot_delta, "name": "rot_{}".format(cam.uid)}
-            )
-            opt_params.append(
-                {
-                    "params": [cam.cam_trans_delta],
-                    "lr": self.opt_params.cam_trans_delta,
-                    "name": "trans_{}".format(cam.uid),
-                }
-            )
-            opt_params.append({"params": [cam.exposure_a], "lr": 0.01, "name": "exposure_a_{}".format(cam.uid)})
-            opt_params.append({"params": [cam.exposure_b], "lr": 0.01, "name": "exposure_b_{}".format(cam.uid)})
-            already_in_optimizer.append(cam.uid)
-
-        return torch.optim.Adam(opt_params)
-
     def frame_updater(self, delay=0):
         """Gets the list of frames and updates the depth and pose based on the video.
 
@@ -298,8 +259,6 @@ class GaussianMapper(object):
         reiterating over the stream again and interpolating between poses.
 
         NOTE Use this only after tracking finished for refining!
-        NOTE: If you optimize poses with the Renderer, make sure to feedback
-        the latest state of self.video as this is attached to trajectory_filler
         """
         all_poses, all_timestamps = trajectory_filler(stream, batch_size=batch_size, return_tstamps=True)
         # NOTE chen: this assumes that cam.uid will correspond to the position in the video buffer
@@ -370,6 +329,51 @@ class GaussianMapper(object):
         plt.title(title)
         plt.show()
 
+    def densify_holes(self, idx: int, mask: torch.Tensor, downsample_factor: float = 1.0) -> None:
+        """When initializing the map based on multi-view filtered depths, we often have holes
+        in areas that are only visible in a single camera. Since we usually have access to a semi-reliable dense
+        depth map (either from SLAM or an external sensor), we can simply patch these holes based on a reference.
+
+        NOTE idx here is the position in our List[Camera] of the Renderer! You can check for valid keyframes by looking at the cam2buffer mapping.
+        """
+        cam = self.cameras[idx]
+        # Only do this for actual keyframes (in case we added others), because we need a reference from Tracking
+        if idx not in self.cam2buffer:
+            return
+
+        idx_in_video = self.cam2buffer[idx]
+        # We have a dense depth prior that is reliable in rgbd mode
+        if self.mode == "rgbd":
+            dense_disps_ref = self.video.disps_sens_up[idx_in_video].clone().cpu()
+            valid = dense_disps_ref > 0
+            dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
+        # We have at least a scaled prior (from an external source)
+        elif self.mode == "prgbd":
+            dense_disps_ref = self.video.disps_sens_up[idx_in_video].clone().cpu()
+            valid = dense_disps_ref > 0
+            dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
+        # We have a dense depth reference in the video (from Tracking)
+        elif self.video.upsampled:
+            dense_disps_ref = self.video.disps_up[idx_in_video].clone().cpu()
+            valid = dense_disps_ref > 0
+            dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
+        else:
+            # Get the average scale in this keyframe from the Gaussians
+            # Densify the hole from this new point cloud
+            # NOTE chen: since holes are usually further away it makes sense to take > median
+            avg_depth = self.gaussians.get_avg_scale([idx], factor=1.5)  # Take factor*median
+            dense_depth_ref = torch.ones_like(mask, device="cpu") * avg_depth
+
+        # Densify based on the mask
+        self.gaussians.extend_from_pcd_seq(
+            cam,
+            kf_id=idx,
+            init=False,
+            mask=mask,
+            depthmap=dense_depth_ref.numpy(),
+            downsample_factor=downsample_factor,
+        )
+
     def get_ram_usage(self) -> Tuple[float, float]:
         free_mem, total_mem = torch.cuda.mem_get_info(device=self.device)
         used_mem = 1 - (free_mem / total_mem)
@@ -393,7 +397,7 @@ class GaussianMapper(object):
             """
 
             def draw_frames(cams, n_samples, weights: Optional[List[float]] = None):
-                # Sanity check for when the batch size is actually bigger than the number of keyframes
+                # Sanity check for when the batch size is bigger than our number of keyframes
                 if n_samples >= len(cams):
                     return cams
 
@@ -420,6 +424,70 @@ class GaussianMapper(object):
                 batch = draw_frames(kf_cams + nonkf_cams, batch_size)
 
             return batch
+
+        def draw_random_neighborhood_batch(
+            cams: List[Camera], batch_size: int = 16, neighborhood_size: int = 5
+        ) -> List[Camera]:
+            """Draw multiple mini batches of neighborhood frames from a List of Cameras. Combine these into
+            a single batch for optimization. Neighborhoods are non-overlapping and build around an index.
+            If the neighborhood size is even, we take more frames from the left side of the index.
+
+            NOTE: we assume that cams is sorted according to the timestamp!
+            """
+
+            def draw_neighborhood(cams: List, n_samples: int, idx: int):
+                if n_samples % 2 == 0:
+                    left = max(0, idx - n_samples // 2)
+                    right = min(len(cams), idx + n_samples // 2 - 1)
+                else:
+                    left = max(0, idx - n_samples // 2)
+                    right = min(len(cams), idx + n_samples // 2)
+                return cams[left : right + 1], list(range(left, right + 1))
+
+            # Draw batch_size // neighborhood_size non-overlapping neighborhoods
+            # Include check to not have overlap
+            batch, idxs = [], []
+            rest = batch_size % neighborhood_size
+            for i in range(batch_size // neighborhood_size):
+                if neighborhood_size % 2 == 0:
+                    idx = np.random.randint(neighborhood_size // 2 + 1, len(cams) - neighborhood_size // 2)
+                else:
+                    idx = np.random.randint(neighborhood_size // 2, len(cams) - neighborhood_size // 2)
+                while idx in idxs:
+                    idx = np.random.randint(len(cams))
+
+                # In case we have a rest, we draw a larger neighborhood rather than have one very small one
+                if i == batch_size // neighborhood_size - 1 and rest > 0:
+                    cams_neigh, idx_neigh = draw_neighborhood(cams, neighborhood_size + rest, idx)
+                else:
+                    cams_neigh, idx_neigh = draw_neighborhood(cams, neighborhood_size, idx)
+
+                batch.extend(cams_neigh)
+                idxs.extend(idx_neigh)
+
+            return batch
+
+        @torch.no_grad()
+        def maybe_fill_holes(render_pkg, view_id: int, size_hole: int = 100, max_mem: float = 0.95) -> bool:
+            """We sometimes still have "white holes" left in our Renderings, because we only take covisible areas
+            for initialization. Manually filling these speeds up refinement significantly!
+            """
+            mask = torch.all((render_pkg["render"].squeeze() == self.background[:, None, None]), dim=0)
+
+            if mask.sum() > size_hole:
+                has_hole = True
+                self.info(f"Detected holes in view {view_id} during importance sampling. Adding higher weight ...")
+                # Help out in those frames by refining these more!
+                used_mem, free_mem = self.get_ram_usage()
+                # NOTE chen: this can add up a lot of memory, only this if we have enough slack
+                if used_mem <= max_mem:
+                    ng_before = len(self.gaussians)
+                    self.info(f"Patching up holes in view {view_id} manually using Depth from Tracking ...")
+                    self.densify_holes(view_id, mask, downsample_factor=2.0)
+                    self.info(f"Added {len(self.gaussians) - ng_before} Gaussians to fill holes in view {view_id} ...")
+            else:
+                has_hole = False
+            return has_hole
 
         def importance_weights_from_single_pass(cams: List[Camera], batch_size: int = 16):
             """Run a single forward pass over all frames to gather importance weights.
@@ -488,7 +556,7 @@ class GaussianMapper(object):
         self.opt_params.position_lr_final *= self.refine_params.lr_factor
         self.gaussians.training_setup(self.opt_params)
 
-        iter_count = 0
+        total_iter = 0
         for iter1 in tqdm(
             range(self.refine_params.iters), desc=colored("Gaussian Refinement", "magenta"), colour="magenta"
         ):
@@ -496,29 +564,41 @@ class GaussianMapper(object):
             do_densify = (
                 (iter1 + 1) % self.refine_params.prune_densify_every == 0
             ) and iter1 <= self.refine_params.densify_until
-            opacity_densify = self.refine_params.densify.use_opacity
 
             ### Optimize a random batch from all frames
-            batch = draw_random_batch(
-                kf_cams,
-                self.refine_params.bs,
-                weights_kf=weights,
-                nonkf_cams=non_kf_cams,
-                kf_always=self.refine_params.sampling.kf_at_least,
-            )
+            # In prgbd mode we cant densify non-keyframes which have the wrong scale information!
+            if self.mode == "prgbd" and do_densify:
+                batch = draw_random_batch(kf_cams, batch_size=self.refine_params.bs)
+            ### Optimize a random batch from all frames
+            elif self.refine_params.sampling.use_neighborhood:
+                # Use multiple random temporal neighborhood, so we have at least overlap between some frames
+                batch = draw_random_neighborhood_batch(
+                    kf_cams,
+                    batch_size=self.refine_params.bs,
+                    neighborhood_size=self.refine_params.sampling.neighborhood_size,
+                )
+            else:
+                # Use completely random frames which might not have overlap
+                # NOTE this method can have a guarantee to use x% keyframes
+                batch = draw_random_batch(
+                    kf_cams,
+                    self.refine_params.bs,
+                    weights_kf=weights,
+                    nonkf_cams=non_kf_cams,
+                    kf_always=self.refine_params.sampling.kf_at_least,
+                )
+
             # Optimize this batch for a few iterations, so newly added Gaussians can converge
             for iter2 in tqdm(
                 range(self.refine_params.batch_iters), desc=colored("Batch Optimization", "magenta"), colour="magenta"
             ):
                 loss = self.mapping_step(
-                    iter_count, # use the global iter
+                    total_iter,  # Use the globa iteration for annedaling the learning rate!
                     batch,
                     self.refine_params.densify.vanilla,
                     prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
-                    opacity_densify=opacity_densify,  # Densify based on low opacity regions
-                    optimize_poses=self.refine_params.optimize_poses,
                 )
-                do_densify, opacity_densify = False, False
+                do_densify = False
                 print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss}", "cyan"))
                 self.loss_list.append(loss)
                 if self.use_gui:
@@ -528,112 +608,9 @@ class GaussianMapper(object):
                         )
                     )
 
-                iter_count += 1
+                total_iter += 1
 
             del batch
-
-    def get_mapping_update(
-        self,
-        frames: List[Camera],
-        feedback_poses: bool = True,
-        feedback_disps: bool = False,
-        opacity_threshold: float = 0.1,
-        ignore_frames: List[int] = [0, 1, 2, 3, 4, 5, 6, 7, 8],
-        min_coverage: float = 0.6,  # Min. Density of frame after eliminiating outliers
-        max_diff_to_video: float = 0.2,  # Maximum abs. rel. deviation from the dense video depth
-    ) -> Dict:
-        """Get the index, poses and depths of the frames that were already optimized. We can use this to then feedback
-        the outputs of the Gaussian Rendering optimization back into the video.map.
-
-        We should only feedback 'good' depths since Rendering can also introduce many outliers, noise or
-        just does not converge correctly immediately. The Tracker operates with dense depth frames, so we need to be careful to not feedback too sparse depths.
-        For this purpose, we limit the 'step size' of our renderer by ensuring that the rendered depth does not deviate from the original too much. If the
-        current Renderer map does not cover enough of the scene in the specific view, we skip the frame.
-
-        Since the map is usually not very good in the beginning, we never feedback the first few keyframes.
-        """
-
-        def compare_render_w_video(depth: torch.Tensor, index_in_video: int, max_diff_to_video: float = 0.15):
-            """Analyze differences in the rendered depth and the dense video depth. This simply checks how many percent
-            of pixels are within an error bound.
-
-            There can be huge differences due to:
-            i) Holes in our rendering, because the scene is not fully covered by Gaussians yet
-            ii) Outliers in the rendered depth, because the optimization did not converge correctly
-            iii) Holes and invalid depths in the dense video depth, because the update network is not perfect
-            iv) Occluded areas are usually much better in the rendered depth, but thus are different in video
-            """
-            # Analyze the video depths before filtering as a reference
-            if self.video.upsample:
-                disps_ref = self.video.disps_up[index_in_video]
-            else:
-                disps_ref = self.video.disps[index_in_video]
-            valid_ref = disps_ref > 0
-            depth_ref = torch.where(valid_ref, 1.0 / disps_ref, disps_ref)
-
-            disps_clean = self.video.disps_clean[index_in_video]
-            valid_clean = disps_clean > 0
-            depth_clean = torch.where(valid_clean, 1.0 / disps_clean, disps_clean)
-
-            # HACK Limit step size by punishing large deviations from the original video depth
-            if not self.video.upsample:
-                s = self.video.scale_factor
-                depth_down = depth[:, int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
-                diff_to_video = torch.abs(depth_down - depth_ref) / depth_ref  # Abs rel.
-                # Filter away outliers
-                depth_wo_outliers = torch.where(diff_to_video < max_diff_to_video, depth_down, 0.0)
-            else:
-                diff_to_video = torch.abs(depth - depth_ref) / depth_ref  # Abs rel.
-                depth_wo_outliers = torch.where(diff_to_video < max_diff_to_video, depth, 0.0)  # Filter away outliers
-            coverage_gs_wo = (depth_wo_outliers > 0).sum() / (depth_wo_outliers > 0).numel()
-            coverage_init = (depth_clean > 0).sum() / (depth_clean > 0).numel()
-            return coverage_gs_wo
-
-        index, poses, depths = [], [], []
-        # Sanity check
-        if not feedback_disps and not feedback_poses:
-            return {"index": index, "poses": poses, "depths": depths}
-
-        # Render frames to extract depth
-        rejected, accepted = [], []
-        for view in frames:
-            # Ignore boundary frames, especially in the beginning when we build the map
-            # (the first few frames are usually not good for feedback as they are not optimized yet or heavily incomplete)
-            if self.cam2buffer[view.uid] in ignore_frames:
-                rejected.append(view.uid)
-                continue
-            render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
-
-            # NOTE chen: this can be None when self.gaussians is 0. This could happen in some cases
-            if render_pkg is None:
-                rejected.append(view.uid)
-                # self.info(f"Skipping view {view.uid} as no Gaussians are present in it ...")
-                continue
-
-            index_in_video = self.cam2buffer[view.uid]
-            depth = render_pkg["depth"].detach()
-            # Filter away pixels with very low opacity as these are usually unreliable
-            valid_o = render_pkg["opacity"].detach() > opacity_threshold
-            depth[~valid_o] = 0.0
-            coverage_gs_wo = compare_render_w_video(depth, index_in_video, max_diff_to_video)
-            # Disparity in video is dense -> Dont feedback too sparse frames
-            if coverage_gs_wo > min_coverage:
-                index.append(index_in_video)
-                poses.append(view.pose)
-                depths.append(clone_obj(depth))
-                accepted.append(view.uid)
-            else:
-                rejected.append(view.uid)
-                # self.info(f"Skipping view {view.uid} during Feedback as it has too low coverage with video buffer ...")
-
-        if not feedback_disps:
-            depths = []
-        if not feedback_poses:
-            poses = []
-
-        if len(index) > 0:
-            self.info(f"Feeding back good frames: {accepted}, ignoring frames: {rejected}...")
-        return {"index": index, "poses": poses, "depths": depths}
 
     def get_camera_trajectory(self, frames: List[Camera]) -> torch.Tensor:
         """Get the camera trajectory of the frames in world coordinates."""
@@ -642,34 +619,31 @@ class GaussianMapper(object):
             poses.append(view.pose)
         return torch.stack(poses)
 
-    def maybe_clean_pose_update(self, frames: List[Camera]) -> None:
-        """Check if pose updates are not degenerate and set to zero if they are."""
-        for view in frames:
-            if torch.isnan(view.cam_rot_delta).any() and torch.isnan(view.cam_trans_delta).any():
-                print(colored(f"NAN in pose optimizer in view {view.uid}!", "red"))
-                print(colored("Setting to zero update ...", "red"))
-                view.cam_rot_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
-                view.cam_trans_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
-
     def render_compare(self, view: Camera) -> Tuple[float, Dict, Dict]:
         """Render current view and compute loss by comparing with groundtruth"""
         render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
         # NOTE chen: this can be None when self.gaussians is 0. This can happen in some cases
         if render_pkg is None:
-            return 0.0, None
+            return 0.0
 
-        image, depth = render_pkg["render"], render_pkg["depth"]
-        current_loss = mapping_rgbd_loss(image, depth, view, **self.loss_params)
-        return current_loss, render_pkg
+        image, depth = render_pkg["render"], render_pkg["surf_depth"]
+        ipdb.set_trace()
+        # (l1_rgb + ssim_rgb) + l1_depth (+ depth_smooth)
+        # NOTE chen: we regularize depth with an edge aware smoothness term already
+        rgbd_loss = mapping_rgbd_loss(image, depth, view, **self.loss_params)
+        # Regularize additional surface properties i.e. normals
+        dist, normals, surf_normal = render_pkg["rend_dist"], render_pkg["rend_normal"], render_pkg["surf_normal"]
+        # Only do this when we already have a decent scene model
+        lambda_normal = self.loss_params.gamma1 if self.count > 10 else 0.0
+        lambda_dist = self.loss_params.gamma2 if self.count > 10 else 0.0
+        normal_loss = (1 - (normals * surf_normal).sum(dim=0))[None].mean()
+        dist_loss = lambda_dist * (dist).mean()
+
+        total_loss = rgbd_loss + lambda_normal * normal_loss + lambda_dist * dist_loss
+        return total_loss, render_pkg
 
     def mapping_step(
-        self,
-        iter: int,
-        frames: List[Camera],
-        vanilla_densify_params: Dict,
-        prune_densify: bool = False,
-        opacity_densify: bool = False,
-        optimize_poses: bool = False,
+        self, iter: int, frames: List[Camera], vanilla_densify_params: Dict, prune_densify: bool = False
     ) -> float:
         """Takes the list of selected keyframes to optimize and performs one step of the mapping optimization."""
         # Sanity check when we dont have anything to optimize
@@ -679,26 +653,19 @@ class GaussianMapper(object):
         # NOTE chen: this can happen we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
 
-        if optimize_poses:
-            pose_optimizer = self.get_pose_optimizer(frames)
-
         loss = 0.0
         # Collect for densification and pruning
-        opacity_acm, radii_acm = [], []
-        visibility_filter_acm, viewspace_point_tensor_acm = [], []
+        radii_acm, visibility_filter_acm, viewspace_point_tensor_acm = [], [], []
         for view in frames:
-
             current_loss, render_pkg = self.render_compare(view)
             if render_pkg is None:
                 self.info(f"Skipping view {view.uid} as no gaussians are present ...")
                 continue
 
             # Keep track of how often the Gaussians were already optimized
-            self.gaussians.increment_n_opt_counter(visibility=render_pkg["visibility_filter"])
             self.n_optimized[view.uid] += 1
 
             # Accumulate for after loss backpropagation
-            opacity_acm.append((view, render_pkg["opacity"]))
             visibility_filter_acm.append(render_pkg["visibility_filter"])
             viewspace_point_tensor_acm.append(render_pkg["viewspace_points"])
             radii_acm.append(render_pkg["radii"])
@@ -736,50 +703,20 @@ class GaussianMapper(object):
                 # General pruning based on opacity and size + densification (from original 3DGS)
                 self.gaussians.densify_and_prune(**vanilla_densify_params)
 
-            # Densify in low opacity regions only after the map is stable already
-            # (else we waste compute, because densify_and_prune will fill initial holes quickly)
-            if prune_densify and opacity_densify and self.count > self.update_params.densify.opacity.after:
-                ng_before = len(self.gaussians)
-                for i, acm_item in enumerate(opacity_acm):
-                    view, opacity = acm_item
-                    mask = opacity.squeeze() < self.update_params.densify.opacity.th
-                    # if this mask has too many pixels, then subsample to acceptable lower number
-                    if mask.sum() > self.update_params.densify.opacity.max_pixels:
-                        mask = random_subsample_mask(mask, self.update_params.densify.opacity.max_pixels)
-                        self.gaussians.densify_from_mask(view, mask, depthmap=view.depth_prior.cpu().numpy())
-                if (len(self.gaussians) - ng_before) > 0:
-                    self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity")
-
         ### Update states
         self.gaussians.optimizer.step()
         self.gaussians.optimizer.zero_grad()
         self.gaussians.update_learning_rate(iter)
 
         # Delete lists of tensors
-        del opacity_acm
         del radii_acm
         del visibility_filter_acm
         del viewspace_point_tensor_acm
 
-        if optimize_poses:
-            pose_optimizer.step()
-            self.maybe_clean_pose_update(frames)  # Sanitize in case of nan's
-            pose_optimizer.zero_grad()
-            # Actually make optimizer step
-            for view in frames:
-                if view.uid == 0:  # Keep first pose always fixed!
-                    continue
-                update_pose(view)
-            del pose_optimizer  # We define a new one every time anyways
-
         return avg_loss.detach().item()
 
     def covisibility_pruning(
-        self,
-        mode: str = "new",
-        last: int = 10,
-        dont_prune_latest: int = 1,
-        visibility_th: int = 2,
+        self, mode: str = "new", last: int = 10, dont_prune_latest: int = 1, visibility_th: int = 2
     ):
         """Covisibility based pruning.
 
@@ -926,7 +863,7 @@ class GaussianMapper(object):
 
             self.info(f"Gaussians before Map Refinement: {len(self.gaussians)}")
             # Add more information for refinement if wanted
-            if self.slam.dataset is not None and self.refine_params.use_non_keyframes:
+            if self.slam.dataset is not None and self.refine_params.sampling.use_non_keyframes:
                 self.add_nonkeyframe_cameras()
 
             self.info("\nMapping refinement starting")
@@ -937,23 +874,6 @@ class GaussianMapper(object):
             # Free memory after doing refinement
             torch.cuda.empty_cache()
             gc.collect()
-
-        # Filter out the non-keyframes which are not stored in the video.object
-        only_kf = [cam for cam in self.cameras if cam.uid in self.cam2buffer]
-        # Only feedback the poses, since we will not work with the video again
-        if (self.feedback_poses or self.feedback_disps) and not self.feedback_params.no_refinement:
-            self.info(f"Feeding back into video.map ...")
-            # HACK allow large differences to the video, else we will filter away occluded regions which we already corrected rightfully
-            to_set = self.get_mapping_update(
-                only_kf,
-                feedback_poses=self.feedback_poses,
-                feedback_disps=self.feedback_disps,
-                opacity_threshold=0.0,
-                ignore_frames=[],
-                max_diff_to_video=1.0,
-            )
-            # There is no need to feed back the
-            self.video.set_mapping_item(**to_set)
 
         self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
         self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
@@ -1081,8 +1001,6 @@ class GaussianMapper(object):
                 frames,
                 self.update_params.densify.vanilla,
                 prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
-                opacity_densify=self.update_params.densify.use_opacity,  # Densify based on low opacity regions
-                optimize_poses=self.update_params.optimize_poses,
             )
             self.loss_list.append(loss)
 
@@ -1094,21 +1012,6 @@ class GaussianMapper(object):
             if self.update_params.pruning.use_covisibility:
                 # Gaussians should be visible in multiple frames
                 self.covisibility_pruning(**self.update_params.pruning.covisibility)
-
-        ### Feedback new state of map to Tracker
-        if (self.feedback_poses or self.feedback_disps) and self.count > self.feedback_params.warmup:
-            if self.feedback_params.only_last_window and len(self.new_cameras) > 0:
-                update_cams = sorted(frames, key=lambda x: x.uid)[-self.n_last_frames :]
-            else:
-                update_cams = frames
-            to_set = self.get_mapping_update(
-                update_cams,
-                feedback_poses=self.feedback_poses and self.update_params.optimize_poses,
-                feedback_disps=self.feedback_disps,
-                **self.feedback_params.kwargs
-            )
-            if len(to_set["index"]) > 0:
-                self.video.set_mapping_item(**to_set)
 
         ### Update visualization
         if self.use_gui:

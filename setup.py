@@ -90,25 +90,25 @@ setup(
 )
 
 setup(
-    name="diff_gaussian_rasterization",
-    packages=["diff_gaussian_rasterization"],
-    package_dir={"": "thirdparty/diff-gaussian-rasterization-w-pose"},
+    name="diff_surfel_rasterization",
+    packages=["diff_surfel_rasterization"],
+    package_dir={"": "thirdparty/diff-surfel-rasterization"},
     ext_modules=[
         CUDAExtension(
-            name="diff_gaussian_rasterization._C",
+            name="diff_surfel_rasterization._C",
             sources=[
-                "thirdparty/diff-gaussian-rasterization-w-pose/cuda_rasterizer/rasterizer_impl.cu",
-                "thirdparty/diff-gaussian-rasterization-w-pose/cuda_rasterizer/forward.cu",
-                "thirdparty/diff-gaussian-rasterization-w-pose/cuda_rasterizer/backward.cu",
-                "thirdparty/diff-gaussian-rasterization-w-pose/rasterize_points.cu",
-                "thirdparty/diff-gaussian-rasterization-w-pose/ext.cpp",
+                "thirdparty/diff-surfel-rasterization/cuda_rasterizer/rasterizer_impl.cu",
+                "thirdparty/diff-surfel-rasterization/cuda_rasterizer/forward.cu",
+                "thirdparty/diff-surfel-rasterization/cuda_rasterizer/backward.cu",
+                "thirdparty/diff-surfel-rasterization/rasterize_points.cu",
+                "thirdparty/diff-surfel-rasterization/ext.cpp",
             ],
             extra_compile_args={
                 "nvcc": [
                     "-I"
                     + os.path.join(
                         os.path.dirname(os.path.abspath(__file__)),
-                        "thirdparty/diff-gaussian-rasterization-w-pose/third_party/glm/",
+                        "thirdparty/diff-surfel-rasterization/third_party/glm/",
                     )
                 ]
             },

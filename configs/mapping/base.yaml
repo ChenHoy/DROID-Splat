@@ -100,6 +100,8 @@ loss:
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta1: 2.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
   beta2: 0.01 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+  gamma1: 0.05 # Regularize normal directions
+  gamma2: 0.0 # Regularize distortion
 
 
 # Offline Map Refinement for finetuning
