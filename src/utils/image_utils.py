@@ -34,7 +34,10 @@ def psnr(img1, img2):
 def gradient_map(image: torch.Tensor, operator: str = "scharr", return_xy: bool = False):
     """Compute the image gradient with a differntial operator."""
 
-    if operator == "sobel":
+    if operator == "prewitt":
+        operator_x = torch.tensor([[-1, 0, 1], [-1, 0, 1], [-1, 0, 1]]).float().unsqueeze(0).unsqueeze(0).cuda() / 3
+        operator_y = torch.tensor([[-1, -1, -1], [0, 0, 0], [1, 1, 1]]).float().unsqueeze(0).unsqueeze(0).cuda() / 3
+    elif operator == "sobel":
         operator_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]).float().unsqueeze(0).unsqueeze(0).cuda() / 4
         operator_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]).float().unsqueeze(0).unsqueeze(0).cuda() / 4
     elif operator == "scharr":
