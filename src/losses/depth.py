@@ -170,15 +170,18 @@ def depth_reg(disp: torch.Tensor, img: torch.Tensor, mask: Optional[torch.Tensor
     if mask is not None:
         mask = torch.ones_like(disp, device=disp.device)
 
-    # 1st order gradient for depth
-    grad_disp_x, grad_disp_y = gradient_map(disp, operator="sobel", return_xy=True)
-    grad_img_x, grad_img_y = gradient_map(img, return_xy=True)
-    # Reduce across RGB channels
-    grad_img_x, grad_img_y = torch.norm(grad_img_x, dim=0), torch.norm(grad_img_y, dim=0)
+    # Simple 1st finite differences without padding
+    grad_disp_x = torch.abs(disp[:, 1:-1, :-2] + disp[:, 1:-1, 2:] - 2 * disp[:, 1:-1, 1:-1])
+    grad_disp_y = torch.abs(disp[:, :-2, 1:-1] + disp[:, 2:, 1:-1] - 2 * disp[:, 1:-1, 1:-1])
+    grad_img_x = torch.mean(torch.abs(img[:, 1:-1, :-2] - img[:, 1:-1, 2:]), 0, keepdim=True) * 0.5
+    grad_img_y = torch.mean(torch.abs(img[:, :-2, 1:-1] - img[:, 2:, 1:-1]), 0, keepdim=True) * 0.5
+    # Throw away borders of mask
+    mask = mask[:, 1:-1, 1:-1]
+
     # Regions of high gradient will have lower weights
     grad_disp_x *= torch.exp(-grad_img_x)
     grad_disp_y *= torch.exp(-grad_img_y)
-    return (mask * torch.sqrt(grad_disp_x**2 + grad_disp_y**2)).mean()
+    return (mask * grad_disp_x.mean() + mask * grad_disp_y.mean()).mean()
 
 def get_median_depth(depth, opacity=None, mask=None, return_std=False):
     depth = depth.detach().clone()
