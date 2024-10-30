@@ -56,7 +56,7 @@ def log_depth_loss(
 
     grad_img = gradient_map(original_image)
     w_img = torch.exp(-grad_img)
-    l1_err = l1_loss(depth_est, depth_gt, return_diff=True)
+    _, l1_err = l1_loss(depth_est, depth_gt, return_diff=True)
     log_loss = torch.log(1 + l1_err)
     depth_loss = (mask * w_img * log_loss).mean()
     if with_smoothness and mask.sum() > 0:
@@ -166,6 +166,7 @@ def monogs_depth_reg(depth: torch.Tensor, gt_image: torch.Tensor, mask: Optional
     err = (w_h * torch.abs(depth_grad_h)).mean() + (w_v * torch.abs(depth_grad_v)).mean()
     return err
 
+
 def depth_reg(disp: torch.Tensor, img: torch.Tensor, mask: Optional[torch.Tensor] = None) -> float:
     """Ensure that the depth is smooth in regions where the image gradient is low."""
     if mask is not None:
@@ -183,6 +184,7 @@ def depth_reg(disp: torch.Tensor, img: torch.Tensor, mask: Optional[torch.Tensor
     grad_disp_x *= torch.exp(-grad_img_x)
     grad_disp_y *= torch.exp(-grad_img_y)
     return (mask * grad_disp_x.mean() + mask * grad_disp_y.mean()).mean()
+
 
 def get_median_depth(depth, opacity=None, mask=None, return_std=False):
     depth = depth.detach().clone()

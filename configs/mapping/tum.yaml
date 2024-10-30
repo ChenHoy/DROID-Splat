@@ -54,10 +54,13 @@ opt_params:
 
 loss:
   # Weights
-  alpha1: 0.3 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha1: 0.8 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta1: 5.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
   beta2: 0.0 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+  gamma1: 0.05 # The normal consistency term aligns the rendered normal map with the gradient of the rendered depth.
+  # FIXME (according to https://github.com/hbb1/2d-gaussian-splatting/issues/71 this can be tuned to e.g. 100) but we dont see good results with this
+  gamma2: 0.0 # Depth distortion concentrates 2D primitives within a tight range along the ray 
 
 # Parameters for transfer SLAM -> Renderer
 input:

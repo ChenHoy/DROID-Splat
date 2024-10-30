@@ -65,7 +65,7 @@ def mapping_rgbd_loss(
             loss_depth = log_depth_loss(depth, depth_gt, image_gt, with_depth_smoothness, beta2, depth_pixel_mask)
         else:
             loss_depth = depth_loss(depth, depth_gt, with_depth_smoothness, beta2, image_gt, depth_pixel_mask)
-        loss = loss_rgb + alpha1 * loss_depth
+        loss = alpha1 * loss_rgb + (1 - alpha1) * loss_depth
 
     return loss
 
