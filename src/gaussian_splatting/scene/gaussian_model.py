@@ -23,7 +23,7 @@ import lietorch
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 
-from ..utils.general_utils import build_rotation, build_scaling_rotation, inverse_sigmoid, mkdir_p, get_expon_lr_func
+from ..utils.general_utils import build_rotation, build_scaling_rotation, inverse_sigmoid, mkdir_p, helper
 from ..camera_utils import Camera
 from ..utils.graphics_utils import BasicPointCloud, getWorld2View2
 from ..utils.sh_utils import RGB2SH
@@ -47,36 +47,36 @@ class GaussianModel:
 
         self.unique_kfIDs = torch.empty(0, device=self.device).int()
 
-        # Cap the scale so Gaussian dont grow to big and create degenerate cases during rendering
-        self.max_scale = 10000.0
+        self.isotropic = False
 
         self.denom = torch.empty(0, device=self.device)
         self.percent_dense = 0
         self.spatial_lr_scale = 0
 
         self.optimizer = None
-        self.setup_functions()
 
-        self.cfg = config
+        # Cap the scale so Gaussian dont grow to big and create degenerate cases during rendering
+        self.max_scale = 10000.0
 
-    def setup_functions(self):
-        def build_covariance_from_scaling_rotation(center, scaling, scaling_modifier, rotation):
-            RS = build_scaling_rotation(
-                torch.cat([scaling * scaling_modifier, torch.ones_like(scaling)], dim=-1), rotation
-            ).permute(0, 2, 1)
-            trans = torch.zeros((center.shape[0], 4, 4), dtype=torch.float, device=self.device)
-            trans[:, :3, :3] = RS
-            trans[:, 3, :3] = center
-            trans[:, 3, 3] = 1
-            return trans
-
+        # Setup functions
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
-
-        self.covariance_activation = build_covariance_from_scaling_rotation
+        self.covariance_activation = self.build_covariance_from_scaling_rotation
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
         self.rotation_activation = torch.nn.functional.normalize
+
+        self.cfg = config
+
+    def build_covariance_from_scaling_rotation(self, center, scaling, scaling_modifier, rotation):
+        RS = build_scaling_rotation(
+            torch.cat([scaling * scaling_modifier, torch.ones_like(scaling)], dim=-1), rotation
+        ).permute(0, 2, 1)
+        trans = torch.zeros((center.shape[0], 4, 4), dtype=torch.float, device=self.device)
+        trans[:, :3, :3] = RS
+        trans[:, 3, :3] = center
+        trans[:, 3, 3] = 1
+        return trans
 
     def __len__(self):
         """Returns the number of 3D Gaussians we have"""
@@ -162,20 +162,24 @@ class GaussianModel:
         ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
-        self.xyz_scheduler_args = get_expon_lr_func(
-            lr_init=training_args.position_lr_init * self.spatial_lr_scale,
-            lr_final=training_args.position_lr_final * self.spatial_lr_scale,
-            lr_delay_mult=training_args.position_lr_delay_mult,
-            max_steps=training_args.position_lr_max_steps,
-        )
+        self.lr_init = training_args.position_lr_init * self.spatial_lr_scale
+        self.lr_final = training_args.position_lr_final * self.spatial_lr_scale
+        self.lr_delay_mult = training_args.position_lr_delay_mult
+        self.max_steps = training_args.position_lr_max_steps
 
     def update_learning_rate(self, iteration):
         """Learning rate scheduling per step"""
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "xyz":
-                lr = self.xyz_scheduler_args(iteration)
+                lr = helper(
+                    iteration,
+                    lr_init=self.lr_init,
+                    lr_final=self.lr_final,
+                    lr_delay_mult=self.lr_delay_mult,
+                    max_steps=self.max_steps,
+                )
+
                 param_group["lr"] = lr
-                return lr
 
     def init_lr(self, spatial_lr_scale):
         self.spatial_lr_scale = spatial_lr_scale
@@ -196,9 +200,9 @@ class GaussianModel:
 
     def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float):
         self.spatial_lr_scale = spatial_lr_scale
-        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
-        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
-        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().to(self.device)
+        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().to(self.device))
+        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().to(self.device)
         features[:, :3, 0] = fused_color
         features[:, 3:, 1:] = 0.0
 
@@ -209,7 +213,7 @@ class GaussianModel:
         rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
 
         opacities = self.inverse_opacity_activation(
-            0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda")
+            0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device)
         )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
@@ -218,7 +222,7 @@ class GaussianModel:
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
 
     # TODO we lose the unique_kfIDs here
     def save_ply(self, path):
@@ -366,6 +370,7 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+        self.unique_kfIDs = self.unique_kfIDs[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -553,8 +558,7 @@ class GaussianModel:
         mask: torch.Tensor = None,
         downsample_factor: float = None,
     ):
-        # image_ab = (torch.exp(cam.exposure_a)) * cam.original_image + cam.exposure_b
-        image_ab = cam.original_image
+        image_ab = (torch.exp(cam.exposure_a)) * cam.original_image + cam.exposure_b
         image_ab = torch.clamp(image_ab, 0.0, 1.0)
         rgb_raw = (image_ab * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
 
@@ -651,7 +655,7 @@ class GaussianModel:
 
         scales = torch.log(torch.sqrt(dist2))[..., None]
         if not self.isotropic:
-            scales = scales.repeat(1, 3)
+            scales = scales.repeat(1, 2)
 
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
         rots[:, 0] = 1
@@ -662,16 +666,12 @@ class GaussianModel:
         return fused_point_cloud, features, scales, rots, opacities
 
     def extend_from_pcd(self, fused_point_cloud, features, scales, rots, opacities, kf_id):
-        new_xyz = nn.Parameter(fused_point_cloud.requires_grad_(True), device=self.device)
-        new_features_dc = nn.Parameter(
-            features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True), device=self.device
-        )
-        new_features_rest = nn.Parameter(
-            features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True), device=self.device
-        )
-        new_scaling = nn.Parameter(scales.requires_grad_(True), device=self.device)
-        new_rotation = nn.Parameter(rots.requires_grad_(True), device=self.device)
-        new_opacity = nn.Parameter(opacities.requires_grad_(True), device=self.device)
+        new_xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        new_features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        new_features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
+        new_scaling = nn.Parameter(scales.requires_grad_(True))
+        new_rotation = nn.Parameter(rots.requires_grad_(True))
+        new_opacity = nn.Parameter(opacities.requires_grad_(True))
 
         new_unique_kfIDs = torch.ones((new_xyz.shape[0]), device=self.device).int() * kf_id
 
@@ -740,11 +740,11 @@ class GaussianModel:
 
     def check_nans(self):
         """Remove Gaussians with an invalid state, i.e. nan or inf attributes."""
-        invalid = torch.isnan(self._xyz) | torch.isinf(self._xyz)
-        invalid = invalid | torch.isnan(self._scaling) | torch.isinf(self._scaling)
-        if invalid.ndim > 1:
-            for i in range(invalid.ndim - 1):
-                invalid = invalid.any(dim=-1)
+        # since xyz is now 3D, but scaling 2D we need to check with any along last dim
+        invalid = torch.sum(torch.isnan(self._xyz).int(), dim=-1).bool()
+        invalid = invalid | torch.sum(torch.isinf(self._xyz).int(), dim=-1).bool()
+        invalid = invalid | torch.sum(torch.isnan(self._scaling).int(), dim=-1).bool()
+        invalid = invalid | torch.sum(torch.isinf(self._scaling).int(), dim=-1).bool()
 
         if invalid.sum() > 0:
             idx = torch.where(invalid)[0]

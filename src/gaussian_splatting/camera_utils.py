@@ -9,8 +9,6 @@ from .utils.graphics_utils import getProjectionMatrix, getWorld2View2, focal2fov
 from ..utils.image_utils import PILtoTorch
 
 
-# FIXME: they have different attributes likely due to a different projection
-# TODO They have an additional alpha mask, maybe to blend things? is this really the same as our mask?
 class Camera(nn.Module):
     def __init__(
         self,
@@ -51,18 +49,15 @@ class Camera(nn.Module):
             # self.original_image *= mask.to(self.data_device)
             self.mask = mask.to(self.device)
         else:
-            self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
+            self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.device)
             self.mask = None
 
-        # TODO chen: when do we use these?
-        self.trans = trans
-        self.scale = scale
+        self.trans, self.scale = trans, scale
+
+        self.exposure_a = nn.Parameter(torch.tensor([0.0], requires_grad=True, device=device))
+        self.exposure_b = nn.Parameter(torch.tensor([0.0], requires_grad=True, device=device))
 
         self.projection_matrix = projection_matrix.to(device=device)
-        self.full_proj_transform = (
-            self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))
-        ).squeeze(0)
-        self.camera_center = self.world_view_transform.inverse()[3, :3]
 
     def image_tensors_to(self, new_device: str) -> None:
         self.original_image = self.original_image.to(new_device)

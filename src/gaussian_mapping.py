@@ -20,7 +20,6 @@ import matplotlib.pyplot as plt
 
 from .gaussian_splatting.gui import gui_utils
 from .gaussian_splatting.eval_utils import EvaluatePacket
-from .gaussian_splatting.utils.general_utils import random_subsample_mask
 from .gaussian_splatting.gaussian_renderer import render
 from .gaussian_splatting.scene.gaussian_model import GaussianModel
 from .gaussian_splatting.camera_utils import Camera
@@ -161,7 +160,8 @@ class GaussianMapper(object):
 
         height, width = image.shape[-2:]
         fovx, fovy = focal2fov(fx, width), focal2fov(fy, height)
-        projection_matrix = getProjectionMatrix(self.z_near, self.z_far, cx, cy, fx, fy, width, height)
+        # projection_matrix = getProjectionMatrix2(self.z_near, self.z_far, cx, cy, fx, fy, width, height)
+        projection_matrix = getProjectionMatrix(self.z_near, self.z_far, fovx, fovy)
         projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
 
         return Camera(
@@ -467,28 +467,6 @@ class GaussianMapper(object):
 
             return batch
 
-        @torch.no_grad()
-        def maybe_fill_holes(render_pkg, view_id: int, size_hole: int = 100, max_mem: float = 0.95) -> bool:
-            """We sometimes still have "white holes" left in our Renderings, because we only take covisible areas
-            for initialization. Manually filling these speeds up refinement significantly!
-            """
-            mask = torch.all((render_pkg["render"].squeeze() == self.background[:, None, None]), dim=0)
-
-            if mask.sum() > size_hole:
-                has_hole = True
-                self.info(f"Detected holes in view {view_id} during importance sampling. Adding higher weight ...")
-                # Help out in those frames by refining these more!
-                used_mem, free_mem = self.get_ram_usage()
-                # NOTE chen: this can add up a lot of memory, only this if we have enough slack
-                if used_mem <= max_mem:
-                    ng_before = len(self.gaussians)
-                    self.info(f"Patching up holes in view {view_id} manually using Depth from Tracking ...")
-                    self.densify_holes(view_id, mask, downsample_factor=2.0)
-                    self.info(f"Added {len(self.gaussians) - ng_before} Gaussians to fill holes in view {view_id} ...")
-            else:
-                has_hole = False
-            return has_hole
-
         def importance_weights_from_single_pass(cams: List[Camera], batch_size: int = 16):
             """Run a single forward pass over all frames to gather importance weights.
             Since we need to run over a potential large batch of all frames, we use mini batches.
@@ -506,9 +484,9 @@ class GaussianMapper(object):
                     self.gaussians.check_nans()  # NOTE chen: this can happen we have zero depth and an inconvenient pose
 
                     # Punish anisotropic Gaussians
-                    scaling = self.gaussians.get_scaling
-                    isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-                    loss += self.loss_params.beta1 * isotropic_loss.mean()
+                    # scaling = self.gaussians.get_scaling
+                    # isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
+                    # loss += self.loss_params.beta1 * isotropic_loss.mean()
                     # Backpropagate through batch
                     self.gaussians.check_nans()  # Sanity check to avoid invalid Gaussians (e.g. from 0 depths)
                     loss.backward()
@@ -540,11 +518,7 @@ class GaussianMapper(object):
         # Gather importance weights by computing the loss over all frames first
         # Because we dont want to waste too much compute, we backpropagate over this large accumulated batch
         if self.refine_params.sampling.weighted:
-            self.info("Gathering importance weights for refinement ...")
-            self.opt_params.position_lr_init /= 10  # We use a constant lower learning rate for all frames
-            self.gaussians.training_setup(self.opt_params)
             weights = importance_weights_from_single_pass(kf_cams, batch_size=self.refine_params.bs)
-            self.opt_params.position_lr_init *= 10
         else:
             weights = None
 
@@ -626,20 +600,22 @@ class GaussianMapper(object):
         if render_pkg is None:
             return 0.0
 
-        image, depth = render_pkg["render"], render_pkg["surf_depth"]
-        ipdb.set_trace()
+        image, depth = render_pkg["render"], render_pkg["depth"]
+
         # (l1_rgb + ssim_rgb) + l1_depth (+ depth_smooth)
         # NOTE chen: we regularize depth with an edge aware smoothness term already
         rgbd_loss = mapping_rgbd_loss(image, depth, view, **self.loss_params)
+
         # Regularize additional surface properties i.e. normals
         dist, normals, surf_normal = render_pkg["rend_dist"], render_pkg["rend_normal"], render_pkg["surf_normal"]
         # Only do this when we already have a decent scene model
-        lambda_normal = self.loss_params.gamma1 if self.count > 10 else 0.0
-        lambda_dist = self.loss_params.gamma2 if self.count > 10 else 0.0
-        normal_loss = (1 - (normals * surf_normal).sum(dim=0))[None].mean()
+        # TODO make threshold configurable
+        lambda_normal = self.loss_params.gamma1 if self.count > 1 else 0.0
+        lambda_dist = self.loss_params.gamma2 if self.count > 1 else 0.0
+        normal_error = (1 - (normals * surf_normal).sum(dim=0))[None]
         dist_loss = lambda_dist * (dist).mean()
+        total_loss = rgbd_loss + lambda_normal * normal_error.mean() + lambda_dist * dist_loss
 
-        total_loss = rgbd_loss + lambda_normal * normal_loss + lambda_dist * dist_loss
         return total_loss, render_pkg
 
     def mapping_step(
@@ -715,6 +691,8 @@ class GaussianMapper(object):
 
         return avg_loss.detach().item()
 
+    # FIXME chen: we need to have n_touched in order to do covisibility pruning
+    # TODO can we simply add this and opacity to the new kernels?
     def covisibility_pruning(
         self, mode: str = "new", last: int = 10, dont_prune_latest: int = 1, visibility_th: int = 2
     ):
@@ -1008,10 +986,11 @@ class GaussianMapper(object):
         print(colored("\n[Gaussian Mapper] ", "magenta"), colored(f"Loss: {self.loss_list[-1]}", "cyan"))
 
         ### Prune unreliable Gaussians
-        if len(self.iteration_info) % self.update_params.prune_every == 0 and delay_to_tracking:
-            if self.update_params.pruning.use_covisibility:
-                # Gaussians should be visible in multiple frames
-                self.covisibility_pruning(**self.update_params.pruning.covisibility)
+        # TODO use this once we adapted the CUDA kernel to also count n_touched and return opacity
+        # if len(self.iteration_info) % self.update_params.prune_every == 0 and delay_to_tracking:
+        #     if self.update_params.pruning.use_covisibility:
+        #         # Gaussians should be visible in multiple frames
+        #         self.covisibility_pruning(**self.update_params.pruning.covisibility)
 
         ### Update visualization
         if self.use_gui:

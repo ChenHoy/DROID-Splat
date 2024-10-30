@@ -50,6 +50,8 @@ def backup_source_code(backup_directory):
         "*output*",
         "*.png",
         "*.jpg",
+        "*.mp4",
+        "*.gif",
         "*.jpeg",
         "*media*",
         "*.so",

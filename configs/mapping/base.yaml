@@ -14,7 +14,6 @@ online_opt:
 
   batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
   batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
-  optimize_poses: False
 
   ## Strategy for adding / pruning Gaussians
   prune_every: 2 # Covisibility and opacity based pruning
@@ -34,14 +33,6 @@ online_opt:
 
   ## Densification parameters
   densify:
-    # Densify Gaussians based on opacity only after k Mapper updates
-    use_opacity: False # Use opacity based densification
-    opacity:
-      after: 5 # NOTE we usually run the Mapper ~30-40 times on normal videos
-      # NOTE we limit this because in unmapped areas, we suddenly would add 100k Gaussians
-      max_pixels: 2000 # Maximum number of pixels to densify
-      th: 0.01 # Opacity value below which we densify
-
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
       max_grad: 0.001 # Gaussians with gradients above this are split (smaller -> denser)
@@ -49,13 +40,6 @@ online_opt:
       min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
       max_screen_size: 10 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
     
-  ## Scale gradients of already optimized Gaussians to battle catastrophic forgetting
-  grad_scaler:
-    do_scale: False # Scale gradients of Gaussians by how many times they already have been optimized
-    min_scale: 0.0001 # Reduce learning rate only to e.g. max. 1/10
-    decay_rate: 0.001 # Decay rate of exponential function
-    min_counte: 200 # Only scale after a Gaussian was already optimized for this many iterations
-
   # How to Filter the Tracking Map before feeding into Mapper
   filter: # Parameter for filtering incoming points from the SLAM system
     multiview: True # Only initialize Gaussians that are consistent in multiple views
@@ -94,20 +78,21 @@ loss:
   with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
   with_depth_smoothness: False # Similarity loss between depth and image gradients
   rgb_boundary_threshold: 0.001 # Pixel information in an image needs to be at least higher than this 
+  use_log_depth: True # Use edge-aware log depth for depth supervision from https://arxiv.org/pdf/2403.17822
 
   # Weights
   alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta1: 2.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
   beta2: 0.01 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
-  gamma1: 0.05 # Regularize normal directions
-  gamma2: 0.0 # Regularize distortion
+  gamma1: 0.05 # The normal consistency term aligns the rendered normal map with the gradient of the rendered depth.
+  # FIXME (according to https://github.com/hbb1/2d-gaussian-splatting/issues/71 this can be tuned to e.g. 100) but we dont see good results with this
+  gamma2: 0.0 # Depth distortion concentrates 2D primitives within a tight range along the ray 
 
 
 # Offline Map Refinement for finetuning
 refinement:
   optimize_poses: False
-  use_non_keyframes: False # Use RGB non-keyframes as well during map refinement
 
   iters: 0 # Optimize over this many different batches
   batch_iters: 50 # Optimize each batch this many times
@@ -116,40 +101,22 @@ refinement:
 
   # Sample according to loss order of frames and include non-keyframes if wanted
   sampling:
-    weighted: False
+    use_non_keyframes: False # Use RGB non-keyframes as well during map refinement
     kf_at_least: 0.5 # Always make sure to have > x% keyframes in a batch
+    weighted: False
+    use_neighborhood: False # Use neighborhoods around random frames to have more spatial overlap
+    neighborhood_size: 5 # How many frames to include in the neighborhood
 
   prune_densify_every: 3 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densificatio# This has to be an uneven number
   densify_until: 10 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
 
   densify:
-    # Densify Gaussians based on opacity only after k Mapper updates
-    use_opacity: False # Use opacity based densification
-    opacity:
-      max_pixels: 10000 # Maximum number of pixels to densify
-      th: 0.01 # Opacity value below which we densify
-
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
       max_grad: 0.005 # Gaussians with gradients above this are split (smaller -> denser)
       extent: 5 # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
       min_opacity: 0.05 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
       max_screen_size: 10 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
-
-
-# Backpropagate the Render updates into Tracking system
-feedback:
-  warmup: 5 # Only start feeding back into tracking after we ran the Renderer k times
-  disps: False
-  poses: False
-  only_last_window: True # Dont feedback the random frames, as pose optimization is better conditioned in temporal neighborhood
-  no_refinement: False # Dont feedback after refinement
-  # Filtering args for feedback
-  kwargs:
-    opacity_threshold: 0.1
-    ignore_frames: [0, 1, 2, 3, 4, 5, 6] # Never feedback the initial frames
-    min_coverage: 0.5 # Min. Density of frame after eliminiating outliers
-    max_diff_to_video: 0.2 # Maximum abs. rel. deviation from the dense video depth
 
 
 # Parameters for transfer SLAM -> Renderer
@@ -167,3 +134,7 @@ use_spherical_harmonics: False
 pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False
+  # surf depth is either median or expected by setting depth_ratio to 1 or 0
+  # for bounded scene, use median depth, i.e., depth_ratio = 1;
+  # for unbounded scene, use expected depth, i.e., depth_ration = 0, to reduce disk aliasing.
+  depth_ratio: 0

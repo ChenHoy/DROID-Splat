@@ -64,7 +64,6 @@ class EvaluatePacket:
             self._rotation = gaussians._rotation.detach().clone()
             self.rotation_activation = torch.nn.functional.normalize
             self.unique_kfIDs = gaussians.unique_kfIDs.clone()
-            self.n_obs = gaussians.n_obs.clone()
 
         self.pipeline_params = pipeline_params
         self.background = background
@@ -116,7 +115,10 @@ def create_rendering_csv(results_kf, results_nonkf, cfg: DictConfig, input_path:
         "psnr": [results_kf["mean_psnr"], results_nonkf["mean_psnr"]],
         "ssim": [results_kf["mean_ssim"], results_nonkf["mean_ssim"]],
         "lpips": [results_kf["mean_lpips"], results_nonkf["mean_lpips"]],
-        "extra_non_kf": [str(cfg.mapping.refinement.use_non_keyframes), str(cfg.mapping.refinement.use_non_keyframes)],
+        "extra_non_kf": [
+            str(cfg.mapping.refinement.sampling.use_non_keyframes),
+            str(cfg.mapping.refinement.sampling.use_non_keyframes),
+        ],
         "eval_on_keyframes": [True, False],
     }
     return csv_dict

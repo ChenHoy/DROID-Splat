@@ -39,7 +39,6 @@ def look_for_degenerate_tensors(list_of_tensors: List) -> bool:
     return num_degenerate
 
 
-# TODO make pipe.depth_ratio a parameter configurable through hydra
 def render(
     viewpoint_camera,
     pc: GaussianModel,
@@ -70,8 +69,8 @@ def render(
         pass
 
     # Set up rasterization configuration
-    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
-    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+    tanfovx = math.tan(viewpoint_camera.fov_x * 0.5)
+    tanfovy = math.tan(viewpoint_camera.fov_y * 0.5)
 
     # NOTE chen: this does not use a projmatrix_raw
     raster_settings = GaussianRasterizationSettings(
@@ -152,8 +151,6 @@ def render(
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
-    # FIXME chen: we dont have n_touched and opacity as returns from the 2D rasterizer
-    # TODO do we really need these?
     rets = {
         "render": rendered_image,
         "viewspace_points": means2D,
@@ -162,6 +159,7 @@ def render(
     }
 
     # additional regularizations
+    # TODO chen: is render_alpha the opacity?
     render_alpha = allmap[1:2]
 
     # get normal map
@@ -200,7 +198,7 @@ def render(
             "rend_alpha": render_alpha,  # TODO chen: is this just the opacity?
             "rend_normal": render_normal,  # Normal map
             "rend_dist": render_dist,  # Distortion map
-            "surf_depth": surf_depth,  # Proper surface depth
+            "depth": surf_depth,  # Proper surface depth
             "surf_normal": surf_normal,  # Proper normals
         }
     )

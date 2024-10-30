@@ -12,7 +12,7 @@ online_opt:
 
   prune_every: 4 # Prune every k Render passes
   pruning:
-    use_covisibility: True
+    use_covisibility: False
     covisibility:
       mode: "new" # ["abs", "new"] How to prune: either check for covisible frames everywhere or just in the last n frames
       last: 10 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
@@ -54,10 +54,10 @@ opt_params:
 
 loss:
   # Weights
-  alpha1: 0.9 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha1: 0.3 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta1: 5.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
-  beta2: 0.001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+  beta2: 0.0 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
 # Parameters for transfer SLAM -> Renderer
 input:
