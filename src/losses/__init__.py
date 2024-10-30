@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from ..gaussian_splatting.camera_utils import Camera
 
 from ..utils import gradient_map
-from .depth import depth_loss
+from .depth import depth_loss, log_depth_loss
 from .image import color_loss
 
 MAX_DEPTH = 1e3  # NOTE This is unit dependent
@@ -27,9 +27,8 @@ def mapping_rgbd_loss(
     beta2: float = 0.001,
     rgb_boundary_threshold: float = 0.01,
     supervise_with_prior: bool = False,
-    scale_invariant: bool = False,
-    return_diff: bool = False,
-    **kwargs,
+    use_log_depth: bool = False,
+    **kwargs
 ):
 
     if (cam.depth is not None and not supervise_with_prior) or (cam.depth_prior is not None and supervise_with_prior):
@@ -51,50 +50,24 @@ def mapping_rgbd_loss(
     if cam.mask is not None:
         rgb_pixel_mask = rgb_pixel_mask & cam.mask
 
+    rgb_mask = rgb_pixel_mask.float()
     if with_edge_weight:
-        edge_mask = gradient_map(image_gt)  # Use gt reference image for edge weight
-        rgb_mask = rgb_pixel_mask.float() * edge_mask.float()
-    else:
-        rgb_mask = rgb_pixel_mask.float()
-
-    if return_diff:
-        loss_rgb, diff_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask, return_diff=return_diff)
-    else:
-        loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask, return_diff=return_diff)
+        rgb_mask = rgb_pixel_mask.float() * gradient_map(image_gt).float()  # Use gt reference image for edge weight
+    loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask)
 
     if has_depth:
-        # Only use valid depths for supervision
+        # Only use valid depth
         depth_pixel_mask = ((depth_gt > MIN_DEPTH) * (depth_gt < MAX_DEPTH)).view(*depth.shape)
         if cam.mask is not None:
             depth_pixel_mask = depth_pixel_mask & cam.mask
-        if return_diff:
-            loss_depth, diff_depth = depth_loss(
-                depth,
-                depth_gt,
-                with_depth_smoothness,
-                beta2,
-                image_gt,
-                depth_pixel_mask,
-                scale_invariant=scale_invariant,
-                return_diff=return_diff,
-            )
-        else:
-            loss_depth = depth_loss(
-                depth,
-                depth_gt,
-                with_depth_smoothness,
-                beta2,
-                image_gt,
-                depth_pixel_mask,
-                scale_invariant=scale_invariant,
-                return_diff=return_diff,
-            )
-        loss = alpha1 * loss_rgb + (1 - alpha1) * loss_depth
 
-    if return_diff:
-        return loss, {"rgb": diff_rgb, "depth": diff_depth}
-    else:
-        return loss
+        if use_log_depth:
+            loss_depth = log_depth_loss(depth, depth_gt, image_gt, with_depth_smoothness, beta2, depth_pixel_mask)
+        else:
+            loss_depth = depth_loss(depth, depth_gt, with_depth_smoothness, beta2, image_gt, depth_pixel_mask)
+        loss = loss_rgb + alpha1 * loss_depth
+
+    return loss
 
 
 def plot_losses(

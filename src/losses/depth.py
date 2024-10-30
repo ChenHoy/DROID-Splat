@@ -19,25 +19,18 @@ def depth_loss(
     beta: float = 0.001,
     original_image: Optional[torch.Tensor] = None,
     mask: Optional[torch.Tensor] = None,
-    scale_invariant: bool = False,
-    return_diff: bool = False,
 ):
+    """Vanilla Depth loss: L1 (+ smoothness) loss between estimated and ground truth depth maps."""
     if mask is None:
         mask = torch.ones_like(depth_est, device=depth_est.device)
 
-    if scale_invariant:
-        loss_func = ScaleAndShiftInvariantLoss()
-    else:
-        loss_func = l1_loss
+    loss_func = l1_loss
 
     # Sanity check against missing depths (e.g. everything got filtered out)
     if (depth_gt > 0).sum() < MIN_NUM_POINTS or mask.sum() < MIN_NUM_POINTS:
         l1_depth = 0.0
     else:
-        if return_diff:
-            l1_depth, diff = loss_func(depth_est, depth_gt, mask, return_diff=True)
-        else:
-            l1_depth = loss_func(depth_est, depth_gt, mask)
+        l1_depth = loss_func(depth_est, depth_gt, mask)
 
     # Sanity check to avoid division by zero
     if with_smoothness and original_image is not None and mask.sum() > 0:
@@ -45,10 +38,29 @@ def depth_loss(
     else:
         depth_loss = l1_depth
 
-    if return_diff:
-        return depth_loss, diff
-    else:
-        return depth_loss
+    return depth_loss
+
+
+def log_depth_loss(
+    depth_est: torch.Tensor,
+    depth_gt: torch.Tensor,
+    original_image: torch.Tensor,
+    with_smoothness: bool = False,
+    beta: float = 0.001,
+    mask: Optional[torch.Tensor] = None,
+):
+    """Log depth loss from https://arxiv.org/pdf/2403.17822, this uses the edge aware term which we normally use in our smoothness
+    regularizer to only supervise depth strongly on image edges and compares the depth difference in log space"""
+    if mask is not None:
+        mask = torch.ones_like(depth_est, device=depth_est.device)
+
+    grad_img = gradient_map(original_image)
+    w_img = torch.exp(-grad_img)
+    log_loss = torch.log(1 + l1_loss(depth_est, depth_gt))
+    depth_loss = (mask * w_img * log_loss).mean()
+    if with_smoothness and mask.sum() > 0:
+        depth_loss = depth_loss + beta * depth_reg(depth_est, original_image, mask=mask)
+    return depth_loss
 
 
 class ScaleAndShiftInvariantLoss(torch.nn.Module):
@@ -155,7 +167,6 @@ def monogs_depth_reg(depth: torch.Tensor, gt_image: torch.Tensor, mask: Optional
 
 
 # NOTE chen: this is called smooth_loss in the 2D Gaussian Splatting Repo
-# TODO use higher order image gradient operators flexibly
 def depth_reg(disp: torch.Tensor, img: torch.Tensor, mask: Optional[torch.Tensor] = None) -> float:
     """Ensure that the depth is smooth in regions where the image gradient is low."""
     if mask is not None:
@@ -163,11 +174,12 @@ def depth_reg(disp: torch.Tensor, img: torch.Tensor, mask: Optional[torch.Tensor
 
     grad_disp_x = torch.abs(disp[:, 1:-1, :-2] + disp[:, 1:-1, 2:] - 2 * disp[:, 1:-1, 1:-1])
     grad_disp_y = torch.abs(disp[:, :-2, 1:-1] + disp[:, 2:, 1:-1] - 2 * disp[:, 1:-1, 1:-1])
-    grad_img_x = torch.mean(torch.abs(img[:, 1:-1, :-2] - img[:, 1:-1, 2:]), 0, keepdim=True) * 0.5
-    grad_img_y = torch.mean(torch.abs(img[:, :-2, 1:-1] - img[:, 2:, 1:-1]), 0, keepdim=True) * 0.5
+    grad_img_x, grad_img_y = gradient_map(img, return_xy=True)
+
     grad_disp_x *= torch.exp(-grad_img_x)
     grad_disp_y *= torch.exp(-grad_img_y)
-    return mask * grad_disp_x.mean() + mask * grad_disp_y.mean()
+    # NOTE chen: we take the norm of grad w.r.t to x and y compared to simply sum/avg from before
+    return (mask * torch.sqrt(grad_disp_x**2 + grad_disp_y**2)).mean()
 
 
 def get_median_depth(depth, opacity=None, mask=None, return_std=False):
