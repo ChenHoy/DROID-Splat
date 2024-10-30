@@ -56,7 +56,8 @@ def log_depth_loss(
 
     grad_img = gradient_map(original_image)
     w_img = torch.exp(-grad_img)
-    log_loss = torch.log(1 + l1_loss(depth_est, depth_gt))
+    l1_err = l1_loss(depth_est, depth_gt, return_diff=True)
+    log_loss = torch.log(1 + l1_err)
     depth_loss = (mask * w_img * log_loss).mean()
     if with_smoothness and mask.sum() > 0:
         depth_loss = depth_loss + beta * depth_reg(depth_est, original_image, mask=mask)
