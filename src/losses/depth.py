@@ -165,22 +165,20 @@ def monogs_depth_reg(depth: torch.Tensor, gt_image: torch.Tensor, mask: Optional
     err = (w_h * torch.abs(depth_grad_h)).mean() + (w_v * torch.abs(depth_grad_v)).mean()
     return err
 
-
-# NOTE chen: this is called smooth_loss in the 2D Gaussian Splatting Repo
 def depth_reg(disp: torch.Tensor, img: torch.Tensor, mask: Optional[torch.Tensor] = None) -> float:
     """Ensure that the depth is smooth in regions where the image gradient is low."""
     if mask is not None:
         mask = torch.ones_like(disp, device=disp.device)
 
-    grad_disp_x = torch.abs(disp[:, 1:-1, :-2] + disp[:, 1:-1, 2:] - 2 * disp[:, 1:-1, 1:-1])
-    grad_disp_y = torch.abs(disp[:, :-2, 1:-1] + disp[:, 2:, 1:-1] - 2 * disp[:, 1:-1, 1:-1])
+    # 1st order gradient for depth
+    grad_disp_x, grad_disp_y = gradient_map(disp, operator="sobel", return_xy=True)
     grad_img_x, grad_img_y = gradient_map(img, return_xy=True)
-
+    # Reduce across RGB channels
+    grad_img_x, grad_img_y = torch.norm(grad_img_x, dim=0), torch.norm(grad_img_y, dim=0)
+    # Regions of high gradient will have lower weights
     grad_disp_x *= torch.exp(-grad_img_x)
     grad_disp_y *= torch.exp(-grad_img_y)
-    # NOTE chen: we take the norm of grad w.r.t to x and y compared to simply sum/avg from before
     return (mask * torch.sqrt(grad_disp_x**2 + grad_disp_y**2)).mean()
-
 
 def get_median_depth(depth, opacity=None, mask=None, return_std=False):
     depth = depth.detach().clone()
