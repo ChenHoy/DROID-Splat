@@ -206,7 +206,7 @@ class SLAM:
                 "red",
             )
         if self.cfg.run_mapping:
-            if self.cfg.mapping.refinement.use_non_keyframes and self.cfg.mapping.refinement.iters == 0:
+            if self.cfg.mapping.refinement.sampling.use_non_keyframes and self.cfg.mapping.refinement.iters == 0:
                 print(
                     colored(
                         """Warning. If you want to use non-keyframes during Gaussian Rendering Optimization, 
@@ -694,7 +694,7 @@ class SLAM:
             kf_idx = kf_tstamps
             nonkf_idx = nonkf_tstamps
 
-        if self.cfg.mapping.refinement.use_non_keyframes:
+        if self.cfg.mapping.refinement.sampling.use_non_keyframes:
             # FIXME this does not work for tum anymore if we evaluate in rgbd mode, but do inference in another mode :/
             if self.mode == "prgbd" and "tum" in stream.input_folder:
                 raise Exception("TUM evaluation does not work with non-keyframes in PRGBD mode right now!")
@@ -883,7 +883,7 @@ class SLAM:
         if (
             self.cfg.run_mapping
             and self.cfg.mapping.refinement.iters > 0
-            and self.cfg.mapping.refinement.use_non_keyframes
+            and self.cfg.mapping.refinement.sampling.use_non_keyframes
         ):
             assert (
                 gaussian_mapper_last_state is not None
@@ -944,7 +944,7 @@ class SLAM:
         last state of the Mapper.
         """
 
-        if self.cfg.mapping.refinement.use_non_keyframes:
+        if self.cfg.mapping.refinement.sampling.use_non_keyframes:
             all_cams = gaussian_mapper_last_state.cameras
         else:
             all_cams = []
