@@ -9,8 +9,8 @@ def l1_loss(
 ) -> float:
     diff = torch.abs(pred - gt)
     if mask is not None:
-        loss = (diff * mask).mean()
         diff = diff * mask
+    loss = diff.mean()
 
     if return_diff:
         return loss, diff
@@ -21,8 +21,8 @@ def l1_loss(
 def l2_loss(pred, gt, mask: Optional[torch.Tensor] = None, return_diff: bool = False) -> float:
     diff = (pred - gt) ** 2
     if mask is not None:
-        loss = (diff * mask).mean()
         diff = diff * mask
+    loss = diff.mean()
 
     if return_diff:
         return loss, diff

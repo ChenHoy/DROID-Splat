@@ -6,8 +6,8 @@ import torch.nn.functional as F
 
 from ..gaussian_splatting.camera_utils import Camera
 
-from ..utils import image_gradient_mask
-from .depth import depth_loss
+from ..utils import gradient_map
+from .depth import depth_loss, log_depth_loss
 from .image import color_loss
 
 MAX_DEPTH = 1e7
@@ -27,7 +27,6 @@ def mapping_rgbd_loss(
     beta2: float = 0.001,
     rgb_boundary_threshold: float = 0.01,
     supervise_with_prior: bool = False,
-    scale_invariant: bool = False,
     **kwargs
 ):
 
@@ -50,25 +49,19 @@ def mapping_rgbd_loss(
     if cam.mask is not None:
         rgb_pixel_mask = rgb_pixel_mask & cam.mask
 
+    rgb_mask = rgb_pixel_mask.float()
     if with_edge_weight:
-        edge_mask_x, edge_mask_y = image_gradient_mask(image_gt)  # Use gt reference image for edge weight
-        edge_mask = edge_mask_x | edge_mask_y  # Combine with logical OR
-        rgb_mask = rgb_pixel_mask.float() * edge_mask.float()
-    else:
-        rgb_mask = rgb_pixel_mask.float()
-
+        rgb_mask = rgb_pixel_mask.float() * gradient_map(image_gt).float()  # Use gt reference image for edge weight
     loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask)
+
     if has_depth:
-        # Only use valid depths for supervision
+        # Only use valid depth
         depth_pixel_mask = ((depth_gt > MIN_DEPTH) * (depth_gt < MAX_DEPTH)).view(*depth.shape)
         if cam.mask is not None:
             depth_pixel_mask = depth_pixel_mask & cam.mask
-        loss_depth = depth_loss(
-            depth, depth_gt, with_depth_smoothness, beta2, image_gt, depth_pixel_mask, scale_invariant=scale_invariant
-        )
+
+        loss_depth = depth_loss(depth, depth_gt, with_depth_smoothness, beta2, image_gt, depth_pixel_mask)
         loss = alpha1 * loss_rgb + (1 - alpha1) * loss_depth
-    else:
-        loss = loss_rgb
 
     return loss
 

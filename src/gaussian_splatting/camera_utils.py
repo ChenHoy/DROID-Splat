@@ -5,7 +5,6 @@ import torch
 from torch import nn
 
 from .utils.graphics_utils import getProjectionMatrix2, getWorld2View2, focal2fov
-from ..utils import image_gradient, image_gradient_mask
 
 
 class Camera(nn.Module):
@@ -38,7 +37,6 @@ class Camera(nn.Module):
         self.original_image = color
         self.depth = depth_est
         self.depth_prior = depth_gt
-        self.grad_mask = None
 
         self.mask = mask
 
@@ -76,9 +74,6 @@ class Camera(nn.Module):
         self.exposure_a = self.exposure_a.to(device=device)
         self.exposure_b = self.exposure_b.to(device=device)
         self.projection_matrix = self.projection_matrix.to(device=device)
-
-        if self.grad_mask is not None:
-            self.grad_mask = self.grad_mask.to(device=device)
 
     def detach(self):
         """Clone and detach all tensors from the camera object"""
@@ -161,40 +156,10 @@ class Camera(nn.Module):
         projection_matrix = getProjectionMatrix2(znear, zfar, self.cx, self.cy, self.fx, self.fy, width, height)
         self.projection_matrix = projection_matrix.transpose(0, 1).to(device=self.device)
 
-    def compute_grad_mask(self, config):
-        edge_threshold = config["Training"]["edge_threshold"]
-
-        gray_img = self.original_image.mean(dim=0, keepdim=True)
-        gray_grad_v, gray_grad_h = image_gradient(gray_img)
-        mask_v, mask_h = image_gradient_mask(gray_img)
-        gray_grad_v = gray_grad_v * mask_v
-        gray_grad_h = gray_grad_h * mask_h
-        img_grad_intensity = torch.sqrt(gray_grad_v**2 + gray_grad_h**2)
-
-        if config["Dataset"]["type"] == "replica":
-            row, col = 32, 32
-            multiplier = edge_threshold
-            _, h, w = self.original_image.shape
-            for r in range(row):
-                for c in range(col):
-                    block = img_grad_intensity[
-                        :,
-                        r * int(h / row) : (r + 1) * int(h / row),
-                        c * int(w / col) : (c + 1) * int(w / col),
-                    ]
-                    th_median = block.median()
-                    block[block > (th_median * multiplier)] = 1
-                    block[block <= (th_median * multiplier)] = 0
-            self.grad_mask = img_grad_intensity
-        else:
-            median_img_grad_intensity = img_grad_intensity.median()
-            self.grad_mask = img_grad_intensity > median_img_grad_intensity * edge_threshold
-
     def clean(self):
         self.original_image = None
         self.depth = None
         self.depth_prior = None
-        self.grad_mask = None
 
         self.cam_rot_delta = None
         self.cam_trans_delta = None
