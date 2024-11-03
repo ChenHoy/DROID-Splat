@@ -6,8 +6,7 @@ import torch.nn.functional as F
 
 from ..gaussian_splatting.camera_utils import Camera
 
-from ..utils import gradient_map
-from .depth import depth_loss, log_depth_loss
+from .depth import depth_loss
 from .image import color_loss
 
 MAX_DEPTH = 1e7
@@ -19,14 +18,15 @@ def mapping_rgbd_loss(
     image: torch.Tensor,
     depth: torch.Tensor,
     cam: Camera,
-    with_edge_weight: bool = False,
     with_ssim: bool = False,
+    with_edge_weight: bool = False,
     with_depth_smoothness: bool = False,
+    supervise_with_prior: bool = False,
+    rgb_boundary_threshold: float = 0.01,
+    depth_func: str = "l1",
     alpha1: float = 0.8,
     alpha2: float = 0.85,
     beta2: float = 0.001,
-    rgb_boundary_threshold: float = 0.01,
-    supervise_with_prior: bool = False,
     **kwargs
 ):
 
@@ -42,17 +42,14 @@ def mapping_rgbd_loss(
     # Transform with exposure (done in other papers)
     # image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
     image_gt = cam.original_image
-    # Mask out pixels with little information and invalid depth pixels
-    rgb_pixel_mask = (image_gt.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
 
+    # Mask out pixels with little information (from MonoGS)
+    rgb_pixel_mask = (image_gt.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
     # Include additional attached masks if they exist
     if cam.mask is not None:
         rgb_pixel_mask = rgb_pixel_mask & cam.mask
-
     rgb_mask = rgb_pixel_mask.float()
-    if with_edge_weight:
-        rgb_mask = rgb_pixel_mask.float() * gradient_map(image_gt).float()  # Use gt reference image for edge weight
-    loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask)
+    loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, mask=rgb_mask)
 
     if has_depth:
         # Only use valid depth
@@ -60,8 +57,18 @@ def mapping_rgbd_loss(
         if cam.mask is not None:
             depth_pixel_mask = depth_pixel_mask & cam.mask
 
-        loss_depth = depth_loss(depth, depth_gt, with_depth_smoothness, beta2, image_gt, depth_pixel_mask)
+        loss_depth = depth_loss(
+            depth.squeeze(),
+            depth_gt.squeeze(),
+            with_edge_weight,
+            with_depth_smoothness,
+            beta2,
+            image_gt.squeeze(),
+            depth_pixel_mask.squeeze(),
+            depth_func,
+        )
         loss = alpha1 * loss_rgb + (1 - alpha1) * loss_depth
+        # loss = loss_rgb + (1 - alpha1) * loss_depth
 
     return loss
 

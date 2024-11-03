@@ -86,6 +86,7 @@ loss:
   with_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
   with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
   with_depth_smoothness: False # Similarity loss between depth and image gradients
+  depth_func: l1 # 'l1', 'log_l1', 'l1_huber', 'pearson'
   rgb_boundary_threshold: 0.001 # Pixel information in an image needs to be at least higher than this 
 
   # Weights

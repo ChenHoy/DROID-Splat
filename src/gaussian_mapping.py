@@ -776,6 +776,7 @@ class GaussianMapper(object):
                 view.cam_rot_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
                 view.cam_trans_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
 
+    # TODO is n_touched really the same as in 2D G++?
     def render_compare(self, view: Camera) -> Tuple[float, Dict, Dict]:
         """Render current view and compute loss by comparing with groundtruth"""
         render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
@@ -830,10 +831,8 @@ class GaussianMapper(object):
             self.last_frame_loss[view.uid] = current_loss.item()
             loss += current_loss
 
-        # Scale the loss with the number of frames so we adjust the learning rate dependent on batch size,
-        # (naive adding for huge batches would result on bigger updates)
-        # NOTE chen: MonoGS scales their loss with len(frames)
-        # NOTE we get better results when not scaling, getting good performance really requires tuning batch size and learning rate together
+        # NOTE we could scale the loss so our learning rate is independent of the batch size
+        # However, we could get better results and tune it as it is
         avg_loss = loss / len(frames)  # Average over batch
 
         # Regularizor: Punish anisotropic Gaussians
@@ -932,7 +931,7 @@ class GaussianMapper(object):
             visibility = (render_pkg["n_touched"] > 0).long()
             occ_aware_visibility[view.uid] = visibility
             # Count when at least one pixel was touched by the Gaussian
-            self.gaussians.n_obs += visibility.cpu()  # Increase observation count
+            self.gaussians.n_obs += visibility  # Increase observation count
 
         to_prune = self.gaussians.n_obs < visibility_th
         if mode == "new":
@@ -1193,8 +1192,8 @@ class GaussianMapper(object):
         ### Optimize gaussians
         for iter in tqdm(range(iters), desc=colored("Gaussian Optimization", "magenta"), colour="magenta"):
             do_densify = (
-                iter + 1
-            ) % self.update_params.prune_densify_every == 0 and iter < self.update_params.prune_densify_until
+                iter % self.update_params.prune_densify_every == 0 and iter < self.update_params.prune_densify_until
+            )
             frames = (
                 self.select_keyframes(random_weights=self.update_params.random_selection_weights)[0] + self.new_cameras
             )

@@ -135,9 +135,9 @@ class GaussianModel:
         self.max_radii2D = torch.empty(0, device=self.device)
         self.xyz_gradient_accum = torch.empty(0, device=self.device)
 
-        self.unique_kfIDs = torch.empty(0).int()
-        self.n_obs = torch.empty(0).int()
-        self.n_optimized = torch.empty(0).int()
+        self.unique_kfIDs = torch.empty(0, device=self.device).int()
+        self.n_obs = torch.empty(0, device=self.device).int()
+        self.n_optimized = torch.empty(0, device=self.device).int()
 
         self.optimizer = None
 
@@ -438,9 +438,9 @@ class GaussianModel:
         new_rotation = nn.Parameter(rots.requires_grad_(True))
         new_opacity = nn.Parameter(opacities.requires_grad_(True))
 
-        new_unique_kfIDs = torch.ones((new_xyz.shape[0])).int() * kf_id
-        new_n_obs = torch.zeros((new_xyz.shape[0])).int()
-        new_n_opt = torch.zeros((new_xyz.shape[0])).int()
+        new_unique_kfIDs = torch.ones((new_xyz.shape[0]), device=self.device).int() * kf_id
+        new_n_obs = torch.zeros((new_xyz.shape[0]), device=self.device).int()
+        new_n_opt = torch.zeros((new_xyz.shape[0]), device=self.device).int()
 
         self.densification_postfix(
             new_xyz,
@@ -483,9 +483,9 @@ class GaussianModel:
         self.max_radii2D = self.max_radii2D[valid_points_mask]
         # FIXME highly suspect of creating memory bug
         # raises sometimes RuntimeError: out_ptr == out_accessor[thread_count_nonzero[tid + 1]].data()
-        self.unique_kfIDs = self.unique_kfIDs[valid_points_mask.cpu()]
-        self.n_obs = self.n_obs[valid_points_mask.cpu()]
-        self.n_optimized = self.n_optimized[valid_points_mask.cpu()]
+        self.unique_kfIDs = self.unique_kfIDs[valid_points_mask]
+        self.n_obs = self.n_obs[valid_points_mask]
+        self.n_optimized = self.n_optimized[valid_points_mask]
 
     # def prune_floaters(
     #     self, search_radius: float = 0.1, min_nn_distance: float = 0.05, return_mask: bool = True
@@ -563,10 +563,9 @@ class GaussianModel:
         new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
 
         # NOTE chen: highly suspect that these can create malloc errors on some pytorch versions
-        new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()].repeat(N)
-        new_n_obs = self.n_obs[selected_pts_mask.cpu()].repeat(N)
-        # Divide by 100, so that cloned points move faster when we use the grad scaler
-        new_n_opt = self.n_optimized[selected_pts_mask.cpu()].repeat(N) / 100
+        new_kf_id = self.unique_kfIDs[selected_pts_mask].repeat(N)
+        new_n_obs = self.n_obs[selected_pts_mask].repeat(N)
+        new_n_opt = self.n_optimized[selected_pts_mask].repeat(N)
 
         self.densification_postfix(
             new_xyz,
@@ -605,10 +604,9 @@ class GaussianModel:
         new_rotation = self._rotation[selected_pts_mask]
 
         # NOTE these operations create a malloc error with wrong pytorch version
-        new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()]
-        new_n_obs = self.n_obs[selected_pts_mask.cpu()]
-        # Divide by 1000, so that cloned points move faster when we use the grad scaler
-        new_n_opt = self.n_optimized[selected_pts_mask.cpu()] / 100
+        new_kf_id = self.unique_kfIDs[selected_pts_mask]
+        new_n_obs = self.n_obs[selected_pts_mask]
+        new_n_opt = self.n_optimized[selected_pts_mask]
 
         self.densification_postfix(
             new_xyz,
@@ -648,15 +646,11 @@ class GaussianModel:
         self.prune_points(prune_mask)
         self.info(f"Pruning & densification added {self.get_xyz.shape[0] - n_g} gaussians")
 
-    def add_densification_stats(self, viewspace_point_tensor, update_filter, scaling_fn=None):
-        if scaling_fn is not None:
-            self.xyz_gradient_accum[update_filter] += torch.norm(
-                scaling_fn(viewspace_point_tensor.grad)[update_filter, :2], dim=-1, keepdim=True
-            )
-        else:
-            self.xyz_gradient_accum[update_filter] += torch.norm(
-                viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
-            )
+    # TODO add n_touched so we can compute the true weighted gradient over all pixels
+    def add_densification_stats(self, viewspace_point_tensor, update_filter):
+        self.xyz_gradient_accum[update_filter] += torch.norm(
+            viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
+        )
         self.denom[update_filter] += 1
 
     def save_ply(self, path):
@@ -746,8 +740,8 @@ class GaussianModel:
         self.active_sh_degree = self.max_sh_degree
         self.max_radii2D = torch.zeros((self._xyz.shape[0]), device=self.device)
         self.unique_kfIDs = torch.zeros((self._xyz.shape[0]))
-        self.n_obs = torch.zeros((self._xyz.shape[0]), device="cpu").int()
-        self.n_optimized = torch.zeros((self._xyz.shape[0]), device="cpu").int()
+        self.n_obs = torch.zeros((self._xyz.shape[0]), device=self.device).int()
+        self.n_optimized = torch.zeros((self._xyz.shape[0]), device=self.device).int()
 
     def reset_opacity(self):
         opacities_new = inverse_sigmoid(torch.ones_like(self.get_opacity) * 0.01)

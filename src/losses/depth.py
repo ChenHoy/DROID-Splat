@@ -4,7 +4,7 @@ import ipdb
 import torch
 import torch.nn.functional as F
 
-from .misc import l1_loss
+from .misc import l1_loss, edge_weighted_tv, pearson_loss, log_l1_loss, l1_huber_loss
 from ..utils import gradient_map
 
 MAX_DEPTH = 1e7
@@ -15,55 +15,44 @@ MIN_NUM_POINTS = 50  # At least have 100 points for supervision
 def depth_loss(
     depth_est: torch.Tensor,
     depth_gt: torch.Tensor,
+    with_edge_weight: bool = False,
     with_smoothness: bool = False,
     beta: float = 0.001,
     original_image: Optional[torch.Tensor] = None,
     mask: Optional[torch.Tensor] = None,
+    depth_func: str = "l1",
 ):
-    """Vanilla Depth loss: L1 (+ smoothness) loss between estimated and ground truth depth maps."""
-    if mask is None:
-        mask = torch.ones_like(depth_est, device=depth_est.device)
+    """L1 (+ smoothness) loss between estimated and ground truth depth maps.
 
-    loss_func = l1_loss
+    We support: 'l1', 'log_l1', 'l1_huber', 'pearson' for depth loss computation
 
+    NOTE: DN-Splatter https://arxiv.org/pdf/2403.17822 computes an edge-aware log-depth loss
+    """
     # Sanity check against missing depths (e.g. everything got filtered out)
     if (depth_gt > 0).sum() < MIN_NUM_POINTS or mask.sum() < MIN_NUM_POINTS:
-        l1_depth = 0.0
+        depth_loss = torch.tensor(0.0, device=depth_est.device, requires_grad=True)
     else:
-        l1_depth = loss_func(depth_est, depth_gt, mask)
+        if with_edge_weight:
+            grad_img = gradient_map(original_image)
+            weights = torch.exp(-grad_img)
+        else:
+            weights = None
+
+        if depth_func == "l1":
+            depth_loss = l1_loss(depth_est, depth_gt, mask=mask, weights=weights)
+        elif depth_func == "log_l1":
+            depth_loss = log_l1_loss(depth_est, depth_gt, mask=mask, weights=weights)
+        elif depth_func == "l1_huber":
+            depth_loss = l1_huber_loss(depth_est, depth_gt, mask=mask)
+        elif depth_func == "pearson":
+            depth_loss = pearson_loss(depth_est, depth_gt, mask=mask)
+        else:
+            raise NotImplementedError(f"Depth loss function {depth_func} not implemented!")
 
     # Sanity check to avoid division by zero
     if with_smoothness and original_image is not None and mask.sum() > 0:
-        depth_loss = l1_depth + beta * depth_reg(depth_est, original_image, mask=mask)
-    else:
-        depth_loss = l1_depth
+        depth_loss += beta * edge_weighted_tv(depth_est, original_image, mask=mask)
 
-    return depth_loss
-
-
-# NOTE chen: this loss will make depth follow the supervision somehow much closer
-# we did get much worse results in rgbd mode for this and slightly worse results in prgbd mode
-# overall, I can recommend using this
-def log_depth_loss(
-    depth_est: torch.Tensor,
-    depth_gt: torch.Tensor,
-    original_image: torch.Tensor,
-    with_smoothness: bool = False,
-    beta: float = 0.001,
-    mask: Optional[torch.Tensor] = None,
-):
-    """Log depth loss from https://arxiv.org/pdf/2403.17822, this uses the edge aware term which we normally use in our smoothness
-    regularizer to only supervise depth strongly on image edges and compares the depth difference in log space"""
-    if mask is not None:
-        mask = torch.ones_like(depth_est, device=depth_est.device)
-
-    grad_img = gradient_map(original_image)
-    w_img = torch.exp(-grad_img)
-    _, l1_err = l1_loss(depth_est, depth_gt, return_diff=True)
-    log_loss = torch.log(1 + l1_err)
-    depth_loss = (mask * w_img * log_loss).mean()
-    if with_smoothness and mask.sum() > 0:
-        depth_loss = depth_loss + beta * depth_reg(depth_est, original_image, mask=mask)
     return depth_loss
 
 

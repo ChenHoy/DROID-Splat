@@ -11,9 +11,9 @@ def color_loss(
     image_est: torch.Tensor,
     image_gt: torch.Tensor,
     with_ssim: bool = True,
-    alpha2: float = 0.85,
-    mask: Optional[torch.Tensor] = None,
     use_ms_ssim: bool = False,
+    mask: Optional[torch.Tensor] = None,
+    alpha2: float = 0.85,
 ):
     """Compute the color loss between the rendered image and the ground truth image.
     This uses a weighted sum of l1 and ssim loss.
@@ -21,17 +21,83 @@ def color_loss(
     if mask is None:
         mask = torch.ones_like(image_est, device=image_est.device)
 
-    l1_rgb = l1_loss(image_est, image_gt, mask)
+    l1_rgb = l1_loss(image_est, image_gt, mask=mask)
 
     if with_ssim:
         if use_ms_ssim:
             ssim_loss = ms_ssim(
-                image_est.unsqueeze(0), image_gt.unsqueeze(0), data_range=1.0, mask=mask.bool(), size_average=False
+                image_est.unsqueeze(0),
+                image_gt.unsqueeze(0),
+                data_range=1.0,
+                mask=mask.bool(),
+                size_average=False,
             )
         else:
             ssim_loss = ssim(
                 image_est.unsqueeze(0),
                 image_gt.unsqueeze(0),
+                data_range=1.0,
+                mask=mask.unsqueeze(0).bool(),
+                size_average=True,
+            )
+        # NOTE this is configured like is done in most monocular depth estimation supervision pipelines
+        rgb_loss = 0.5 * alpha2 * (1 - ssim_loss) + (1 - alpha2) * l1_rgb
+    else:
+        rgb_loss = l1_rgb
+
+    return rgb_loss
+
+
+def l1_loss_appearance(
+    image: torch.Tensor,
+    gt_image: torch.Tensor,
+    appearances,
+    view_idx: int,
+    with_ssim: bool = True,
+    use_ms_ssim: bool = False,
+    mask: Optional[torch.Tensor] = None,
+    alpha2: float = 0.85,
+):
+    """L1 loss with deep appearance embedding and additional SSIM loss."""
+    appearance_embedding = appearances.get_embedding(view_idx)
+    # center crop the image
+    origH, origW = image.shape[1:]
+    H = origH // 32 * 32
+    W = origW // 32 * 32
+    left = origW // 2 - W // 2
+    top = origH // 2 - H // 2
+    crop_image = image[..., top : top + H, left : left + W]
+    crop_gt_image = gt_image[..., top : top + H, left : left + W]
+
+    # down sample the image
+    crop_image_down = torch.nn.functional.interpolate(
+        crop_image[None], size=(H // 32, W // 32), mode="bilinear", align_corners=True
+    )[0]
+    crop_image_down = torch.cat(
+        [crop_image_down, appearance_embedding[None].repeat(H // 32, W // 32, 1).permute(2, 0, 1)], dim=0
+    )[None]
+
+    if mask is not None:
+        crop_mask = mask[..., top : top + H, left : left + W]
+
+    mapping_image = appearances.appearance_network(crop_image_down)
+    transformed_image = mapping_image * crop_image
+
+    l1_rgb = l1_loss(transformed_image, crop_gt_image, mask=crop_mask)
+
+    if with_ssim:
+        if use_ms_ssim:
+            ssim_loss = ms_ssim(
+                image.unsqueeze(0),
+                gt_image.unsqueeze(0),
+                data_range=1.0,
+                mask=mask.bool(),
+                size_average=False,
+            )
+        else:
+            ssim_loss = ssim(
+                image.unsqueeze(0),
+                gt_image.unsqueeze(0),
                 data_range=1.0,
                 mask=mask.unsqueeze(0).bool(),
                 size_average=True,
