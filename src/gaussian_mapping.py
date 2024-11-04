@@ -329,51 +329,6 @@ class GaussianMapper(object):
         plt.title(title)
         plt.show()
 
-    def densify_holes(self, idx: int, mask: torch.Tensor, downsample_factor: float = 1.0) -> None:
-        """When initializing the map based on multi-view filtered depths, we often have holes
-        in areas that are only visible in a single camera. Since we usually have access to a semi-reliable dense
-        depth map (either from SLAM or an external sensor), we can simply patch these holes based on a reference.
-
-        NOTE idx here is the position in our List[Camera] of the Renderer! You can check for valid keyframes by looking at the cam2buffer mapping.
-        """
-        cam = self.cameras[idx]
-        # Only do this for actual keyframes (in case we added others), because we need a reference from Tracking
-        if idx not in self.cam2buffer:
-            return
-
-        idx_in_video = self.cam2buffer[idx]
-        # We have a dense depth prior that is reliable in rgbd mode
-        if self.mode == "rgbd":
-            dense_disps_ref = self.video.disps_sens_up[idx_in_video].clone().cpu()
-            valid = dense_disps_ref > 0
-            dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
-        # We have at least a scaled prior (from an external source)
-        elif self.mode == "prgbd":
-            dense_disps_ref = self.video.disps_sens_up[idx_in_video].clone().cpu()
-            valid = dense_disps_ref > 0
-            dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
-        # We have a dense depth reference in the video (from Tracking)
-        elif self.video.upsampled:
-            dense_disps_ref = self.video.disps_up[idx_in_video].clone().cpu()
-            valid = dense_disps_ref > 0
-            dense_depth_ref = torch.where(valid, 1.0 / dense_disps_ref, dense_disps_ref)
-        else:
-            # Get the average scale in this keyframe from the Gaussians
-            # Densify the hole from this new point cloud
-            # NOTE chen: since holes are usually further away it makes sense to take > median
-            avg_depth = self.gaussians.get_avg_scale([idx], factor=1.5)  # Take factor*median
-            dense_depth_ref = torch.ones_like(mask, device="cpu") * avg_depth
-
-        # Densify based on the mask
-        self.gaussians.extend_from_pcd_seq(
-            cam,
-            kf_id=idx,
-            init=False,
-            mask=mask,
-            depthmap=dense_depth_ref.numpy(),
-            downsample_factor=downsample_factor,
-        )
-
     def get_ram_usage(self) -> Tuple[float, float]:
         free_mem, total_mem = torch.cuda.mem_get_info(device=self.device)
         used_mem = 1 - (free_mem / total_mem)
@@ -483,10 +438,6 @@ class GaussianMapper(object):
                 if i % batch_size == 0:
                     self.gaussians.check_nans()  # NOTE chen: this can happen we have zero depth and an inconvenient pose
 
-                    # Punish anisotropic Gaussians
-                    # scaling = self.gaussians.get_scaling
-                    # isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-                    # loss += self.loss_params.beta1 * isotropic_loss.mean()
                     # Backpropagate through batch
                     self.gaussians.check_nans()  # Sanity check to avoid invalid Gaussians (e.g. from 0 depths)
                     loss.backward()
@@ -603,15 +554,13 @@ class GaussianMapper(object):
         image, depth = render_pkg["render"], render_pkg["depth"]
 
         # (l1_rgb + ssim_rgb) + l1_depth (+ depth_smooth)
-        # NOTE chen: we regularize depth with an edge aware smoothness term already
         rgbd_loss = mapping_rgbd_loss(image, depth, view, **self.loss_params)
 
         # Regularize additional surface properties i.e. normals
         dist, normals, surf_normal = render_pkg["rend_dist"], render_pkg["rend_normal"], render_pkg["surf_normal"]
         # Only do this when we already have a decent scene model
-        # TODO make threshold configurable
-        lambda_normal = self.loss_params.gamma1 if self.count > 1 else 0.0
-        lambda_dist = self.loss_params.gamma2 if self.count > 1 else 0.0
+        lambda_normal = self.loss_params.gamma1 if self.count > 2 else 0.0
+        lambda_dist = self.loss_params.gamma2 if self.count > 2 else 0.0
         normal_error = (1 - (normals * surf_normal).sum(dim=0))[None]
         dist_loss = lambda_dist * (dist).mean()
         total_loss = rgbd_loss + lambda_normal * normal_error.mean() + lambda_dist * dist_loss
@@ -656,9 +605,9 @@ class GaussianMapper(object):
         avg_loss = loss / len(frames)  # Average over batch
 
         # Regularizor: Punish anisotropic Gaussians
-        scaling = self.gaussians.get_scaling
-        isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-        loss += self.loss_params.beta1 * isotropic_loss.mean()
+        # scaling = self.gaussians.get_scaling
+        # isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
+        # loss += self.loss_params.beta1 * isotropic_loss.mean()
 
         # NOTE chen: this can happen we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
@@ -725,7 +674,7 @@ class GaussianMapper(object):
             visibility = (render_pkg["n_touched"] > 0).long()
             occ_aware_visibility[view.uid] = visibility
             # Count when at least one pixel was touched by the Gaussian
-            self.gaussians.n_obs += visibility.cpu()  # Increase observation count
+            self.gaussians.n_obs += visibility  # Increase observation count
 
         to_prune = self.gaussians.n_obs < visibility_th
         if mode == "new":

@@ -73,27 +73,28 @@ opt_params:
 
 loss:
   # Decide which terms to use
+  ## Different losses are used across frameworks, e.g. DN-Splatter uses a log_l1 depth loss together with_edge_weights
+  ## (We already achieve good results with a simple l1 loss and nothing further)
   supervise_with_prior: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
   with_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
-  with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
-  with_depth_smoothness: False # Similarity loss between depth and image gradients
+  with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
+  with_depth_smoothness: True # Similarity loss between depth and image gradients
+  use_ms_ssim: False # Multi-Scale SSIM loss (Hint: This improves mainly PSNR at the cost of slightly worse LPIPS and L1)
   rgb_boundary_threshold: 0.001 # Pixel information in an image needs to be at least higher than this 
-  use_log_depth: True # Use edge-aware log depth for depth supervision from https://arxiv.org/pdf/2403.17822
+  depth_func: log_l1 # 'l1', 'log_l1', 'l1_huber', 'pearson' (Hint: We achieved best results simply with l1)
 
   # Weights
   alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
-  alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
+  alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation). The higher this is, the higher the SSIM part
   beta1: 2.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
-  beta2: 0.01 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
-  gamma1: 0.1 # The normal consistency term aligns the rendered normal map with the gradient of the rendered depth.
+  beta2: 0.001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+  gamma1: 0.05 # Normal consistency loss
   # FIXME (according to https://github.com/hbb1/2d-gaussian-splatting/issues/71 this can be tuned to e.g. 100) but we dont see good results with this
-  gamma2: 0.0 # Depth distortion concentrates 2D primitives within a tight range along the ray 
+  gamma2: 0.0 # Depth distortion loss concentrates 2D primitives within a tight range along the ray 
 
 
 # Offline Map Refinement for finetuning
 refinement:
-  optimize_poses: False
-
   iters: 0 # Optimize over this many different batches
   batch_iters: 1 # Optimize each batch this many times
   lr_factor: 0.1 # Change the learning rate for refinement

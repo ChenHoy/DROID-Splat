@@ -29,6 +29,46 @@ from ..utils.graphics_utils import BasicPointCloud, getWorld2View2
 from ..utils.sh_utils import RGB2SH
 
 
+def normal2rotation(n: torch.Tensor):
+    """Construct a random rotation matrix from normal
+    adopted from https://github.com/turandai/gaussian_surfels/blob/main/utils/general_utils.py
+
+    NOTE it would better be positive definite and orthogonal
+    """
+    #
+    #
+    n = torch.nn.functional.normalize(n)
+    w0 = torch.tensor([[1, 0, 0]]).expand(n.shape).to(n.device)
+    R0 = w0 - torch.sum(w0 * n, -1, True) * n
+    R0 *= torch.sign(R0[:, :1])
+    R0 = torch.nn.functional.normalize(R0)
+    R1 = torch.linalg.cross(n, R0)
+
+    R1 *= torch.sign(R1[:, 1:2]) * torch.sign(n[:, 2:])
+    R = torch.stack([R0, R1, n], -1)
+    q = rotmat2quaternion(R)
+
+    return q
+
+
+def rotmat2quaternion(R: torch.Tensor, normalize: bool = False) -> torch.Tensor:
+    tr = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2] + 1e-6
+    r = torch.sqrt(1 + tr) / 2
+    # print(torch.sum(torch.isnan(r)))
+    q = torch.stack(
+        [
+            r,
+            (R[:, 2, 1] - R[:, 1, 2]) / (4 * r),
+            (R[:, 0, 2] - R[:, 2, 0]) / (4 * r),
+            (R[:, 1, 0] - R[:, 0, 1]) / (4 * r),
+        ],
+        -1,
+    )
+    if normalize:
+        q = torch.nn.functional.normalize(q, dim=-1)
+    return q
+
+
 class GaussianModel:
 
     def __init__(self, sh_degree: int, config=None, device: str = "cuda:0"):
@@ -198,32 +238,6 @@ class GaussianModel:
             l.append("rot_{}".format(i))
         return l
 
-    def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float):
-        self.spatial_lr_scale = spatial_lr_scale
-        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().to(self.device)
-        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().to(self.device))
-        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().to(self.device)
-        features[:, :3, 0] = fused_color
-        features[:, 3:, 1:] = 0.0
-
-        print("Number of points at initialisation : ", fused_point_cloud.shape[0])
-
-        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
-        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 2)
-        rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
-
-        opacities = self.inverse_opacity_activation(
-            0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device)
-        )
-
-        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-        self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
-        self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
-        self._scaling = nn.Parameter(scales.requires_grad_(True))
-        self._rotation = nn.Parameter(rots.requires_grad_(True))
-        self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
-
     # TODO we lose the unique_kfIDs here
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
@@ -318,9 +332,7 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device=self.device).requires_grad_(True))
         self.active_sh_degree = self.max_sh_degree
         self.max_radii2D = torch.zeros((self._xyz.shape[0]), device=self.device)
-        self.unique_kfIDs = torch.zeros((self._xyz.shape[0]))
-        self.n_obs = torch.zeros((self._xyz.shape[0]), device="cpu").int()
-        self.n_optimized = torch.zeros((self._xyz.shape[0]), device="cpu").int()
+        self.unique_kfIDs = torch.zeros((self._xyz.shape[0]), device=self.device)
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
@@ -548,7 +560,6 @@ class GaussianModel:
         print(f"Using average scale: {avg_scale}")
         return avg_scale.item()
 
-    # TODO chen: we use exposure parameters to linear transform the image on top in our other pipelines!
     def create_pcd_from_image(
         self,
         cam: Camera,
@@ -606,9 +617,7 @@ class GaussianModel:
 
         return self.create_pcd_from_image_and_depth(cam, rgb, depth, init, downsample_factor=downsample_factor)
 
-    # TODO chen: this is incredibly wasteful as we go back and forth between CPU and GPU here
-    # and all that just to convert 2D -> 3D with a pinhole model, which we could do based on lietorch alone
-    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False, downsample_factor=None):
+    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False, downsample_factor=None, with_normals=True):
         if downsample_factor is None:
             if init:
                 downsample_factor = self.cfg.pcd_downsample_init
@@ -631,12 +640,20 @@ class GaussianModel:
             extrinsic=W2C,
             project_valid_depth_only=True,
         )
+        if with_normals:
+            # FIXME should we tune these parameters since they depend on the scene scale?
+            pcd_tmp.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
 
         pcd_tmp = pcd_tmp.random_down_sample(1.0 / downsample_factor)
         new_xyz = np.asarray(pcd_tmp.points)
         new_rgb = np.asarray(pcd_tmp.colors)
-
-        pcd = BasicPointCloud(points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3)))
+        # NOTE some monocular depth prediction networks like OmniDepth actually can output normals on top
+        # We could also use this information if we wanted
+        if with_normals:
+            new_normals = np.asarray(pcd_tmp.normals)
+            pcd = BasicPointCloud(points=new_xyz, colors=new_rgb, normals=new_normals)
+        else:
+            pcd = BasicPointCloud(points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3)))
 
         if pcd.points.shape[0] <= 5:
             return
@@ -645,6 +662,7 @@ class GaussianModel:
 
         fused_point_cloud = torch.from_numpy(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.from_numpy(np.asarray(pcd.colors)).float().cuda())
+        fused_normals = torch.from_numpy(np.asarray(pcd.normals)).float().cuda()
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         features[:, :3, 0] = fused_color
         features[:, 3:, 1:] = 0.0
@@ -657,8 +675,14 @@ class GaussianModel:
         if not self.isotropic:
             scales = scales.repeat(1, 2)
 
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
-        rots[:, 0] = 1
+        if with_normals:
+            rots = normal2rotation(fused_normals)
+        else:
+            # NOTE chen: Random normals seem to work better than unit ones
+            # rots = torch.rand((fused_point_cloud.shape[0], 4), device=self.device)
+            rots = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
+            rots[:, 0] = 1
+
         opacities = inverse_sigmoid(
             0.5 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device)
         )

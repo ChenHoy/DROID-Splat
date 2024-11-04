@@ -21,7 +21,7 @@ def color_loss(
     if mask is None:
         mask = torch.ones_like(image_est, device=image_est.device)
 
-    l1_rgb = l1_loss(image_est, image_gt, mask, return_diff=False)
+    l1_rgb = l1_loss(image_est, image_gt, mask=mask)
 
     if with_ssim:
         if use_ms_ssim:
