@@ -111,6 +111,7 @@ def log_l1_loss(pred: torch.Tensor, gt: torch.Tensor, **kwargs):
 
 
 ### Generic callable for any loss function to allow weighting and masking functionality
+# TODO use true masked mean
 def masked_loss(
     pred: torch.Tensor,
     gt: torch.Tensor,
@@ -124,26 +125,29 @@ def masked_loss(
         mask = torch.ones_like(pred, device=pred.device)
 
     # We need the mask to compute the Huber threshold -> Pass mask to func
-    if loss_func.__name__ == "l1_huber":
-        assert weights is None, "Its not recommended to use weights with Huber loss!"
-        return loss_func(pred, gt, mask=mask, return_array=return_array)
+    if loss_func.__name__ == "l1_huber" or loss_func.__name__ == "pearson":
+        raise Exception("Use the specific loss functions for Huber and Pearson loss!")
     else:
         err = loss_func(pred, gt)
 
     if weights is not None:
         err *= weights
 
-    # Take masked mean
-    num_valid = mask.sum()
-    if num_valid.item() > 0:
-        loss = (mask * err).sum() / num_valid
-    else:
-        loss = torch.tensor(0.0, device=pred.device, requires_grad=True)
+    err = err * mask
+    loss = err.mean()
+
+    # # Take masked mean
+    # num_valid = mask.sum()
+    # if num_valid.item() > 0:
+    #     loss = (mask * err).sum() / num_valid
+    # else:
+    #     loss = torch.tensor(0.0, device=pred.device, requires_grad=True)
 
     if return_array:
         return loss, err
     else:
         return loss
+
 
 # NOTE this is inspired by the loss in DN-Splatter
 def ms_masked_loss(
