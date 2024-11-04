@@ -102,39 +102,6 @@ def l1_loss(pred: torch.Tensor, gt: torch.Tensor, **kwargs):
     return masked_loss(pred, gt, l1, **kwargs)
 
 
-def ms_l1_loss(
-    pred: torch.Tensor,
-    gt: torch.Tensor,
-    scales=[1, 2, 4],
-    mask: Optional[torch.Tensor] = None,
-    weights: Optional[torch.Tensor] = None,
-):
-    total_loss = 0.0
-
-    # TODO weights dont sum up to one?
-    lvl_weights = [1, 0.5, 0.25, 0.125]
-    for scale, w_l in zip(scales, lvl_weights):
-        if scale == 1:
-            # Original resolution
-            total_loss += w_l * l1_loss(pred, gt, mask=mask, weights=weights)
-        else:
-            # Downsampled resolution
-            scaled_output = torch.nn.functional.interpolate(
-                pred, scale_factor=1 / scale, mode="bilinear", align_corners=False
-            )
-            scaled_gt = torch.nn.functional.interpolate(
-                gt, scale_factor=1 / scale, mode="bilinear", align_corners=False
-            )
-            if mask is not None:
-                scaled_mask = torch.nn.functional.interpolate(mask.float(), scale_factor=1 / scale, mode="nearest")
-            if weights is not None:
-                scaled_weights = torch.nn.functional.interpolate(
-                    weights, scale_factor=1 / scale, mode="bilinear", align_corners=False
-                )
-            total_loss += w_l * l1_loss(scaled_output, scaled_gt, mask=scaled_mask, weights=scaled_weights)
-    return total_loss
-
-
 def l2_loss(pred: torch.Tensor, gt: torch.Tensor, **kwargs):
     return masked_loss(pred, gt, l2, **kwargs)
 
@@ -177,3 +144,42 @@ def masked_loss(
         return loss, err
     else:
         return loss
+
+# NOTE this is inspired by the loss in DN-Splatter
+def ms_masked_loss(
+    loss_func: callable,
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    scales=[1, 2, 4],
+    weights: Optional[torch.Tensor] = None,
+    mask: Optional[torch.Tensor] = None,
+    interpolation: str = "bilinear",
+):
+    total_loss = 0.0
+
+    # TODO weights dont sum up to one?
+    lvl_weights = [1, 0.5, 0.25, 0.125]
+    for scale, w_l in zip(scales, lvl_weights):
+        if scale == 1:
+            # Original resolution
+            total_loss += w_l * masked_loss(pred, gt, loss_func, weights=weights, mask=mask)
+        else:
+            # Downsampled resolution
+            scaled_output = torch.nn.functional.interpolate(
+                pred, scale_factor=1 / scale, mode=interpolation, align_corners=False
+            )
+            scaled_gt = torch.nn.functional.interpolate(
+                gt, scale_factor=1 / scale, mode=interpolation, align_corners=False
+            )
+
+            if mask is not None:
+                # Always use nearest interpolation for masks
+                scaled_mask = torch.nn.functional.interpolate(mask.float(), scale_factor=1 / scale, mode="nearest")
+            if weights is not None:
+                scaled_weights = torch.nn.functional.interpolate(
+                    weights, scale_factor=1 / scale, mode=interpolation, align_corners=False
+                )
+            total_loss += w_l * masked_loss(
+                scaled_output, scaled_gt, loss_func, weights=scaled_weights, mask=scaled_mask
+            )
+    return total_loss
