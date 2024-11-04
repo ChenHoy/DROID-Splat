@@ -159,7 +159,7 @@ def masked_loss(
     # We need the mask to compute the Huber threshold -> Pass mask to func
     if loss_func.__name__ == "l1_huber":
         assert weights is None, "Its not recommended to use weights with Huber loss!"
-        err = loss_func(pred, gt, mask=mask)
+        return loss_func(pred, gt, mask=mask, return_array=return_array)
     else:
         err = loss_func(pred, gt)
 
