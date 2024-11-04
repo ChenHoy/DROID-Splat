@@ -82,18 +82,19 @@ opt_params:
 
 loss:
   # Decide which terms to use
-  supervise_with_prior: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
+  supervise_with_prior: True # Use the prior for supervision. If not, then use the current filtered map from SLAM (Hint: this is usually better as metrics are computed on all pixels)
   with_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
   with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
   with_depth_smoothness: False # Similarity loss between depth and image gradients
-  depth_func: l1 # 'l1', 'log_l1', 'l1_huber', 'pearson'
+  use_ms_ssim: False # Multi-Scale SSIM loss (Hint: This improves mainly PSNR at the cost of slightly worse LPIPS and L1)
+  depth_func: l1 # 'l1', 'log_l1', 'l1_huber', 'pearson' (Hint: We achieved best results simply with l1)
   rgb_boundary_threshold: 0.001 # Pixel information in an image needs to be at least higher than this 
 
   # Weights
   alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta1: 2.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
-  beta2: 0.001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+  beta2: 0.0001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
 
 # Offline Map Refinement for finetuning

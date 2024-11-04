@@ -729,7 +729,7 @@ class GaussianMapper(object):
 
         loss = 0.0
         # Collect for densification and pruning
-        opacity_acm, radii_acm = [], []
+        opacity_acm, radii_acm, touched_acm = [], [], []
         visibility_filter_acm, viewspace_point_tensor_acm = [], []
         for view in frames:
             current_loss, render_pkg = self.render_compare(view)
@@ -746,6 +746,7 @@ class GaussianMapper(object):
             visibility_filter_acm.append(render_pkg["visibility_filter"])
             viewspace_point_tensor_acm.append(render_pkg["viewspace_points"])
             radii_acm.append(render_pkg["radii"])
+            touched_acm.append(render_pkg["n_touched"])
 
             self.last_frame_loss[view.uid] = current_loss.item()
             loss += current_loss
@@ -771,7 +772,13 @@ class GaussianMapper(object):
                     self.gaussians.max_radii2D[visibility_filter_acm[idx]],
                     radii_acm[idx][visibility_filter_acm[idx]],
                 )
-                self.gaussians.add_densification_stats(viewspace_point_tensor_acm[idx], visibility_filter_acm[idx])
+                # NOTE chen: we dont necessarily get better results when using the gradient averaging techique from Abs GS
+                self.gaussians.add_densification_stats(
+                    viewspace_point_tensor_acm[idx],
+                    visibility_filter_acm[idx],
+                    # touched_acm[idx],
+                    None,
+                )
 
             # Prune and Densify
             if self.last_idx > self.n_last_frames and prune_densify:

@@ -9,8 +9,8 @@ from ..gaussian_splatting.camera_utils import Camera
 from .depth import depth_loss
 from .image import color_loss
 
-MAX_DEPTH = 1e7
-MIN_DEPTH = 0.01
+MAX_DEPTH = 1e3
+MIN_DEPTH = 0.001
 MIN_NUM_POINTS = 50  # At least have 100 points for supervision
 
 
@@ -23,6 +23,7 @@ def mapping_rgbd_loss(
     with_depth_smoothness: bool = False,
     supervise_with_prior: bool = False,
     rgb_boundary_threshold: float = 0.01,
+    use_ms_ssim: bool = False,
     depth_func: str = "l1",
     alpha1: float = 0.8,
     alpha2: float = 0.85,
@@ -49,7 +50,7 @@ def mapping_rgbd_loss(
     if cam.mask is not None:
         rgb_pixel_mask = rgb_pixel_mask & cam.mask
     rgb_mask = rgb_pixel_mask.float()
-    loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, mask=rgb_mask)
+    loss_rgb = color_loss(image, image_gt, with_ssim, use_ms_ssim=use_ms_ssim, mask=rgb_mask, alpha2=alpha2)
 
     if has_depth:
         # Only use valid depth
@@ -69,6 +70,8 @@ def mapping_rgbd_loss(
         )
         loss = alpha1 * loss_rgb + (1 - alpha1) * loss_depth
         # loss = loss_rgb + (1 - alpha1) * loss_depth
+    else:
+        loss = loss_rgb
 
     return loss
 
