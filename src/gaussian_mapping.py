@@ -41,6 +41,37 @@ Since they are initialized with the 3D locations of a VSLAM system, this process
 NOTE this could a be standalone SLAM system itself, but we use it on top of an optical flow based SLAM system.
 """
 
+"""
+What is different here with the techniques of MVGS?
+- Each camera has a ray attached to it at the camera center with the viewing direction. After 
+an update from the Tracking system, this of course gets updated as well
+- Surprisingly the biggest improvement of MVGS simply comes from introcing batch optimizations instead of single images (~ +0.7PSNR)
+I was not aware that vanilla pipelines only train with a single image instead of multiples. This is trivial and already the case in our framework :/
+- The next biggest improvement comes from a multi-view densification strategy. This seems to be one of the smartest nuggets from the paper, as it simply performs a 
+3D intersection test of hard regions. 
+    1. For each camera in the batch: Render the map and compute the error map. Take a fixed size box (e.g. 20 x 40) with the highest avg. error. 
+        -> We extract 2d boxes of troublesome regions for each frame
+    2. Since we know the ray for the cameras, we can extrapolate each 2D box into 3D space with the frustrum
+    3. For each camera pair, do a 3D intersection test of the frustrums. Extract the 3D region of that intersection
+    4. Densify more in troublesome 3D regions, since we carved out this space we should quickly find troublesome areas. 
+    This technique also seems to give an additional gain of ~ 0.4PSNR. The information itself should however already be in the gradients.
+- Further improvement is gained by setting an adapted threshold (They call this multi-view augmented densification): 
+    - For each batch, we can compute pairwise distances between the cameras. This will indicate if the cameras 
+    are very different from each other. In case they are, the grad_threshold is reduced which will lead to a denser cloning during densification.
+    The idea here is that we want to aggressively densify in 'hard' regions and not so much when the problem is easier. 
+    This gives them ~ +0.3 PSNR in the paper table.
+
+It is not straight-forward how this should work in our framework, because 
+i) We use pretty large batches. MVGS may use 9 frames together, we sometimes have batches >30.
+ii) The multi-view augmented densification in their open-source implementation only checks if there is a camera pair with large distance in the 
+batch. This means that when we have a single 'hard' pair in our batch, it will poison the whole batch. I expect this to simply be triggered very often, 
+leading to a large increase in Gaussians. We might have to instead use smaller batches (with a higher percentage of random frames) and do this sequentially.
+
+They additionally use a multi-scale and multi-camera approach, where they train on an image pyramid and switch up the camera settings to get 
+a robust model. I believe that this only leads to faster covergence. The paper only reports a small gain of ~ 0.1 PSNR (this is our training noise lol)
+This is not worth it and we can already compute a multi-scale loss for the RGBD loss anyways. This cannot be worth it compute and memory wise.
+"""
+
 
 class GaussianMapper(object):
     """
@@ -288,6 +319,7 @@ class GaussianMapper(object):
             R = w2c[:3, :3].unsqueeze(0).detach()
             T = w2c[:3, 3].detach()
             cam.update_RT(R, T)
+            cam.set_ray()  # Update camera origin and direction
 
         self.video.mapping_dirty[to_update] = False
 
@@ -524,11 +556,10 @@ class GaussianMapper(object):
             do_densify = (
                 (iter1 + 1) % self.refine_params.prune_densify_every == 0
             ) and iter1 <= self.refine_params.densify_until
-            opacity_densify = self.refine_params.densify.use_opacity
 
             ### Optimize a random batch from all frames
             # In prgbd mode we cant densify non-keyframes which have the wrong scale information!
-            if self.mode == "prgbd" and (do_densify or opacity_densify):
+            if self.mode == "prgbd" and do_densify:
                 batch = draw_random_batch(kf_cams, batch_size=self.refine_params.bs)
             ### Optimize a random batch from all frames
             elif self.refine_params.sampling.use_neighborhood:
@@ -553,15 +584,11 @@ class GaussianMapper(object):
             for iter2 in tqdm(
                 range(self.refine_params.batch_iters), desc=colored("Batch Optimization", "magenta"), colour="magenta"
             ):
+                # Use the global iteration for decaying the learning rate!
                 loss = self.mapping_step(
-                    total_iter,  # Use the globa iteration for annedaling the learning rate!
-                    batch,
-                    self.refine_params.densify.vanilla,
-                    prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
-                    opacity_densify=opacity_densify,  # Densify based on low opacity regions
-                    optimize_poses=self.refine_params.optimize_poses,
+                    total_iter, batch, prune_densify=do_densify, optimize_poses=self.refine_params.optimize_poses
                 )
-                do_densify, opacity_densify = False, False
+                do_densify = False
                 print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss}", "cyan"))
                 self.loss_list.append(loss)
                 if self.use_gui:
@@ -695,7 +722,6 @@ class GaussianMapper(object):
                 view.cam_rot_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
                 view.cam_trans_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
 
-    # TODO is n_touched really the same as in 2D G++?
     def render_compare(self, view: Camera) -> Tuple[float, Dict, Dict]:
         """Render current view and compute loss by comparing with groundtruth"""
         render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
@@ -707,14 +733,119 @@ class GaussianMapper(object):
         current_loss = mapping_rgbd_loss(image, depth, view, **self.loss_params)
         return current_loss, render_pkg
 
+    # NOTE this is their old implementation with 2 for loops
+    def get_cross_ray_boxes_naive(
+        self, cams: List[Camera], imgs: List[torch.Tensor], w_box: int = 40, h_box: int = 20
+    ) -> Tuple[List, List]:
+        """Perform a cross-ray check. This is performed in multiple steps:
+        1. Calculate the  loss maps of multiple views and locate regions with high error in a sliding window
+        2. Cast ray from these regions, i.e. 4 rays per window.
+        3. Get intersection points of the rays per perspective to form 3D cuboids of overlap
+        """
+        boxes, losses = [], []
+        for img_pair in imgs:
+            img_pred, img_gt = img_pair
+            l1map = torch.abs(img_gt - img_pred).mean(dim=0)
+            h, w = l1map.shape
+            loss_max = 0
+            max_id = (0, 0)
+            for i in range(0, h - h_box, h_box):
+                for j in range(0, w - w_box, w_box):
+                    loss_region = torch.mean(l1map[i : i + h_box, j : j + w_box])
+                    if loss_region > loss_max:
+                        loss_max = loss_region
+                        max_id = [i, j]
+            losses.append(loss_max)
+            i, j = max_id
+            box = [i, j, i + h_box, j + w_box]
+            boxes.append(box)
+
+        # Sort cameras by loss
+        sorted_indices = sorted(range(len(losses)), key=lambda i: losses[i], reverse=True)
+        sorted_boxes = [boxes[i] for i in sorted_indices]
+        sorted_cams = [cams[i] for i in sorted_indices]
+        return sorted_boxes, sorted_cams
+
+    def get_cross_ray_boxes_conv(
+        self, cams: List[Camera], imgs: List[torch.Tensor], w_box: int = 40, h_box: int = 20
+    ) -> Tuple[List, List]:
+        """Perform a cross-ray check. This is performed in multiple steps:
+        1. Calculate the  loss maps of multiple views and locate regions with high error in a sliding window
+        2. Cast ray from these regions, i.e. 4 rays per window.
+        3. Get intersection points of the rays per perspective to form 3D cuboids of overlap
+        """
+
+        def convolution_sliding_window(img: torch.Tensor, h_box: int, w_box: int) -> Tuple[List[int], float]:
+            area_kernel = h_box * w_box
+            # (H, W) image with just 1D channel
+            if img.ndim == 2:
+                # Simple sum kernel by adding all the elements
+                kernel = torch.ones(1, 1, h_box, w_box, device=img.device)
+                img = img.unsqueeze(0).unsqueeze(0)
+            elif img.ndim == 3:
+                ch_dim = img.size(0)
+                kernel = torch.ones(1, ch_dim, h_box, w_box, device=img.device)
+                img = img.unsqueeze(0)
+            elif img.ndim == 4:
+                ch_dim = img.size(1)
+                kernel = torch.ones(1, ch_dim, h_box, w_box, device=img.device)
+            else:
+                raise Exception("Image has too many dimensions. Please pass a batch of either 2D or 3D images.")
+
+            bs, _, ht, wd = img.size()
+            output = torch.nn.functional.conv2d(img, kernel, padding=(h_box // 2 - 1, w_box // 2 - 1))
+            output = output.mean(dim=1)
+            output /= area_kernel  # Normalize the output by the kernel size to get mean
+            # Find the minimum average value for each pixel location
+            max_index = torch.argmax(output.flatten(start_dim=1), dim=1).item()
+            # Calculate the center coordinates of the maximum block for each image
+            center_y, center_x = max_index // output.size(2), max_index % output.size(2)
+            # Calculate the coordinates of the maximum block
+            x1 = center_x - w_box // 2
+            y1 = center_y - h_box // 2
+            x2 = x1 + w_box
+            y2 = y1 + h_box
+            box = [x1, y1, x2, y2]
+            return box, output.max()
+
+        boxes, losses = [], []
+        for img_pair in imgs:
+            img_pred, img_gt = img_pair
+            # FIXME since we can also run in rgbd mode it would make more sense to include the depth difference here as well!
+            l1map = torch.abs(img_gt - img_pred).mean(dim=0, keepdim=True)
+            box, l1_max = convolution_sliding_window(l1map, h_box, w_box)
+            losses.append(l1_max)
+            boxes.append(box)
+
+        # Sort data by loss
+        sorted_indices = sorted(range(len(losses)), key=lambda i: losses[i], reverse=True)
+        sorted_boxes = [boxes[i] for i in sorted_indices]
+        sorted_cams = [cams[i] for i in sorted_indices]
+        return sorted_boxes, sorted_cams
+
+    def get_multiview_augmented_grad_threshold(self, cams: List[Camera], tau: float = 1.0):
+        """MVGS uses an adaptive threshold to increase the densification in areas where needed.
+        For this they simply check if two training views are strongly distinct based on their camera position.
+        If they are, then the grad_threshold is halfed, else we keep it as configured.
+
+        NOTE: Given M training views, we have M * (M-1) distance computations and for loop iterations
+        """
+        # Convert camera centers to a tensor
+        camera_centers = torch.stack([cam.camera_center for cam in cams])
+        normalized_centers = camera_centers / torch.norm(camera_centers, dim=1, keepdim=True)
+        # Compute pairwise distances (this also includes the diagonal with 0 distance)
+        # Since we check for a distance > threshold, this does not matter
+        pairwise_distances = torch.cdist(normalized_centers, normalized_centers, p=2) / tau
+        # NOTE chen: tau is missing in original because they never used a value != 1
+        # (it just looks fancy in the paper)
+        if torch.any(pairwise_distances > 1):
+            max_grad_augmented = self.update_params.densify.vanilla.max_grad * 0.5
+        else:
+            max_grad_augmented = self.update_params.densify.vanilla.max_grad
+        return max_grad_augmented
+
     def mapping_step(
-        self,
-        iter: int,
-        frames: List[Camera],
-        vanilla_densify_params: Dict,
-        prune_densify: bool = False,
-        opacity_densify: bool = False,
-        optimize_poses: bool = False,
+        self, iter: int, frames: List[Camera], prune_densify: bool = False, optimize_poses: bool = False
     ) -> float:
         """Takes the list of selected keyframes to optimize and performs one step of the mapping optimization."""
         # Sanity check when we dont have anything to optimize
@@ -729,7 +860,7 @@ class GaussianMapper(object):
 
         loss = 0.0
         # Collect for densification and pruning
-        opacity_acm, radii_acm, touched_acm = [], [], []
+        radii_acm, touched_acm, img_pairs = [], [], []
         visibility_filter_acm, viewspace_point_tensor_acm = [], []
         for view in frames:
             current_loss, render_pkg = self.render_compare(view)
@@ -741,8 +872,10 @@ class GaussianMapper(object):
             self.gaussians.increment_n_opt_counter(visibility=render_pkg["visibility_filter"])
             self.n_optimized[view.uid] += 1
 
+            # Collect image pairs for loss computations
+            img_pairs.append([render_pkg["render"], view.original_image])
+
             # Accumulate for after loss backpropagation
-            opacity_acm.append((view, render_pkg["opacity"]))
             visibility_filter_acm.append(render_pkg["visibility_filter"])
             viewspace_point_tensor_acm.append(render_pkg["viewspace_points"])
             radii_acm.append(render_pkg["radii"])
@@ -773,6 +906,7 @@ class GaussianMapper(object):
                     radii_acm[idx][visibility_filter_acm[idx]],
                 )
                 # NOTE chen: we dont necessarily get better results when using the gradient averaging techique from Abs GS
+                # (It for sure introduces more Gaussians somehow)
                 self.gaussians.add_densification_stats(
                     viewspace_point_tensor_acm[idx],
                     visibility_filter_acm[idx],
@@ -782,24 +916,25 @@ class GaussianMapper(object):
 
             # Prune and Densify
             if self.last_idx > self.n_last_frames and prune_densify:
-                # General pruning based on opacity and size + densification (from original 3DGS)
-                self.gaussians.densify_and_prune(**vanilla_densify_params)
+                # General pruning based on opacity and size + densification with the techniques of MVGS
+                # NOTE since the checks are based on all-pairs within a batch, this is O( Batch_size * (Batch_size - 1) )
+                boxes3d, sorted_frames = self.get_cross_ray_boxes_conv(frames, img_pairs)
+                augmented_max_grad = self.get_multiview_augmented_grad_threshold(frames)
+                if augmented_max_grad - self.update_params.densify.vanilla.max_grad > 1e-6:
+                    print(
+                        "Reducing max_grad for densification because some camera pairs in batch are very disbecause some camera pairs in batch are very distantt"
+                    )
+                    ipdb.set_trace()
 
-            # Densify in low opacity regions only after the map is stable already
-            # (else we waste compute, because densify_and_prune will fill initial holes quickly)
-            if prune_densify and opacity_densify and self.count > self.update_params.densify.opacity.after:
-                ng_before = len(self.gaussians)
-                for i, acm_item in enumerate(opacity_acm):
-                    view, opacity = acm_item
-                    # Only densify in regions with: i) with low opacity, ii) with high rgb difference, iii) with high depth difference
-                    # see https://arxiv.org/pdf/2403.12535
-                    mask = opacity.squeeze() < self.update_params.densify.opacity.th
-                    # if this mask has too many pixels, then subsample to acceptable lower number
-                    if mask.sum() > self.update_params.densify.opacity.max_pixels:
-                        mask = random_subsample_mask(mask, self.update_params.densify.opacity.max_pixels)
-                        self.gaussians.densify_from_mask(view, mask, depthmap=view.depth_prior.cpu().numpy())
-                if (len(self.gaussians) - ng_before) > 0:
-                    self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity")
+                self.gaussians.densify_and_prune(
+                    augmented_max_grad,
+                    self.update_params.densify.vanilla.min_opacity,
+                    self.update_params.densify.vanilla.extent,
+                    self.update_params.densify.vanilla.max_screen_size,
+                    sorted_frames,
+                    boxes3d,
+                    self.update_params.densify.vanilla.scale_std,
+                )
 
         ### Update states
         self.gaussians.optimizer.step()
@@ -807,7 +942,6 @@ class GaussianMapper(object):
         self.gaussians.update_learning_rate(iter)
 
         # Delete lists of tensors
-        del opacity_acm
         del radii_acm
         del visibility_filter_acm
         del viewspace_point_tensor_acm
@@ -1120,16 +1254,17 @@ class GaussianMapper(object):
             do_densify = (
                 iter % self.update_params.prune_densify_every == 0 and iter < self.update_params.prune_densify_until
             )
+
+            # FIXME chen: we might have to do this with smaller batches here when using the MVGS techniques
+            # they somehow consume already large amounts of memory with batches <= 10.
+            # (We sometimes have batches of size 50)
+            # TODO determine the visual overlap between frames in a covisibility graph
             frames = (
                 self.select_keyframes(random_weights=self.update_params.random_selection_weights)[0] + self.new_cameras
             )
+            # Prune and densify with vanilla 3DGS strategy
             loss = self.mapping_step(
-                iter,
-                frames,
-                self.update_params.densify.vanilla,
-                prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
-                opacity_densify=self.update_params.densify.use_opacity,  # Densify based on low opacity regions
-                optimize_poses=self.update_params.optimize_poses,
+                iter, frames, prune_densify=do_densify, optimize_poses=self.update_params.optimize_poses
             )
             self.loss_list.append(loss)
 
