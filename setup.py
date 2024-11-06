@@ -90,25 +90,25 @@ setup(
 )
 
 setup(
-    name="diff_gaussian_rasterization",
-    packages=["diff_gaussian_rasterization"],
-    package_dir={"": "thirdparty/diff-gaussian-rasterization-w-pose"},
+    name="diff_gaussian_rasterization_mcmc",
+    packages=["diff_gaussian_rasterization_mcmc"],
+    package_dir={"": "thirdparty/diff-gaussian-rasterization-mcmc"},
     ext_modules=[
         CUDAExtension(
             name="diff_gaussian_rasterization._C",
             sources=[
-                "thirdparty/diff-gaussian-rasterization-w-pose/cuda_rasterizer/rasterizer_impl.cu",
-                "thirdparty/diff-gaussian-rasterization-w-pose/cuda_rasterizer/forward.cu",
-                "thirdparty/diff-gaussian-rasterization-w-pose/cuda_rasterizer/backward.cu",
-                "thirdparty/diff-gaussian-rasterization-w-pose/rasterize_points.cu",
-                "thirdparty/diff-gaussian-rasterization-w-pose/ext.cpp",
+                "thirdparty/diff-gaussian-rasterization-mcmc/cuda_rasterizer/rasterizer_impl.cu",
+                "thirdparty/diff-gaussian-rasterization-mcmc/cuda_rasterizer/forward.cu",
+                "thirdparty/diff-gaussian-rasterization-mcmc/cuda_rasterizer/backward.cu",
+                "thirdparty/diff-gaussian-rasterization-mcmc/rasterize_points.cu",
+                "thirdparty/diff-gaussian-rasterization-mcmc/ext.cpp",
             ],
             extra_compile_args={
                 "nvcc": [
                     "-I"
                     + os.path.join(
                         os.path.dirname(os.path.abspath(__file__)),
-                        "thirdparty/diff-gaussian-rasterization-w-pose/third_party/glm/",
+                        "thirdparty/diff-gaussian-rasterization-mcmc/third_party/glm/",
                     )
                 ]
             },
