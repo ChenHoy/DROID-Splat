@@ -34,6 +34,7 @@ from ..utils.general_utils import (
 )
 from ..camera_utils import Camera
 from ..utils.graphics_utils import BasicPointCloud, getWorld2View2
+from ..utils.reloc_utils import compute_relocation_cuda
 from ..utils.sh_utils import RGB2SH
 
 
@@ -297,6 +298,7 @@ class GaussianModel:
                 )
 
                 param_group["lr"] = lr
+                return lr
 
     def construct_list_of_attributes(self):
         l = ["x", "y", "z", "nx", "ny", "nz"]
@@ -325,6 +327,44 @@ class GaussianModel:
                 self.optimizer.state[group["params"][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
+        return optimizable_tensors
+
+    def replace_tensors_to_optimizer(self, inds=None):
+        tensors_dict = {
+            "xyz": self._xyz,
+            "f_dc": self._features_dc,
+            "f_rest": self._features_rest,
+            "opacity": self._opacity,
+            "scaling": self._scaling,
+            "rotation": self._rotation,
+        }
+
+        optimizable_tensors = {}
+        for group in self.optimizer.param_groups:
+            assert len(group["params"]) == 1
+            tensor = tensors_dict[group["name"]]
+            stored_state = self.optimizer.state.get(group["params"][0], None)
+
+            if inds is not None:
+                stored_state["exp_avg"][inds] = 0
+                stored_state["exp_avg_sq"][inds] = 0
+            else:
+                stored_state["exp_avg"] = torch.zeros_like(tensor)
+                stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+
+            del self.optimizer.state[group["params"][0]]
+            group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
+            self.optimizer.state[group["params"][0]] = stored_state
+
+            optimizable_tensors[group["name"]] = group["params"][0]
+
+        self._xyz = optimizable_tensors["xyz"]
+        self._features_dc = optimizable_tensors["f_dc"]
+        self._features_rest = optimizable_tensors["f_rest"]
+        self._opacity = optimizable_tensors["opacity"]
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+
         return optimizable_tensors
 
     def _prune_optimizer(self, mask):
@@ -590,6 +630,7 @@ class GaussianModel:
         new_kf_ids=None,
         new_n_obs=None,
         new_n_opt=None,
+        reset_params: bool = True,
     ):
         d = {
             "xyz": new_xyz,
@@ -609,9 +650,10 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
         # Reset attributes for thresholding
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
+        if reset_params:
+            self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
+            self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
+            self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
 
         # Add new keyframe ID and observation/optimized count
         if new_kf_ids is not None:
@@ -668,96 +710,6 @@ class GaussianModel:
         )
 
         self.prune_points(prune_filter)
-
-    # TODO introduce a selective grad check for gaussians selected from boxes3d
-    # TODO use a criterin to reduce the number of gaussians from here
-    def densify_and_clone(
-        self,
-        grads,
-        grad_threshold,
-        scene_extent,
-        boxes3d: Optional[torch.Tensor] = None,
-        tau: float = 0.5,
-        max_num: int = 1000,
-    ):
-        """Densify and clone Gaussians which have a large gradient. These are likely
-        to not represent the local scene well and should be densified and cloned to better capture the scene.
-        There might be Gaussians which do not have a large gradient, but still lead to large 2D errors. These
-        Gaussians can be captured by the 3D intersection check. We densify these as well.
-        """
-        if boxes3d is not None:
-            # Check which Gaussians are in the provided 3D boxes
-            # NOTE chen: I hope this does not create memory issues since we will have [N x num_boxes] tensors
-            mask_x = torch.logical_and(
-                self.get_xyz[:, 0][:, None] > boxes3d[:, 0][None, :],
-                self.get_xyz[:, 0][:, None] < boxes3d[:, 3][None, :],
-            )
-            mask_y = torch.logical_and(
-                self.get_xyz[:, 1][:, None] > boxes3d[:, 1][None, :],
-                self.get_xyz[:, 1][:, None] < boxes3d[:, 4][None, :],
-            )
-            mask_z = torch.logical_and(
-                self.get_xyz[:, 2][:, None] > boxes3d[:, 2][None, :],
-                self.get_xyz[:, 2][:, None] < boxes3d[:, 5][None, :],
-            )
-            # A Gaussian has to satisfy the coordinate conditions in all dimensions for each box
-            mask_xyz = torch.logical_and(mask_x, mask_y)
-            mask_xyz = torch.logical_and(mask_xyz, mask_z)
-            # Reduce to a single mask for each Gaussian, i.e. test if a Gaussian was in any box
-            mask = torch.any(mask_xyz, dim=1)
-        else:
-            mask = torch.zeros((self.get_xyz.shape[0]), device=self.device, dtype=bool)
-
-        # Extract points that satisfy the gradient condition
-        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
-        selected_pts_mask = torch.logical_and(
-            selected_pts_mask,
-            torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent,
-        )
-
-        # Check the gradients of troublesome Gaussians in the 3D intersections
-        if mask.sum() > 0:
-            # What points come exlusively from the box check?
-            diff = torch.logical_and(mask, torch.logical_not(selected_pts_mask))
-            print(f"3D Intersection check discovered: {diff.sum()} new Gaussians ...")
-            selected_pts_mask2 = torch.where(torch.norm(grads, dim=-1) >= grad_threshold * tau, True, False)
-            selected_pts_mask2 = torch.logical_and(selected_pts_mask2, mask)
-            diff = torch.logical_and(selected_pts_mask2, torch.logical_not(selected_pts_mask))
-            print(f"Using additional: {diff.sum()} Gaussians for densificaton ...")
-            # If this still results in too many Gaussians, only select the ones with the highest gradient
-            # FIXME is this correctly indexing?
-            if selected_pts_mask2.sum() > max_num:
-                top_grads = torch.topk(
-                    torch.norm(grads[selected_pts_mask2], dim=-1), max_num, largest=True, sorted=False
-                ).indices
-                selected_pts_mask2 = torch.zeros_like(selected_pts_mask2)
-                selected_pts_mask2[top_grads] = True
-
-            # Combine grad_mask and box mask
-            selected_pts_mask = torch.logical_or(selected_pts_mask, selected_pts_mask2)
-
-        new_xyz = self._xyz[selected_pts_mask]
-        new_features_dc = self._features_dc[selected_pts_mask]
-        new_features_rest = self._features_rest[selected_pts_mask]
-        new_opacities = self._opacity[selected_pts_mask]
-        new_scaling = self._scaling[selected_pts_mask]
-        new_rotation = self._rotation[selected_pts_mask]
-
-        new_kf_id = self.unique_kfIDs[selected_pts_mask]
-        new_n_obs = self.n_obs[selected_pts_mask]
-        new_n_opt = self.n_optimized[selected_pts_mask]
-
-        self.densification_postfix(
-            new_xyz,
-            new_features_dc,
-            new_features_rest,
-            new_opacities,
-            new_scaling,
-            new_rotation,
-            new_kf_ids=new_kf_id,
-            new_n_obs=new_n_obs,
-            new_n_opt=new_n_opt,
-        )
 
     def densify_from_mask(self, cam, mask, downsample_factor=1, depthmap=None):
         features = self.create_pcd_from_image(cam, mask=mask, downsample_factor=downsample_factor, depthmap=depthmap)
@@ -978,152 +930,48 @@ class GaussianModel:
         h_rot = scale_gradients(self._rotation, scale_fn)
         return [h_xyz, h_features_dc, h_features_rest, h_opacity, h_scaling, h_rot]
 
-    def intersect_lines(
-        self,
-        ray1_origin: torch.Tensor,
-        ray1_dir: torch.Tensor,
-        ray2_origin: torch.Tensor,
-        ray2_dir: torch.Tensor,
-        eps: float = 1e-5,
-    ) -> torch.Tensor:
-        """Intersection points (middle point of shortest orthogonal connection) between two rays in 3D space.
-        Each ray is a vector of shape [B, 3] with two vectors for origin and direction.
-        """
-        # Normalize direction vectors
-        ray1_dir = ray1_dir / torch.norm(ray1_dir, dim=1)[:, None]
-        ray2_dir = ray2_dir / torch.norm(ray2_dir, dim=1)[:, None]
-
-        # Cross product of direction vectors
-        cross_dir = torch.linalg.cross(ray1_dir, ray2_dir, dim=1)
-        cross_dir_norm = torch.norm(cross_dir, dim=1)
-        invalid = cross_dir_norm < eps  # Check if the rays are parallel
-
-        origin_diff = ray2_origin - ray1_origin  # Line between the origins
-        # Calculate the distance along Projection
-        t1 = torch.einsum("bi,bi->b", torch.linalg.cross(origin_diff, ray2_dir, dim=1), cross_dir) / (
-            cross_dir_norm**2 + eps
-        )
-        t2 = torch.einsum("bi,bi->b", torch.linalg.cross(origin_diff, ray1_dir, dim=1), cross_dir) / (
-            cross_dir_norm**2 + eps
+    def densify_and_clone(self, grads: torch.Tensor, grad_threshold: float, scene_extent: float):
+        # Extract points that satisfy the gradient condition
+        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask,
+            torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent,
         )
 
-        # Find closest points on each ray
-        closest_point1, closest_point2 = ray1_origin + t1[:, None] * ray1_dir, ray2_origin + t2[:, None] * ray2_dir
-        # Take midpoint between the two closest points as the intersection point
-        intersection_point = (closest_point1 + closest_point2) / 2.0
-        # Set invalid intersection points to zero, we will later detect these by checking for zero points
-        intersection_point[invalid] = torch.zeros(3, device=intersection_point.device)
-        return intersection_point
+        new_xyz = self._xyz[selected_pts_mask]
+        new_features_dc = self._features_dc[selected_pts_mask]
+        new_features_rest = self._features_rest[selected_pts_mask]
+        new_opacities = self._opacity[selected_pts_mask]
+        new_scaling = self._scaling[selected_pts_mask]
+        new_rotation = self._rotation[selected_pts_mask]
 
-    # NOTE this is x10 faster than original, but results can be different up to 1e-5
-    def get_intersection_3d(self, cams: List[Camera], boxes: List[List[int]]) -> Tuple[List, List]:
-        """Given 2D boxes in multiple images with known camera frustum,
-        triangulate the box frustrums into 3D and check where they could potentially intersect.
-        We carve out this 3D space to understand in which 3D regions we should densify.
-        """
-        import itertools
+        # NOTE these operations create a malloc error with wrong pytorch version
+        new_kf_id = self.unique_kfIDs[selected_pts_mask]
+        new_n_obs = self.n_obs[selected_pts_mask]
+        new_n_opt = self.n_optimized[selected_pts_mask]
 
-        # We need to have at least 2 cameras and 2 boxes to get a 3D region
-        if len(cams) <= 1 or len(boxes) <= 1:
-            return None, None
-
-        # Get cam and box pairs without nested loop using itertools
-        cam_pairs = [(i, j) for i, j in itertools.combinations(range(len(cams)), 2)]
-        ray0_o_topleft, ray0_d_topleft = [], []
-        ray0_o_bottomright, ray0_d_bottomright = [], []
-        ray0_o_bottomleft, ray0_d_bottomleft = [], []
-        ray0_o_topright, ray0_d_topright = [], []
-
-        ray1_o_topleft, ray1_d_topleft = [], []
-        ray1_o_bottomright, ray1_d_bottomright = [], []
-        ray1_o_bottomleft, ray1_d_bottomleft = [], []
-        ray1_o_topright, ray1_d_topright = [], []
-
-        # We still need to use a single for loop over all pairs to gather the vectors
-        for i, j in cam_pairs:
-            # Get corresponding boxes
-            box0, box1 = boxes[i], boxes[j]
-            cam0, cam1 = cams[i], cams[j]
-            ## Corner lines of Ray 0
-            ray0_o_topleft.append(cam0.rayo[0, :, box0[0], box0[1]])
-            ray0_d_topleft.append(cam0.rayd[0, :, box0[0], box0[1]])
-            ray0_o_bottomright.append(cam0.rayo[0, :, box0[2], box0[3]])
-            ray0_d_bottomright.append(cam0.rayd[0, :, box0[2], box0[3]])
-            ray0_o_bottomleft.append(cam0.rayo[0, :, box0[2], box0[1]])
-            ray0_d_bottomleft.append(cam0.rayd[0, :, box0[2], box0[1]])
-            ray0_o_topright.append(cam0.rayo[0, :, box0[0], box0[3]])
-            ray0_d_topright.append(cam0.rayd[0, :, box0[0], box0[3]])
-            ## Corner lines of Ray 1
-            ray1_o_topleft.append(cam1.rayo[0, :, box1[0], box1[1]])
-            ray1_d_topleft.append(cam1.rayd[0, :, box1[0], box1[1]])
-            ray1_o_bottomright.append(cam1.rayo[0, :, box1[2], box1[3]])
-            ray1_d_bottomright.append(cam1.rayd[0, :, box1[2], box1[3]])
-            ray1_o_bottomleft.append(cam1.rayo[0, :, box1[2], box1[1]])
-            ray1_d_bottomleft.append(cam1.rayd[0, :, box1[2], box1[1]])
-            ray1_o_topright.append(cam1.rayo[0, :, box1[0], box1[3]])
-            ray1_d_topright.append(cam1.rayd[0, :, box1[0], box1[3]])
-
-        # Vectorize
-        ray0_o_topleft, ray0_d_topleft = torch.stack(ray0_o_topleft), torch.stack(ray0_d_topleft)
-        ray0_o_bottomright, ray0_d_bottomright = torch.stack(ray0_o_bottomright), torch.stack(ray0_d_bottomright)
-        ray0_o_bottomleft, ray0_d_bottomleft = torch.stack(ray0_o_bottomleft), torch.stack(ray0_d_bottomleft)
-        ray0_o_topright, ray0_d_topright = torch.stack(ray0_o_topright), torch.stack(ray0_d_topright)
-
-        ray1_o_topleft, ray1_d_topleft = torch.stack(ray1_o_topleft), torch.stack(ray1_d_topleft)
-        ray1_o_bottomright, ray1_d_bottomright = torch.stack(ray1_o_bottomright), torch.stack(ray1_d_bottomright)
-        ray1_o_bottomleft, ray1_d_bottomleft = torch.stack(ray1_o_bottomleft), torch.stack(ray1_d_bottomleft)
-        ray1_o_topright, ray1_d_topright = torch.stack(ray1_o_topright), torch.stack(ray1_d_topright)
-
-        ## Check for intersections
-        topleft_intersect = self.intersect_lines(ray0_o_topleft, ray0_d_topleft, ray1_o_topleft, ray1_d_topleft)
-        bottomright_intersect = self.intersect_lines(
-            ray0_o_bottomright, ray0_d_bottomright, ray1_o_bottomright, ray1_d_bottomright
+        self.densification_postfix(
+            new_xyz,
+            new_features_dc,
+            new_features_rest,
+            new_opacities,
+            new_scaling,
+            new_rotation,
+            new_kf_ids=new_kf_id,
+            new_n_obs=new_n_obs,
+            new_n_opt=new_n_opt,
         )
-        bottomleft_interset = self.intersect_lines(
-            ray0_o_bottomleft, ray0_d_bottomleft, ray1_o_bottomleft, ray1_d_bottomleft
-        )
-        topright_intersect = self.intersect_lines(ray0_o_topright, ray0_d_topright, ray1_o_topright, ray1_d_topright)
-        ## Get actual 3D region from intersections
-        region3d = torch.stack(
-            [topleft_intersect, bottomright_intersect, bottomleft_interset, topright_intersect], dim=1
-        )
-        # Check for 0 returns, like the original code (this happens for colinear lines for a single region)
-        invalid = torch.any(torch.sum(torch.abs(region3d), dim=-1) < 1e-6, dim=-1)
-        region3d = region3d[~invalid]
-
-        x_min_3d, x_max_3d = torch.min(region3d[..., 0], dim=1)[0], torch.max(region3d[..., 0], dim=1)[0]
-        y_min_3d, y_max_3d = torch.min(region3d[..., 1], dim=1)[0], torch.max(region3d[..., 1], dim=1)[0]
-        z_min_3d, z_max_3d = torch.min(region3d[..., 2], dim=1)[0], torch.max(region3d[..., 2], dim=1)[0]
-
-        volume3d = (x_max_3d - x_min_3d) * (y_max_3d - y_min_3d) * (z_max_3d - z_min_3d)
-        boxes_3d = torch.stack([x_min_3d, y_min_3d, z_min_3d, x_max_3d, y_max_3d, z_max_3d], dim=-1)
-        return boxes_3d, volume3d
 
     def densify_and_prune(
-        self,
-        max_grad: float,
-        min_opacity: float,
-        extent: float,
-        max_screen_size: float,
-        scale_std: float = 1.0,
-        tau: float = 0.5,
-        max_num: float = 1000,
-        cams: Optional[List[Camera]] = None,
-        boxes2d: Optional[List[List[int]]] = None,
+        self, max_grad: float, min_opacity: float, extent: float, max_screen_size: float, scale_std: float = 1.0
     ):
-        """Densify and prune from MVGS"""
+        """Densify and prune"""
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
         n_g = self.get_xyz.shape[0]  # Memoize number of Gaussians before operations
 
-        # box_gs, vol_gs = self.get_3d_bounding_box(return_volume=True)
-        if boxes2d is not None and cams is not None:
-            boxes3d, volumes3d = self.get_intersection_3d(cams, boxes2d)
-        else:
-            boxes3d = None
-
         # Densify in carved out 3D regions of high 2D projected image losses
-        self.densify_and_clone(grads, max_grad, extent, boxes3d, tau, max_num)
+        self.densify_and_clone(grads, max_grad, extent)
         # Vanilla Densify and Split based on gradients and extent
         self.densify_and_split(grads, max_grad, extent, scale_std=scale_std)
 
@@ -1137,6 +985,103 @@ class GaussianModel:
         self.info(f"Pruning & densification added {self.get_xyz.shape[0] - n_g} gaussians")
 
         torch.cuda.empty_cache()
+
+    #####
+    # Monte-Carlo Markov Chain model methods
+    #####
+
+    def _update_params(self, idxs, ratio):
+        new_opacity, new_scaling = compute_relocation_cuda(
+            opacity_old=self.get_opacity[idxs, 0], scale_old=self.get_scaling[idxs], N=ratio[idxs, 0] + 1
+        )
+        new_opacity = torch.clamp(new_opacity.unsqueeze(-1), max=1.0 - torch.finfo(torch.float32).eps, min=0.005)
+        new_opacity = self.inverse_opacity_activation(new_opacity)
+        new_scaling = self.scaling_inverse_activation(new_scaling.reshape(-1, 3))
+
+        return (
+            self._xyz[idxs],
+            self._features_dc[idxs],
+            self._features_rest[idxs],
+            new_opacity,
+            new_scaling,
+            self._rotation[idxs],
+        )
+
+    def _sample_alives(self, probs, num, alive_indices=None):
+        probs = probs / (probs.sum() + torch.finfo(torch.float32).eps)
+        sampled_idxs = torch.multinomial(probs, num, replacement=True)
+        if alive_indices is not None:
+            sampled_idxs = alive_indices[sampled_idxs]
+        ratio = torch.bincount(sampled_idxs).unsqueeze(-1)
+        return sampled_idxs, ratio
+
+    def relocate_gs(self, dead_mask=None):
+
+        if dead_mask.sum() == 0:
+            return
+
+        alive_mask = ~dead_mask
+        dead_indices = dead_mask.nonzero(as_tuple=True)[0]
+        alive_indices = alive_mask.nonzero(as_tuple=True)[0]
+
+        if alive_indices.shape[0] <= 0:
+            return
+
+        # sample from alive ones based on opacity
+        probs = self.get_opacity[alive_indices, 0]
+        reinit_idx, ratio = self._sample_alives(alive_indices=alive_indices, probs=probs, num=dead_indices.shape[0])
+
+        (
+            self._xyz[dead_indices],
+            self._features_dc[dead_indices],
+            self._features_rest[dead_indices],
+            self._opacity[dead_indices],
+            self._scaling[dead_indices],
+            self._rotation[dead_indices],
+        ) = self._update_params(reinit_idx, ratio=ratio)
+
+        self._opacity[reinit_idx] = self._opacity[dead_indices]
+        self._scaling[reinit_idx] = self._scaling[dead_indices]
+
+        self.replace_tensors_to_optimizer(inds=reinit_idx)
+
+    def add_new_gs(self, cap_max):
+        current_num_points = self._opacity.shape[0]
+        target_num = min(cap_max, int(1.05 * current_num_points))
+        num_gs = max(0, target_num - current_num_points)
+
+        if num_gs <= 0:
+            return 0
+
+        probs = self.get_opacity.squeeze(-1)
+        add_idx, ratio = self._sample_alives(probs=probs, num=num_gs)
+
+        (new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation) = self._update_params(
+            add_idx, ratio=ratio
+        )
+        # Update opacity and scaling of the existing Gaussians
+        self._opacity[add_idx] = new_opacity
+        self._scaling[add_idx] = new_scaling
+
+        new_unique_kfIDs = self.unique_kfIDs[add_idx]
+        new_n_obs = self.n_obs[add_idx]  # FIXME should this be reinitialized to zero, as the Gaussian is newly born?
+        new_n_opt = self.n_optimized[add_idx]
+
+        self.densification_postfix(
+            new_xyz,
+            new_features_dc,
+            new_features_rest,
+            new_opacity,
+            new_scaling,
+            new_rotation,
+            new_kf_ids=new_unique_kfIDs,
+            new_n_obs=new_n_obs,
+            new_n_opt=new_n_opt,
+            reset_params=False,
+        )
+        self.replace_tensors_to_optimizer(inds=add_idx)
+
+        return num_gs
 
     def info(self, msg: str) -> None:
         print(colored(f"[Gaussian Mapping] {msg}", "magenta"))

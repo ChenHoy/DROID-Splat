@@ -3,6 +3,14 @@ delay: 5 # Delay between tracking and mapping (This should be >= 2, because else
 # NOTE chen: use MORE ITERATIONS than prune_densify_every! (newly densified Gaussians need to be optimized!)
 save_renders: False # Store some rendered images for debugging
 
+# Hyperparameters for the Monte Carlo Markov Chain model
+# FIXME chen: the cap_max should be different each scene, i.e. we could match this to the averages from previous experiments so its comparable
+mcmc:
+  cap_max: 150000 # Maximum number of Gaussians in the map
+  noise_lr: 5e5 # TODO is this actually 5e-5?
+  opacity_reg: 0.01
+  scale_reg: 0.01
+
 # Online Optimization
 online_opt:
   ## Local sliding optimization window
@@ -41,15 +49,6 @@ online_opt:
       extent: 6  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
       min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
       max_screen_size: 10 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
-    use_mvgs: True # Use the 3D intersections of multiple views to densify as done in MVGS paper
-    mvgs: 
-      n_frames: 10 # Perform this for just some n random frames
-      box_quotient: 32 # Take small 2D boxes of [H // box_quotient, W // box_quotient] pixels for densification
-      tau: 0.5 # Change the grad threshold for 3D intersected Gaussians
-      # NOTE this avoids a deadlock, where we keep splitting Gaussians since the loss will never be 0.0!
-      min_loss: 0.4 # The highest 2D image loss of a box needs to be higher than this to consider
-      # NOTE for this we simply sort the selected 3D points according to their gradient
-      max_number: 10000 # Maximum number of Gaussians to densify based on this criterion
     
   # How to Filter the Tracking Map before feeding into Mapper
   filter: # Parameter for filtering incoming points from the SLAM system
