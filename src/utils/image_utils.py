@@ -21,7 +21,7 @@ def psnr(img1, img2):
     return 20 * torch.log10(1.0 / torch.sqrt(mse))
 
 
-def gradient_map(image: torch.Tensor, operator: str = "scharr", return_xy: bool = False):
+def gradient_map(image: torch.Tensor, operator: str = "sobel", return_xy: bool = False):
     """Compute the image gradient with a differntial operator."""
     if operator == "prewitt":
         kernel_x = torch.tensor([[-1, 0, 1], [-1, 0, 1], [-1, 0, 1]]).float().unsqueeze(0).unsqueeze(0) / 3

@@ -37,6 +37,14 @@ from ..utils.graphics_utils import BasicPointCloud, getWorld2View2
 from ..utils.sh_utils import RGB2SH
 
 
+"""
+3D Gaussian Splatting together with techniques from  Multi-View Gaussian Splatting functions, 
+see https://github.com/xiaobiaodu/MVGS for references.
+
+NOTE chen: We vectorized the intersection tests to speed this up and corrected some minor mistakes they had in their code
+"""
+
+
 def normal2rotation(n: torch.Tensor):
     """Construct a random rotation matrix from normal
     adopted from https://github.com/turandai/gaussian_surfels/blob/main/utils/general_utils.py
@@ -231,6 +239,19 @@ class GaussianModel:
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
+
+    def get_3d_bounding_box(self, return_volume: bool = False):
+        """Return a bounding box of the 3D Gaussians in the scene.
+        This is in format [min_x, min_y, min_z, max_x, max_y, max_z]
+        """
+        min_point = torch.min(self.get_xyz, dim=0)[0]
+        max_point = torch.max(self.get_xyz, dim=0)[0]
+        box3d = [min_point[0], min_point[1], min_point[2], max_point[0], max_point[1], max_point[2]]
+        volume3d = (max_point[0] - min_point[0]) * (max_point[1] - min_point[1]) * (max_point[2] - min_point[2])
+        if return_volume:
+            return box3d, volume3d
+        else:
+            return box3d
 
     def get_covariance(self, scaling_modifier=1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
@@ -648,19 +669,32 @@ class GaussianModel:
 
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent, box3ds):
-
-        # Extract points that satisfy the gradient condition
-        mask = torch.zeros_like(self.get_xyz[:, 0])
-        for box3d in box3ds:
-            x_min_3d, y_min_3d, z_min_3d, x_max_3d, y_max_3d, z_max_3d = box3d
-            mask_x = torch.logical_and(self.get_xyz[:, 0] > x_min_3d, self.get_xyz[:, 0] < x_max_3d)
-            mask_y = torch.logical_and(self.get_xyz[:, 1] > y_min_3d, self.get_xyz[:, 1] < y_max_3d)
-            mask_z = torch.logical_and(self.get_xyz[:, 2] > z_min_3d, self.get_xyz[:, 2] < z_max_3d)
-            mask_xyz = torch.logical_and(mask_x, mask_y)
-            mask_xyz = torch.logical_and(mask_xyz, mask_z)
-
-            mask = torch.logical_or(mask, mask_xyz)
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, boxes3d: torch.Tensor):
+        """Densify and clone Gaussians which have a large gradient. These are likely
+        to not represent the local scene well and should be densified and cloned to better capture the scene.
+        There might be Gaussians which do not have a large gradient, but still lead to large 2D errors. These
+        Gaussians can be captured by the 3D intersection check. We densify these as well.
+        """
+        # Check which Gaussians are in the provided 3D boxes
+        # NOTE chen: I hope this does not create memory issues since we will have [N x num_boxes] tensors
+        mask_x = torch.logical_and(
+            self.get_xyz[:, 0][:, None] > boxes3d[:, 0][None, :],
+            self.get_xyz[:, 0][:, None] < boxes3d[:, 3][None, :],
+        )
+        mask_y = torch.logical_and(
+            self.get_xyz[:, 1][:, None] > boxes3d[:, 1][None, :],
+            self.get_xyz[:, 1][:, None] < boxes3d[:, 4][None, :],
+        )
+        mask_z = torch.logical_and(
+            self.get_xyz[:, 2][:, None] > boxes3d[:, 2][None, :],
+            self.get_xyz[:, 2][:, None] < boxes3d[:, 5][None, :],
+        )
+        # A Gaussian has to satisfy the coordinate conditions in all dimensions for each box
+        mask_xyz = torch.logical_and(mask_x, mask_y)
+        mask_xyz = torch.logical_and(mask_xyz, mask_z)
+        # Reduce to a single mask for each Gaussian, i.e. test if a Gaussian was in any box
+        mask = torch.any(mask_xyz, dim=1)
+        ipdb.set_trace()
 
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
@@ -668,7 +702,8 @@ class GaussianModel:
             selected_pts_mask,
             torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent,
         )
-
+        # Combine grad_mask and box mask
+        # NOTE this will densify points even with low gradient as long as they are in a 3D cuboid with high 2D errors
         selected_pts_mask = torch.logical_or(selected_pts_mask, mask)
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -677,7 +712,6 @@ class GaussianModel:
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 
-        # NOTE these operations create a malloc error with wrong pytorch version
         new_kf_id = self.unique_kfIDs[selected_pts_mask]
         new_n_obs = self.n_obs[selected_pts_mask]
         new_n_opt = self.n_optimized[selected_pts_mask]
@@ -913,16 +947,6 @@ class GaussianModel:
         h_rot = scale_gradients(self._rotation, scale_fn)
         return [h_xyz, h_features_dc, h_features_rest, h_opacity, h_scaling, h_rot]
 
-    ####
-    # Multi-View Gaussian Splatting functions, see https://github.com/xiaobiaodu/MVGS
-    ####
-    def gather_rays(self, rays, region) -> torch.Tensor:
-        top = rays[region[1], region[0] : region[2]]
-        bottom = rays[region[3] - 1, region[0] : region[2]]
-        left = rays[region[1] : region[3], region[0]]
-        right = rays[region[1] : region[3], region[2] - 1]
-        return torch.cat([top, bottom, left, right], dim=0)
-
     def intersect_lines(
         self, ray1_origin: torch.Tensor, ray1_dir: torch.Tensor, ray2_origin: torch.Tensor, ray2_dir: torch.Tensor
     ) -> torch.Tensor:
@@ -930,7 +954,7 @@ class GaussianModel:
         ray1_dir, ray2_dir = ray1_dir / torch.norm(ray1_dir), ray2_dir / torch.norm(ray2_dir)
 
         # Cross product of direction vectors
-        cross_dir = torch.cross(ray1_dir, ray2_dir)
+        cross_dir = torch.linalg.cross(ray1_dir, ray2_dir)
         cross_dir_norm = torch.norm(cross_dir)
 
         # Check if the rays are parallel
@@ -939,8 +963,8 @@ class GaussianModel:
 
         origin_diff = ray2_origin - ray1_origin  # Line between the origins
         # Calculate the distance along Projection
-        t1 = torch.dot(torch.cross(origin_diff, ray2_dir), cross_dir) / (cross_dir_norm**2)
-        t2 = torch.dot(torch.cross(origin_diff, ray1_dir), cross_dir) / (cross_dir_norm**2)
+        t1 = torch.dot(torch.linalg.cross(origin_diff, ray2_dir), cross_dir) / (cross_dir_norm**2)
+        t2 = torch.dot(torch.linalg.cross(origin_diff, ray1_dir), cross_dir) / (cross_dir_norm**2)
 
         # Find closest points on each ray
         closest_point1, closest_point2 = ray1_origin + t1 * ray1_dir, ray2_origin + t2 * ray2_dir
@@ -960,35 +984,39 @@ class GaussianModel:
         Each ray is a vector of shape [B, 3] with two vectors for origin and direction.
         """
         # Normalize direction vectors
-        ray1_dir, ray2_dir = ray1_dir / torch.norm(ray1_dir, dim=1), ray2_dir / torch.norm(ray2_dir, dim=1)
+        ray1_dir = ray1_dir / torch.norm(ray1_dir, dim=1)[:, None]
+        ray2_dir = ray2_dir / torch.norm(ray2_dir, dim=1)[:, None]
 
         # Cross product of direction vectors
-        cross_dir = torch.cross(ray1_dir, ray2_dir, dim=1)
+        cross_dir = torch.linalg.cross(ray1_dir, ray2_dir, dim=1)
         cross_dir_norm = torch.norm(cross_dir, dim=1)
-
-        valid = cross_dir_norm > eps  # Check if the rays are parallel
+        invalid = cross_dir_norm < eps  # Check if the rays are parallel
 
         origin_diff = ray2_origin - ray1_origin  # Line between the origins
         # Calculate the distance along Projection
-        t1 = torch.einsum("bi,bi->b", torch.cross(origin_diff, ray2_dir, dim=1), cross_dir) / (cross_dir_norm**2)
-        t2 = torch.einsum("bi,bi->b", torch.cross(origin_diff, ray1_dir, dim=1), cross_dir) / (cross_dir_norm**2)
+        t1 = torch.einsum("bi,bi->b", torch.linalg.cross(origin_diff, ray2_dir, dim=1), cross_dir) / (
+            cross_dir_norm**2 + eps
+        )
+        t2 = torch.einsum("bi,bi->b", torch.linalg.cross(origin_diff, ray1_dir, dim=1), cross_dir) / (
+            cross_dir_norm**2 + eps
+        )
 
         # Find closest points on each ray
-        closest_point1, closest_point2 = ray1_origin + t1 * ray1_dir, ray2_origin + t2 * ray2_dir
+        closest_point1, closest_point2 = ray1_origin + t1[:, None] * ray1_dir, ray2_origin + t2[:, None] * ray2_dir
         # Take midpoint between the two closest points as the intersection point
         intersection_point = (closest_point1 + closest_point2) / 2.0
-        return intersection_point[valid]
+        # Set invalid intersection points to zero, we will later detect these by checking for zero points
+        intersection_point[invalid] = torch.zeros(3, device=intersection_point.device)
+        return intersection_point
 
-    def get_intersection_3d_vectorized(
-        self, cams: List[Camera], boxes: List[List[int]], min_volume: float = 1.0
-    ) -> Tuple[List, List]:
+    # NOTE this is x10 faster, but results can be different up to 1e-5
+    def get_intersection_3d_vectorized(self, cams: List[Camera], boxes: List[List[int]]) -> Tuple[List, List]:
         """Given 2D boxes in multiple images with known camera frustum,
         triangulate the box frustrums into 3D and check where they could potentially intersect.
         We carve out this 3D space to understand in which 3D regions we should densify.
         """
         import itertools
 
-        boxes3d, volumes = [], []
         # Get cam and box pairs without nested loop using itertools
         cam_pairs = [(i, j) for i, j in itertools.combinations(range(len(cams)), 2)]
         ray0_o_topleft, ray0_d_topleft = [], []
@@ -1029,7 +1057,7 @@ class GaussianModel:
         ray0_o_topleft, ray0_d_topleft = torch.stack(ray0_o_topleft), torch.stack(ray0_d_topleft)
         ray0_o_bottomright, ray0_d_bottomright = torch.stack(ray0_o_bottomright), torch.stack(ray0_d_bottomright)
         ray0_o_bottomleft, ray0_d_bottomleft = torch.stack(ray0_o_bottomleft), torch.stack(ray0_d_bottomleft)
-        ray0_o_topright, ray0_d_topright = torch.stack(ray0_o_topright), torch.stac(ray0_d_topright)
+        ray0_o_topright, ray0_d_topright = torch.stack(ray0_o_topright), torch.stack(ray0_d_topright)
 
         ray1_o_topleft, ray1_d_topleft = torch.stack(ray1_o_topleft), torch.stack(ray1_d_topleft)
         ray1_o_bottomright, ray1_d_bottomright = torch.stack(ray1_o_bottomright), torch.stack(ray1_d_bottomright)
@@ -1037,7 +1065,6 @@ class GaussianModel:
         ray1_o_topright, ray1_d_topright = torch.stack(ray1_o_topright), torch.stack(ray1_d_topright)
 
         ## Check for intersections
-        ipdb.set_trace()
         topleft_intersect = self.vect_intersect_lines(ray0_o_topleft, ray0_d_topleft, ray1_o_topleft, ray1_d_topleft)
         bottomright_intersect = self.vect_intersect_lines(
             ray0_o_bottomright, ray0_d_bottomright, ray1_o_bottomright, ray1_d_bottomright
@@ -1049,24 +1076,20 @@ class GaussianModel:
             ray0_o_topright, ray0_d_topright, ray1_o_topright, ray1_d_topright
         )
         ## Get actual 3D region from intersections
-        # FIXME test if this is correct?
-        region3d = torch.cat(
-            [topleft_intersect, bottomright_intersect, bottomleft_interset, topright_intersect], dim=0
+        region3d = torch.stack(
+            [topleft_intersect, bottomright_intersect, bottomleft_interset, topright_intersect], dim=1
         )
-        # FIXME test if this is correct?
-        invalid = torch.any(region3d < 1e-6, dim=-1)  # Check for 0 returns, like the original code
+        # Check for 0 returns, like the original code (this happens for colinear lines for a single region)
+        invalid = torch.any(torch.sum(torch.abs(region3d), dim=-1) < 1e-6, dim=-1)
         region3d = region3d[~invalid]
 
-        x_min_3d, x_max_3d = torch.min(region3d[:, 0]), torch.max(region3d[:, 0])
-        y_min_3d, y_max_3d = torch.min(region3d[:, 1]), torch.max(region3d[:, 1])
-        z_min_3d, z_max_3d = torch.min(region3d[:, 2]), torch.max(region3d[:, 2])
+        x_min_3d, x_max_3d = torch.min(region3d[..., 0], dim=1)[0], torch.max(region3d[..., 0], dim=1)[0]
+        y_min_3d, y_max_3d = torch.min(region3d[..., 1], dim=1)[0], torch.max(region3d[..., 1], dim=1)[0]
+        z_min_3d, z_max_3d = torch.min(region3d[..., 2], dim=1)[0], torch.max(region3d[..., 2], dim=1)[0]
 
-        boxes_3d = [x_min_3d, y_min_3d, z_min_3d, x_max_3d, y_max_3d, z_max_3d]
         volume3d = (x_max_3d - x_min_3d) * (y_max_3d - y_min_3d) * (z_max_3d - z_min_3d)
-        # Volume check to filter out too small boxes
-        invalid = volume3d < min_volume
-        boxes3d, volumes = boxes3d[~invalid], volumes[~invalid]
-        return boxes3d, volumes
+        boxes_3d = torch.stack([x_min_3d, y_min_3d, z_min_3d, x_max_3d, y_max_3d, z_max_3d], dim=-1)
+        return boxes_3d, volume3d
 
     def get_intersection_3d(
         self, cams: List[Camera], boxes: List[List[int]], min_volume: float = 1.0
@@ -1077,31 +1100,29 @@ class GaussianModel:
         """
         boxes3d, volumes = [], []
         if cams is not None:
-            for i, cam_0 in enumerate(cams):
+            for i, cam0 in enumerate(cams):
                 # NOTE since we ordered the pairs, we dont need to go over all pairs here
-                for j, cam_1 in enumerate(cams[i + 1 :]):
+                for j, cam1 in enumerate(cams[i + 1 :]):
                     # Get corresponding boxes
                     box0, box1 = boxes[i], boxes[i + 1 + j]
                     ## Corner lines of Ray 0
-                    ray0_o_topleft = cam_0.rayo[0, :, box0[0], box0[1]]
-                    ray0_d_topleft = cam_0.rayd[0, :, box0[0], box0[1]]
-                    ray0_o_bottomright = cam_0.rayo[0, :, box0[2], box0[3]]
-                    ray0_d_bottomright = cam_0.rayd[0, :, box0[2], box0[3]]
-                    ray0_o_bottomleft = cam_0.rayo[0, :, box0[2], box0[1]]
-                    ray0_d_bottomleft = cam_0.rayd[0, :, box0[2], box0[1]]
-                    ray0_o_topright = cam_0.rayo[0, :, box0[0], box0[3]]
-                    ray0_d_topright = cam_0.rayd[0, :, box0[0], box0[3]]
+                    ray0_o_topleft = cam0.rayo[0, :, box0[0], box0[1]]
+                    ray0_d_topleft = cam0.rayd[0, :, box0[0], box0[1]]
+                    ray0_o_bottomright = cam0.rayo[0, :, box0[2], box0[3]]
+                    ray0_d_bottomright = cam0.rayd[0, :, box0[2], box0[3]]
+                    ray0_o_bottomleft = cam0.rayo[0, :, box0[2], box0[1]]
+                    ray0_d_bottomleft = cam0.rayd[0, :, box0[2], box0[1]]
+                    ray0_o_topright = cam0.rayo[0, :, box0[0], box0[3]]
+                    ray0_d_topright = cam0.rayd[0, :, box0[0], box0[3]]
                     ## Corner lines of Ray 1
-                    ray1_o_topleft = cam_1.rayo[0, :, box1[0], box1[1]]
-                    ray1_d_topleft = cam_1.rayd[0, :, box1[0], box1[1]]
-                    ray1_o_bottomright = cam_1.rayo[0, :, box1[2], box1[3]]
-                    ray1_d_bottomright = cam_1.rayd[0, :, box1[2], box1[3]]
-                    ray1_o_bottomleft = cam_1.rayo[0, :, box1[2], box1[1]]
-                    ray1_d_bottomleft = cam_1.rayd[0, :, box1[2], box1[1]]
-                    ray1_o_topright = cam_1.rayo[0, :, box1[0], box1[3]]
-                    ray1_d_topright = cam_1.rayd[0, :, box1[0], box1[3]]
-
-                    ipdb.set_trace()
+                    ray1_o_topleft = cam1.rayo[0, :, box1[0], box1[1]]
+                    ray1_d_topleft = cam1.rayd[0, :, box1[0], box1[1]]
+                    ray1_o_bottomright = cam1.rayo[0, :, box1[2], box1[3]]
+                    ray1_d_bottomright = cam1.rayd[0, :, box1[2], box1[3]]
+                    ray1_o_bottomleft = cam1.rayo[0, :, box1[2], box1[1]]
+                    ray1_d_bottomleft = cam1.rayd[0, :, box1[2], box1[1]]
+                    ray1_o_topright = cam1.rayo[0, :, box1[0], box1[3]]
+                    ray1_d_topright = cam1.rayd[0, :, box1[0], box1[3]]
 
                     ## Check for intersections
                     topleft_intersect = self.intersect_lines(
@@ -1128,42 +1149,27 @@ class GaussianModel:
 
                     box3d = [x_min_3d, y_min_3d, z_min_3d, x_max_3d, y_max_3d, z_max_3d]
                     volume3d = (x_max_3d - x_min_3d) * (y_max_3d - y_min_3d) * (z_max_3d - z_min_3d)
-                    # Volume check to filter out too small boxes
-                    if volume3d < min_volume:
-                        continue
-
                     boxes3d.append(box3d)
                     volumes.append(volume3d)
         return boxes3d, volumes
 
     def densify_and_prune(
         self,
+        cams: List[Camera],
+        boxes2d: List[List[int]],
         max_grad: float,
         min_opacity: float,
         extent: float,
         max_screen_size: float,
-        cams: List[Camera],
-        boxes2d: List[List[int]],
         scale_std: float = 1.0,
-        min_volume: float = 1.0,
     ):
         """Densify and prune from MVGS"""
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
         n_g = self.get_xyz.shape[0]  # Memoize number of Gaussians before operations
 
-        start = time.time()
-        boxes3d = self.get_intersection_3d(cams, boxes2d, min_volume=min_volume)
-        end = time.time()
-        print("Time for 3D intersection computation: ", end - start)
-
-        start = time.time()
-        boxes3d2 = self.get_intersection_3d_vectorized(cams, boxes2d, min_volume=min_volume)
-        print("Time for vectorized 3D intersection computation: ", end - start)
-        end = time.time()
-
-        # TODO check which is faster and if results are same
-        ipdb.set_trace()
+        # box_gs, vol_gs = self.get_3d_bounding_box(return_volume=True)
+        boxes3d, volumes3d = self.get_intersection_3d_vectorized(cams, boxes2d)
 
         # Densify in carved out 3D regions of high 2D projected image losses
         self.densify_and_clone(grads, max_grad, extent, boxes3d)

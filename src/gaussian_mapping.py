@@ -733,7 +733,6 @@ class GaussianMapper(object):
         current_loss = mapping_rgbd_loss(image, depth, view, **self.loss_params)
         return current_loss, render_pkg
 
-    # NOTE this is their old implementation with 2 for loops
     def get_cross_ray_boxes_naive(
         self, cams: List[Camera], imgs: List[torch.Tensor], w_box: int = 40, h_box: int = 20
     ) -> Tuple[List, List]:
@@ -805,7 +804,7 @@ class GaussianMapper(object):
             y1 = center_y - h_box // 2
             x2 = x1 + w_box
             y2 = y1 + h_box
-            box = [x1, y1, x2, y2]
+            box = [y1, x1, y2, x2]
             return box, output.max()
 
         boxes, losses = [], []
@@ -918,8 +917,13 @@ class GaussianMapper(object):
             if self.last_idx > self.n_last_frames and prune_densify:
                 # General pruning based on opacity and size + densification with the techniques of MVGS
                 # NOTE since the checks are based on all-pairs within a batch, this is O( Batch_size * (Batch_size - 1) )
-                boxes3d, sorted_frames = self.get_cross_ray_boxes_conv(frames, img_pairs)
+                # FIXME the 3D boxes later are not really metric scale, if our Gaussians are then we have a problem
+                # when we have dense accurate depth, we could use that information to get the correct 3D points
+                # this would simply require to pass a depth buffer for each frame and store the value of the 2d box
+                boxes2d, sorted_frames = self.get_cross_ray_boxes_conv(frames, img_pairs)
+                # boxes3d, sorted_frames = self.get_cross_ray_boxes_naive(frames, img_pairs)
                 augmented_max_grad = self.get_multiview_augmented_grad_threshold(frames)
+                # TODO how often is this really triggered for us?
                 if augmented_max_grad - self.update_params.densify.vanilla.max_grad > 1e-6:
                     print(
                         "Reducing max_grad for densification because some camera pairs in batch are very disbecause some camera pairs in batch are very distantt"
@@ -927,12 +931,12 @@ class GaussianMapper(object):
                     ipdb.set_trace()
 
                 self.gaussians.densify_and_prune(
+                    sorted_frames,
+                    boxes2d,
                     augmented_max_grad,
                     self.update_params.densify.vanilla.min_opacity,
                     self.update_params.densify.vanilla.extent,
                     self.update_params.densify.vanilla.max_screen_size,
-                    sorted_frames,
-                    boxes3d,
                     self.update_params.densify.vanilla.scale_std,
                 )
 
