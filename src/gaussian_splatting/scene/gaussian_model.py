@@ -669,32 +669,44 @@ class GaussianModel:
 
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent, boxes3d: torch.Tensor):
+    # TODO introduce a selective grad check for gaussians selected from boxes3d
+    # TODO use a criterin to reduce the number of gaussians from here
+    def densify_and_clone(
+        self,
+        grads,
+        grad_threshold,
+        scene_extent,
+        boxes3d: Optional[torch.Tensor] = None,
+        tau: float = 0.5,
+        max_num: int = 1000,
+    ):
         """Densify and clone Gaussians which have a large gradient. These are likely
         to not represent the local scene well and should be densified and cloned to better capture the scene.
         There might be Gaussians which do not have a large gradient, but still lead to large 2D errors. These
         Gaussians can be captured by the 3D intersection check. We densify these as well.
         """
-        # Check which Gaussians are in the provided 3D boxes
-        # NOTE chen: I hope this does not create memory issues since we will have [N x num_boxes] tensors
-        mask_x = torch.logical_and(
-            self.get_xyz[:, 0][:, None] > boxes3d[:, 0][None, :],
-            self.get_xyz[:, 0][:, None] < boxes3d[:, 3][None, :],
-        )
-        mask_y = torch.logical_and(
-            self.get_xyz[:, 1][:, None] > boxes3d[:, 1][None, :],
-            self.get_xyz[:, 1][:, None] < boxes3d[:, 4][None, :],
-        )
-        mask_z = torch.logical_and(
-            self.get_xyz[:, 2][:, None] > boxes3d[:, 2][None, :],
-            self.get_xyz[:, 2][:, None] < boxes3d[:, 5][None, :],
-        )
-        # A Gaussian has to satisfy the coordinate conditions in all dimensions for each box
-        mask_xyz = torch.logical_and(mask_x, mask_y)
-        mask_xyz = torch.logical_and(mask_xyz, mask_z)
-        # Reduce to a single mask for each Gaussian, i.e. test if a Gaussian was in any box
-        mask = torch.any(mask_xyz, dim=1)
-        ipdb.set_trace()
+        if boxes3d is not None:
+            # Check which Gaussians are in the provided 3D boxes
+            # NOTE chen: I hope this does not create memory issues since we will have [N x num_boxes] tensors
+            mask_x = torch.logical_and(
+                self.get_xyz[:, 0][:, None] > boxes3d[:, 0][None, :],
+                self.get_xyz[:, 0][:, None] < boxes3d[:, 3][None, :],
+            )
+            mask_y = torch.logical_and(
+                self.get_xyz[:, 1][:, None] > boxes3d[:, 1][None, :],
+                self.get_xyz[:, 1][:, None] < boxes3d[:, 4][None, :],
+            )
+            mask_z = torch.logical_and(
+                self.get_xyz[:, 2][:, None] > boxes3d[:, 2][None, :],
+                self.get_xyz[:, 2][:, None] < boxes3d[:, 5][None, :],
+            )
+            # A Gaussian has to satisfy the coordinate conditions in all dimensions for each box
+            mask_xyz = torch.logical_and(mask_x, mask_y)
+            mask_xyz = torch.logical_and(mask_xyz, mask_z)
+            # Reduce to a single mask for each Gaussian, i.e. test if a Gaussian was in any box
+            mask = torch.any(mask_xyz, dim=1)
+        else:
+            mask = torch.zeros((self.get_xyz.shape[0]), device=self.device, dtype=bool)
 
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
@@ -702,9 +714,28 @@ class GaussianModel:
             selected_pts_mask,
             torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent,
         )
-        # Combine grad_mask and box mask
-        # NOTE this will densify points even with low gradient as long as they are in a 3D cuboid with high 2D errors
-        selected_pts_mask = torch.logical_or(selected_pts_mask, mask)
+
+        # Check the gradients of troublesome Gaussians in the 3D intersections
+        if mask.sum() > 0:
+            # What points come exlusively from the box check?
+            diff = torch.logical_and(mask, torch.logical_not(selected_pts_mask))
+            print(f"3D Intersection check discovered: {diff.sum()} new Gaussians ...")
+            selected_pts_mask2 = torch.where(torch.norm(grads, dim=-1) >= grad_threshold * tau, True, False)
+            selected_pts_mask2 = torch.logical_and(selected_pts_mask2, mask)
+            diff = torch.logical_and(selected_pts_mask2, torch.logical_not(selected_pts_mask))
+            print(f"Using additional: {diff.sum()} Gaussians for densificaton ...")
+            # If this still results in too many Gaussians, only select the ones with the highest gradient
+            # FIXME is this correctly indexing?
+            if selected_pts_mask2.sum() > max_num:
+                top_grads = torch.topk(
+                    torch.norm(grads[selected_pts_mask2], dim=-1), max_num, largest=True, sorted=False
+                ).indices
+                selected_pts_mask2 = torch.zeros_like(selected_pts_mask2)
+                selected_pts_mask2[top_grads] = True
+
+            # Combine grad_mask and box mask
+            selected_pts_mask = torch.logical_or(selected_pts_mask, selected_pts_mask2)
+
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
@@ -948,31 +979,6 @@ class GaussianModel:
         return [h_xyz, h_features_dc, h_features_rest, h_opacity, h_scaling, h_rot]
 
     def intersect_lines(
-        self, ray1_origin: torch.Tensor, ray1_dir: torch.Tensor, ray2_origin: torch.Tensor, ray2_dir: torch.Tensor
-    ) -> torch.Tensor:
-        # Normalize direction vectors
-        ray1_dir, ray2_dir = ray1_dir / torch.norm(ray1_dir), ray2_dir / torch.norm(ray2_dir)
-
-        # Cross product of direction vectors
-        cross_dir = torch.linalg.cross(ray1_dir, ray2_dir)
-        cross_dir_norm = torch.norm(cross_dir)
-
-        # Check if the rays are parallel
-        if cross_dir_norm < 1e-6:
-            return None  # Rays are parallel and do not intersect
-
-        origin_diff = ray2_origin - ray1_origin  # Line between the origins
-        # Calculate the distance along Projection
-        t1 = torch.dot(torch.linalg.cross(origin_diff, ray2_dir), cross_dir) / (cross_dir_norm**2)
-        t2 = torch.dot(torch.linalg.cross(origin_diff, ray1_dir), cross_dir) / (cross_dir_norm**2)
-
-        # Find closest points on each ray
-        closest_point1, closest_point2 = ray1_origin + t1 * ray1_dir, ray2_origin + t2 * ray2_dir
-        # Take midpoint between the two closest points as the intersection point
-        intersection_point = (closest_point1 + closest_point2) / 2.0
-        return intersection_point
-
-    def vect_intersect_lines(
         self,
         ray1_origin: torch.Tensor,
         ray1_dir: torch.Tensor,
@@ -1009,13 +1015,17 @@ class GaussianModel:
         intersection_point[invalid] = torch.zeros(3, device=intersection_point.device)
         return intersection_point
 
-    # NOTE this is x10 faster, but results can be different up to 1e-5
-    def get_intersection_3d_vectorized(self, cams: List[Camera], boxes: List[List[int]]) -> Tuple[List, List]:
+    # NOTE this is x10 faster than original, but results can be different up to 1e-5
+    def get_intersection_3d(self, cams: List[Camera], boxes: List[List[int]]) -> Tuple[List, List]:
         """Given 2D boxes in multiple images with known camera frustum,
         triangulate the box frustrums into 3D and check where they could potentially intersect.
         We carve out this 3D space to understand in which 3D regions we should densify.
         """
         import itertools
+
+        # We need to have at least 2 cameras and 2 boxes to get a 3D region
+        if len(cams) <= 1 or len(boxes) <= 1:
+            return None, None
 
         # Get cam and box pairs without nested loop using itertools
         cam_pairs = [(i, j) for i, j in itertools.combinations(range(len(cams)), 2)]
@@ -1065,16 +1075,14 @@ class GaussianModel:
         ray1_o_topright, ray1_d_topright = torch.stack(ray1_o_topright), torch.stack(ray1_d_topright)
 
         ## Check for intersections
-        topleft_intersect = self.vect_intersect_lines(ray0_o_topleft, ray0_d_topleft, ray1_o_topleft, ray1_d_topleft)
-        bottomright_intersect = self.vect_intersect_lines(
+        topleft_intersect = self.intersect_lines(ray0_o_topleft, ray0_d_topleft, ray1_o_topleft, ray1_d_topleft)
+        bottomright_intersect = self.intersect_lines(
             ray0_o_bottomright, ray0_d_bottomright, ray1_o_bottomright, ray1_d_bottomright
         )
-        bottomleft_interset = self.vect_intersect_lines(
+        bottomleft_interset = self.intersect_lines(
             ray0_o_bottomleft, ray0_d_bottomleft, ray1_o_bottomleft, ray1_d_bottomleft
         )
-        topright_intersect = self.vect_intersect_lines(
-            ray0_o_topright, ray0_d_topright, ray1_o_topright, ray1_d_topright
-        )
+        topright_intersect = self.intersect_lines(ray0_o_topright, ray0_d_topright, ray1_o_topright, ray1_d_topright)
         ## Get actual 3D region from intersections
         region3d = torch.stack(
             [topleft_intersect, bottomright_intersect, bottomleft_interset, topright_intersect], dim=1
@@ -1091,77 +1099,17 @@ class GaussianModel:
         boxes_3d = torch.stack([x_min_3d, y_min_3d, z_min_3d, x_max_3d, y_max_3d, z_max_3d], dim=-1)
         return boxes_3d, volume3d
 
-    def get_intersection_3d(
-        self, cams: List[Camera], boxes: List[List[int]], min_volume: float = 1.0
-    ) -> Tuple[List, List]:
-        """Given 2D boxes in multiple images with known camera frustum,
-        triangulate the box frustrums into 3D and check where they could potentially intersect.
-        We carve out this 3D space to understand in which 3D regions we should densify.
-        """
-        boxes3d, volumes = [], []
-        if cams is not None:
-            for i, cam0 in enumerate(cams):
-                # NOTE since we ordered the pairs, we dont need to go over all pairs here
-                for j, cam1 in enumerate(cams[i + 1 :]):
-                    # Get corresponding boxes
-                    box0, box1 = boxes[i], boxes[i + 1 + j]
-                    ## Corner lines of Ray 0
-                    ray0_o_topleft = cam0.rayo[0, :, box0[0], box0[1]]
-                    ray0_d_topleft = cam0.rayd[0, :, box0[0], box0[1]]
-                    ray0_o_bottomright = cam0.rayo[0, :, box0[2], box0[3]]
-                    ray0_d_bottomright = cam0.rayd[0, :, box0[2], box0[3]]
-                    ray0_o_bottomleft = cam0.rayo[0, :, box0[2], box0[1]]
-                    ray0_d_bottomleft = cam0.rayd[0, :, box0[2], box0[1]]
-                    ray0_o_topright = cam0.rayo[0, :, box0[0], box0[3]]
-                    ray0_d_topright = cam0.rayd[0, :, box0[0], box0[3]]
-                    ## Corner lines of Ray 1
-                    ray1_o_topleft = cam1.rayo[0, :, box1[0], box1[1]]
-                    ray1_d_topleft = cam1.rayd[0, :, box1[0], box1[1]]
-                    ray1_o_bottomright = cam1.rayo[0, :, box1[2], box1[3]]
-                    ray1_d_bottomright = cam1.rayd[0, :, box1[2], box1[3]]
-                    ray1_o_bottomleft = cam1.rayo[0, :, box1[2], box1[1]]
-                    ray1_d_bottomleft = cam1.rayd[0, :, box1[2], box1[1]]
-                    ray1_o_topright = cam1.rayo[0, :, box1[0], box1[3]]
-                    ray1_d_topright = cam1.rayd[0, :, box1[0], box1[3]]
-
-                    ## Check for intersections
-                    topleft_intersect = self.intersect_lines(
-                        ray0_o_topleft, ray0_d_topleft, ray1_o_topleft, ray1_d_topleft
-                    )
-                    bottomright_intersect = self.intersect_lines(
-                        ray0_o_bottomright, ray0_d_bottomright, ray1_o_bottomright, ray1_d_bottomright
-                    )
-                    bottomleft_interset = self.intersect_lines(
-                        ray0_o_bottomleft, ray0_d_bottomleft, ray1_o_bottomleft, ray1_d_bottomleft
-                    )
-                    topright_intersect = self.intersect_lines(
-                        ray0_o_topright, ray0_d_topright, ray1_o_topright, ray1_d_topright
-                    )
-                    ## Get actual 3D region from intersections
-                    region3d = [topleft_intersect, bottomright_intersect, bottomleft_interset, topright_intersect]
-                    if len(region3d) == 0 or None in region3d:
-                        continue
-
-                    region3d = torch.vstack(region3d)
-                    x_min_3d, x_max_3d = torch.min(region3d[:, 0]), torch.max(region3d[:, 0])
-                    y_min_3d, y_max_3d = torch.min(region3d[:, 1]), torch.max(region3d[:, 1])
-                    z_min_3d, z_max_3d = torch.min(region3d[:, 2]), torch.max(region3d[:, 2])
-
-                    box3d = [x_min_3d, y_min_3d, z_min_3d, x_max_3d, y_max_3d, z_max_3d]
-                    volume3d = (x_max_3d - x_min_3d) * (y_max_3d - y_min_3d) * (z_max_3d - z_min_3d)
-                    boxes3d.append(box3d)
-                    volumes.append(volume3d)
-        return boxes3d, volumes
-
     def densify_and_prune(
         self,
-        cams: List[Camera],
-        boxes2d: List[List[int]],
         max_grad: float,
         min_opacity: float,
         extent: float,
         max_screen_size: float,
         scale_std: float = 1.0,
+        tau: float = 0.5,
+        max_num: float = 1000,
+        cams: Optional[List[Camera]] = None,
+        boxes2d: Optional[List[List[int]]] = None,
     ):
         """Densify and prune from MVGS"""
         grads = self.xyz_gradient_accum / self.denom
@@ -1169,10 +1117,13 @@ class GaussianModel:
         n_g = self.get_xyz.shape[0]  # Memoize number of Gaussians before operations
 
         # box_gs, vol_gs = self.get_3d_bounding_box(return_volume=True)
-        boxes3d, volumes3d = self.get_intersection_3d_vectorized(cams, boxes2d)
+        if boxes2d is not None and cams is not None:
+            boxes3d, volumes3d = self.get_intersection_3d(cams, boxes2d)
+        else:
+            boxes3d = None
 
         # Densify in carved out 3D regions of high 2D projected image losses
-        self.densify_and_clone(grads, max_grad, extent, boxes3d)
+        self.densify_and_clone(grads, max_grad, extent, boxes3d, tau, max_num)
         # Vanilla Densify and Split based on gradients and extent
         self.densify_and_split(grads, max_grad, extent, scale_std=scale_std)
 

@@ -44,17 +44,19 @@ NOTE this could a be standalone SLAM system itself, but we use it on top of an o
 """
 What is different here with the techniques of MVGS?
 - Each camera has a ray attached to it at the camera center with the viewing direction. After 
-an update from the Tracking system, this of course gets updated as well
-- Surprisingly the biggest improvement of MVGS simply comes from introcing batch optimizations instead of single images (~ +0.7PSNR)
+an update from the Tracking system, this of course gets updated as well.
+- Surprisingly the biggest improvement of MVGS simply comes from introducing batch optimizations instead of single images (~ +0.7PSNR)
 I was not aware that vanilla pipelines only train with a single image instead of multiples. This is trivial and already the case in our framework :/
 - The next biggest improvement comes from a multi-view densification strategy. This seems to be one of the smartest nuggets from the paper, as it simply performs a 
 3D intersection test of hard regions. 
     1. For each camera in the batch: Render the map and compute the error map. Take a fixed size box (e.g. 20 x 40) with the highest avg. error. 
         -> We extract 2d boxes of troublesome regions for each frame
-    2. Since we know the ray for the cameras, we can extrapolate each 2D box into 3D space with the frustrum
+    2. Since we know the ray for the cameras, we can extrapolate each 2D box into 3D space with a frustrum
     3. For each camera pair, do a 3D intersection test of the frustrums. Extract the 3D region of that intersection
     4. Densify more in troublesome 3D regions, since we carved out this space we should quickly find troublesome areas. 
     This technique also seems to give an additional gain of ~ 0.4PSNR. The information itself should however already be in the gradients.
+    When analyzing this in practice, it turns out that actually a lot of Gaussians in these 3D regions in fact DO NOT HAVE a gradient > max_grad threshold. 
+    This therefore introduces additional information into the system.
 - Further improvement is gained by setting an adapted threshold (They call this multi-view augmented densification): 
     - For each batch, we can compute pairwise distances between the cameras. This will indicate if the cameras 
     are very different from each other. In case they are, the grad_threshold is reduced which will lead to a denser cloning during densification.
@@ -70,6 +72,19 @@ leading to a large increase in Gaussians. We might have to instead use smaller b
 They additionally use a multi-scale and multi-camera approach, where they train on an image pyramid and switch up the camera settings to get 
 a robust model. I believe that this only leads to faster covergence. The paper only reports a small gain of ~ 0.1 PSNR (this is our training noise lol)
 This is not worth it and we can already compute a multi-scale loss for the RGBD loss anyways. This cannot be worth it compute and memory wise.
+
+NOTE (update): There are multiple problems with the techniques in its form! 
+    1. The adaptive threshold gets almost never triggered for us.
+    2. The 3D intersection densification introduces additional Gaussians, however since there is no criterion to stop this it will simply 
+    keep adding Gaussians until we OOM. This makes sense, as some areas will always be harder than others and if we only check for the 2D boxes with the highest loss 
+    we will always get a 3D box. Furthermore, we get more and more Gaussians as this goes on, so there will always be an increasing number of Gaussians in the 3D space.
+- We therefore need to think about limiting this.
+    i) Only do the intersection tests for regions that are 'hard', i.e. the have the highest loss of the frame, but they also satisfy a threshold. This would allow 
+    to stop once we have converged the scene. 
+    ii) TODO try to limit the number of Gaussians we add from this by ordering according to their gradients and only adding a fixed amount
+    iii) TODO use the adaptive threshold on the 3D box Gaussians, i.e. these are allowed to be densified if they have grad > threshold / 2
+All in all the results form the MVGS paper make sense, but they are likely not as good as they seem. They never show the number of Gaussians produced. 
+I would not be surprised if their strategy simply leads to more Gaussians than the vanilla 3DGS.
 """
 
 
@@ -733,45 +748,16 @@ class GaussianMapper(object):
         current_loss = mapping_rgbd_loss(image, depth, view, **self.loss_params)
         return current_loss, render_pkg
 
-    def get_cross_ray_boxes_naive(
-        self, cams: List[Camera], imgs: List[torch.Tensor], w_box: int = 40, h_box: int = 20
+    def get_2dboxes_w_highest_err(
+        self, cams: List[Camera], w_box: int = 40, h_box: int = 20, min_err: float = 0.5
     ) -> Tuple[List, List]:
         """Perform a cross-ray check. This is performed in multiple steps:
         1. Calculate the  loss maps of multiple views and locate regions with high error in a sliding window
         2. Cast ray from these regions, i.e. 4 rays per window.
         3. Get intersection points of the rays per perspective to form 3D cuboids of overlap
-        """
-        boxes, losses = [], []
-        for img_pair in imgs:
-            img_pred, img_gt = img_pair
-            l1map = torch.abs(img_gt - img_pred).mean(dim=0)
-            h, w = l1map.shape
-            loss_max = 0
-            max_id = (0, 0)
-            for i in range(0, h - h_box, h_box):
-                for j in range(0, w - w_box, w_box):
-                    loss_region = torch.mean(l1map[i : i + h_box, j : j + w_box])
-                    if loss_region > loss_max:
-                        loss_max = loss_region
-                        max_id = [i, j]
-            losses.append(loss_max)
-            i, j = max_id
-            box = [i, j, i + h_box, j + w_box]
-            boxes.append(box)
 
-        # Sort cameras by loss
-        sorted_indices = sorted(range(len(losses)), key=lambda i: losses[i], reverse=True)
-        sorted_boxes = [boxes[i] for i in sorted_indices]
-        sorted_cams = [cams[i] for i in sorted_indices]
-        return sorted_boxes, sorted_cams
-
-    def get_cross_ray_boxes_conv(
-        self, cams: List[Camera], imgs: List[torch.Tensor], w_box: int = 40, h_box: int = 20
-    ) -> Tuple[List, List]:
-        """Perform a cross-ray check. This is performed in multiple steps:
-        1. Calculate the  loss maps of multiple views and locate regions with high error in a sliding window
-        2. Cast ray from these regions, i.e. 4 rays per window.
-        3. Get intersection points of the rays per perspective to form 3D cuboids of overlap
+        NOTE: we introduce the min_err criterion, because if we always densify even when the images were fitted perfectly,
+        then we will quickly OOM. This should only be used to find actual discrepencies.
         """
 
         def convolution_sliding_window(img: torch.Tensor, h_box: int, w_box: int) -> Tuple[List[int], float]:
@@ -808,13 +794,22 @@ class GaussianMapper(object):
             return box, output.max()
 
         boxes, losses = [], []
-        for img_pair in imgs:
-            img_pred, img_gt = img_pair
-            # FIXME since we can also run in rgbd mode it would make more sense to include the depth difference here as well!
+        for view in cams:
+            _, render_pkg = self.render_compare(view)
+            if render_pkg is None:
+                self.info(f"Skipping view {view.uid} as no gaussians are present ...")
+                continue
+            # Collect image pairs for loss computations
+            img_pred, img_gt = render_pkg["render"], view.original_image
+            # TODO since we can also run in rgbd mode it would make more sense to include the depth difference here as well!
             l1map = torch.abs(img_gt - img_pred).mean(dim=0, keepdim=True)
             box, l1_max = convolution_sliding_window(l1map, h_box, w_box)
-            losses.append(l1_max)
-            boxes.append(box)
+            # If we were to always densify, we would quickly OOM. This way we only do the check on regions that are obviously not correct
+            if l1_max < min_err:
+                continue
+            else:
+                losses.append(l1_max)
+                boxes.append(box)
 
         # Sort data by loss
         sorted_indices = sorted(range(len(losses)), key=lambda i: losses[i], reverse=True)
@@ -822,6 +817,7 @@ class GaussianMapper(object):
         sorted_cams = [cams[i] for i in sorted_indices]
         return sorted_boxes, sorted_cams
 
+    # NOTE chen: this is pretty useless for us, as it will just get triggered all the time
     def get_multiview_augmented_grad_threshold(self, cams: List[Camera], tau: float = 1.0):
         """MVGS uses an adaptive threshold to increase the densification in areas where needed.
         For this they simply check if two training views are strongly distinct based on their camera position.
@@ -871,9 +867,6 @@ class GaussianMapper(object):
             self.gaussians.increment_n_opt_counter(visibility=render_pkg["visibility_filter"])
             self.n_optimized[view.uid] += 1
 
-            # Collect image pairs for loss computations
-            img_pairs.append([render_pkg["render"], view.original_image])
-
             # Accumulate for after loss backpropagation
             visibility_filter_acm.append(render_pkg["visibility_filter"])
             viewspace_point_tensor_acm.append(render_pkg["viewspace_points"])
@@ -906,38 +899,35 @@ class GaussianMapper(object):
                 )
                 # NOTE chen: we dont necessarily get better results when using the gradient averaging techique from Abs GS
                 # (It for sure introduces more Gaussians somehow)
+                if self.update_params.densify.accumulate_pixels:
+                    pixels = touched_acm[idx]
+                else:
+                    pixels = None
                 self.gaussians.add_densification_stats(
-                    viewspace_point_tensor_acm[idx],
-                    visibility_filter_acm[idx],
-                    # touched_acm[idx],
-                    None,
+                    viewspace_point_tensor_acm[idx], visibility_filter_acm[idx], pixels
                 )
 
             # Prune and Densify
             if self.last_idx > self.n_last_frames and prune_densify:
-                # General pruning based on opacity and size + densification with the techniques of MVGS
-                # NOTE since the checks are based on all-pairs within a batch, this is O( Batch_size * (Batch_size - 1) )
-                # FIXME the 3D boxes later are not really metric scale, if our Gaussians are then we have a problem
-                # when we have dense accurate depth, we could use that information to get the correct 3D points
-                # this would simply require to pass a depth buffer for each frame and store the value of the 2d box
-                boxes2d, sorted_frames = self.get_cross_ray_boxes_conv(frames, img_pairs)
-                # boxes3d, sorted_frames = self.get_cross_ray_boxes_naive(frames, img_pairs)
-                augmented_max_grad = self.get_multiview_augmented_grad_threshold(frames)
-                # TODO how often is this really triggered for us?
-                if augmented_max_grad - self.update_params.densify.vanilla.max_grad > 1e-6:
-                    print(
-                        "Reducing max_grad for densification because some camera pairs in batch are very disbecause some camera pairs in batch are very distantt"
+                # Use the MVGS techniques to select more Gaussians for densification independent of the gradient
+                if self.update_params.densify.use_mvgs:
+                    random_frames, _ = self.draw_random_frames(
+                        self.cameras, weights=None, n_frames=self.update_params.densify.mvgs.n_frames
                     )
-                    ipdb.set_trace()
-
+                    # General pruning based on opacity and size + densification with the techniques of MVGS
+                    ht_box = random_frames[0].image_height // self.update_params.densify.mvgs.box_quotient
+                    wd_box = random_frames[0].image_width // self.update_params.densify.mvgs.box_quotient
+                    boxes2d, sorted_frames = self.get_2dboxes_w_highest_err(
+                        random_frames, w_box=wd_box, h_box=ht_box, min_err=self.update_params.densify.mvgs.min_loss
+                    )
+                else:
+                    boxes2d, sorted_frames = None, None
                 self.gaussians.densify_and_prune(
-                    sorted_frames,
-                    boxes2d,
-                    augmented_max_grad,
-                    self.update_params.densify.vanilla.min_opacity,
-                    self.update_params.densify.vanilla.extent,
-                    self.update_params.densify.vanilla.max_screen_size,
-                    self.update_params.densify.vanilla.scale_std,
+                    cams=sorted_frames,
+                    boxes2d=boxes2d,
+                    tau=self.update_params.densify.mvgs.tau,
+                    max_num=self.update_params.densify.mvgs.max_number,
+                    **self.update_params.densify.vanilla,
                 )
 
         ### Update states
@@ -1012,7 +1002,26 @@ class GaussianMapper(object):
         end = time.time()
         self.info(f"({mode}) Covisibility pruning took {(end - start):.2f}s, pruned: {to_prune.sum()} Gaussians")
 
-    def select_keyframes(self, random_weights: Optional[str] = None):
+    def draw_random_frames(
+        self, cams: List[Camera], weights: Optional[str] = None, n_frames: int = 10
+    ) -> Tuple[List[Camera], np.ndarray]:
+        # Just return all of them in case we have less than n_frames
+        if len(cams) <= n_frames:
+            return cams, np.arange(len(cams))
+
+        if weights is not None:
+            assert len(weights) == len(
+                cams
+            ), f"Weights need to be the same length ({len(weights)}) as the number of frames ({len(cams)})"
+            to_draw = np.arange(len(cams))  # Indices we can draw from
+            random_idx = list(WeightedRandomSampler(weights, n_frames, replacement=False))
+            random_idx = to_draw[random_idx]
+        else:
+            random_idx = np.random.choice(len(cams), n_frames, replace=False)
+        random_frames = [cams[i] for i in random_idx]
+        return random_frames, random_idx
+
+    def select_keyframes(self, weighting_strategy: Optional[str] = None):
         """Select the last n1 frames and n2 other random frames from all.
         If with_random_weights is set, we assign a higher sampling probability to keyframes, that have not yet been
         optimized a lot. This is measured by self.n_optimized.
@@ -1021,33 +1030,35 @@ class GaussianMapper(object):
 
         random_weights:
             If set to "visited", we assign higher probability to frames that have been visited less often.
-            If set
+            If set to "loss", we assign higher probability to frames that had a higher loss from the last optimization
+            If set to None, we draw uniformly from all frames.
         """
+        # If the batch size is too big, we can just select all frames
         if len(self.cameras) <= self.n_last_frames + self.n_rand_frames:
             keyframes = self.cameras
             keyframes_idx = np.arange(len(self.cameras))
         else:
+            # Get the last n1 frames and their indices
             last_window = self.cameras[-self.n_last_frames :]
             window_idx = np.arange(len(self.cameras))[-self.n_last_frames :]
-            if self.n_rand_frames > 0:
-                if random_weights == "visited":
-                    to_draw = np.arange(len(self.cameras) - self.n_last_frames)  # Indices we can draw from
-                    weights = [self.n_optimized[idx] / self.mapping_iters + 1 for idx in to_draw]
+
+            rest = self.cameras[: -self.n_last_frames]
+            rest_idx = np.arange(len(self.cameras))[: -self.n_last_frames]
+            # Take additional random frames on top
+            if self.n_rand_frames > 0 and len(rest) > 0:
+                if weighting_strategy == "visited":
+                    to_draw_ids = [cam.uid for cam in rest]  # Sanity check in case we dont have ordered cams
+                    weights = [self.n_optimized[idx] for idx in to_draw_ids]
                     weights = [1 / w for w in weights]  # Invert to get higher probability for less visited frames
-                    random_idx = list(WeightedRandomSampler(weights, self.n_rand_frames, replacement=False))
-                    random_idx = to_draw[random_idx]
-                elif random_weights == "loss":
-                    to_draw = np.arange(len(self.cameras) - self.n_last_frames)  # Indices we can draw from
-                    weights = [self.last_frame_loss[idx] for idx in to_draw]
-                    random_idx = list(WeightedRandomSampler(weights, self.n_rand_frames, replacement=False))
-                    random_idx = to_draw[random_idx]
+                elif weighting_strategy == "loss":
+                    to_draw_ids = [cam.uid for cam in rest]  # Sanity check in case we dont have ordered cams
+                    weights = [self.last_frame_loss[idx] for idx in to_draw_ids]
                 else:
-                    random_idx = np.random.choice(
-                        len(self.cameras) - self.n_last_frames, self.n_rand_frames, replace=False
-                    )
-                random_frames = [self.cameras[i] for i in random_idx]
+                    weights = None
+
+                random_frames, random_idx = self.draw_random_frames(rest, weights=weights, n_frames=self.n_rand_frames)
                 keyframes = last_window + random_frames
-                keyframes_idx = np.concatenate([window_idx, random_idx])
+                keyframes_idx = np.concatenate([window_idx, rest_idx[random_idx]])
             else:
                 keyframes = last_window
                 keyframes_idx = window_idx
@@ -1258,14 +1269,10 @@ class GaussianMapper(object):
             do_densify = (
                 iter % self.update_params.prune_densify_every == 0 and iter < self.update_params.prune_densify_until
             )
-
-            # FIXME chen: we might have to do this with smaller batches here when using the MVGS techniques
-            # they somehow consume already large amounts of memory with batches <= 10.
-            # (We sometimes have batches of size 50)
             # TODO determine the visual overlap between frames in a covisibility graph
-            frames = (
-                self.select_keyframes(random_weights=self.update_params.random_selection_weights)[0] + self.new_cameras
-            )
+            # (We sometimes have batches of size 50)
+            old_keyframes = self.select_keyframes(weighting_strategy=self.update_params.random_selection_strategy)[0]
+            frames = old_keyframes + self.new_cameras
             # Prune and densify with vanilla 3DGS strategy
             loss = self.mapping_step(
                 iter, frames, prune_densify=do_densify, optimize_poses=self.update_params.optimize_poses
@@ -1339,7 +1346,7 @@ class GaussianMapper(object):
             self.update_params.pruning.covisibility.dont_prune_latest = 0
             self.update_params.pruning.covisibility.last = 0
             # Run another call to catch the last batch of keyframes
-            self._update(iters=self.mapping_iters + 10, delay_to_tracking=False)
+            self._update(iters=self.mapping_iters, delay_to_tracking=False)
             self.count += 1
 
             self._last_call(mapping_queue=mapping_queue, received_item=received_item)

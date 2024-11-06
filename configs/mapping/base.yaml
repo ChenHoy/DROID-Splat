@@ -10,7 +10,7 @@ online_opt:
   n_last_frames: 10 # Always optimize the last n frames
   n_rand_frames: 15 # Optimize random global frames on top
   # If chosen "loss" or "visited", we assign higher weights to frames with higher loss or that have been visited less
-  random_selection_weights: null # Strategy how to select random frames
+  random_selection_strategy: null # Choices are: ["loss", "visited", null], in case of null we uniformly sample
 
   batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
   batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
@@ -25,8 +25,8 @@ online_opt:
       # -> Use 'new' for faster performance
       mode: "new" # ["abs", "new"] How to prune: either check for covisible frames everywhere or just in the last n frames
       last: 10 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
-      dont_prune_latest: 0 # Never prune the latest Gaussians as this leads to unnecessary add / delete
       visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
+      dont_prune_latest: 0 # never prune the most recent k frames (Hint: avoids to always prune and densify needlessly)
 
   # How often to prune and densify gaussians during optimization
   prune_densify_every: 5 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
@@ -34,20 +34,22 @@ online_opt:
 
   ## Densification parameters
   densify:
-    # Densify Gaussians based on opacity only after k Mapper updates from https://arxiv.org/pdf/2403.12535
-    use_opacity: False # Use opacity based densification
-    opacity:
-      after: 5 # NOTE we usually run the Mapper ~30-40 times on normal videos
-      # NOTE we limit this because in unmapped areas, we suddenly would add 100k Gaussians
-      max_pixels: 2000 # Maximum number of pixels to densify
-      th: 0.05 # Opacity value below which we densify
-
+    accumulate_pixels: True # Take the number of pixels a Gaussian has touched into consideration
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
       max_grad: 0.001 # Gaussians with gradients above this are split (smaller -> denser)
       extent: 6  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
       min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
       max_screen_size: 10 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
+    use_mvgs: True # Use the 3D intersections of multiple views to densify as done in MVGS paper
+    mvgs: 
+      n_frames: 10 # Perform this for just some n random frames
+      box_quotient: 32 # Take small 2D boxes of [H // box_quotient, W // box_quotient] pixels for densification
+      tau: 0.5 # Change the grad threshold for 3D intersected Gaussians
+      # NOTE this avoids a deadlock, where we keep splitting Gaussians since the loss will never be 0.0!
+      min_loss: 0.4 # The highest 2D image loss of a box needs to be higher than this to consider
+      # NOTE for this we simply sort the selected 3D points according to their gradient
+      max_number: 10000 # Maximum number of Gaussians to densify based on this criterion
     
   # How to Filter the Tracking Map before feeding into Mapper
   filter: # Parameter for filtering incoming points from the SLAM system
@@ -118,12 +120,6 @@ refinement:
   densify_until: 250 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
 
   densify:
-    # Densify Gaussians based on opacity only after k Mapper updates
-    use_opacity: False # Use opacity based densification
-    opacity:
-      max_pixels: 10000 # Maximum number of pixels to densify
-      th: 0.01 # Opacity value below which we densify
-
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
       max_grad: 0.005 # Gaussians with gradients above this are split (smaller -> denser)
