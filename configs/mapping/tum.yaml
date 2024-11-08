@@ -62,6 +62,6 @@ loss:
 
 # Parameters for transfer SLAM -> Renderer
 input:
-  pcd_downsample_init: 16 # This is a constant downsampling factor
+  pcd_downsample_init: 32 # This is a constant downsampling factor
   pcd_downsample: 128 # You ideally have ~5-10k points per frame
   point_size: 0.02

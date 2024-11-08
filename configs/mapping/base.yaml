@@ -6,10 +6,10 @@ save_renders: False # Store some rendered images for debugging
 # Hyperparameters for the Monte Carlo Markov Chain model
 # FIXME chen: the cap_max should be different each scene, i.e. we could match this to the averages from previous experiments so its comparable
 mcmc:
-  cap_max: 150000 # Maximum number of Gaussians in the map
-  noise_lr: 5e5 # TODO is this actually 5e-5?
-  opacity_reg: 0.01
-  scale_reg: 0.01
+  cap_max: 60000 # Maximum number of Gaussians in the map
+  noise_lr: 1e4 # original: 5e5
+  opacity_reg: 0.1
+  scale_reg: 0.1
 
 # Online Optimization
 online_opt:
@@ -27,7 +27,7 @@ online_opt:
   ## Strategy for adding / pruning Gaussians
   prune_every: 4 # Covisibility and opacity based pruning
   pruning:
-    use_covisibility: True
+    use_covisibility: False
     covisibility:
       # NOTE: Using the absolute visibility check is more wasteful as we need to count the visiblity of each Gaussian!
       # -> Use 'new' for faster performance
@@ -85,7 +85,7 @@ loss:
   # Decide which terms to use
   supervise_with_prior: True # Use the prior for supervision. If not, then use the current filtered map from SLAM (Hint: this is usually better as metrics are computed on all pixels)
   with_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
-  with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
+  with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
   with_depth_smoothness: False # Similarity loss between depth and image gradients
   use_ms_ssim: False # Multi-Scale SSIM loss (Hint: This improves mainly PSNR at the cost of slightly worse LPIPS and L1)
   depth_func: l1 # 'l1', 'log_l1', 'l1_huber', 'pearson' (Hint: We achieved best results simply with l1)
