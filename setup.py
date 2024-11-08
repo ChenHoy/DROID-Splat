@@ -95,21 +95,24 @@ setup(
     package_dir={"": "thirdparty/diff-gaussian-rasterization-mcmc"},
     ext_modules=[
         CUDAExtension(
-            name="diff_gaussian_rasterization._C",
+            name="diff_gaussian_rasterization_mcmc._C",
             sources=[
                 "thirdparty/diff-gaussian-rasterization-mcmc/cuda_rasterizer/rasterizer_impl.cu",
                 "thirdparty/diff-gaussian-rasterization-mcmc/cuda_rasterizer/forward.cu",
                 "thirdparty/diff-gaussian-rasterization-mcmc/cuda_rasterizer/backward.cu",
+                "thirdparty/diff-gaussian-rasterization-mcmc/cuda_rasterizer/utils.cu",
                 "thirdparty/diff-gaussian-rasterization-mcmc/rasterize_points.cu",
                 "thirdparty/diff-gaussian-rasterization-mcmc/ext.cpp",
             ],
             extra_compile_args={
                 "nvcc": [
+                    "-Xcompiler",
+                    "-fno-gnu-unique",
                     "-I"
                     + os.path.join(
                         os.path.dirname(os.path.abspath(__file__)),
                         "thirdparty/diff-gaussian-rasterization-mcmc/third_party/glm/",
-                    )
+                    ),
                 ]
             },
         )

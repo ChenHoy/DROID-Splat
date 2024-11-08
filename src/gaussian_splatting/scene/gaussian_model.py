@@ -600,7 +600,6 @@ class GaussianModel:
         self.denom = self.denom[valid_points_mask]
 
         self.max_radii2D = self.max_radii2D[valid_points_mask]
-        # FIXME highly suspect of creating memory bug
         # raises sometimes RuntimeError: out_ptr == out_accessor[thread_count_nonzero[tid + 1]].data()
         self.unique_kfIDs = self.unique_kfIDs[valid_points_mask]
         self.n_obs = self.n_obs[valid_points_mask]
@@ -1015,6 +1014,7 @@ class GaussianModel:
         ratio = torch.bincount(sampled_idxs).unsqueeze(-1)
         return sampled_idxs, ratio
 
+    @torch.no_grad()
     def relocate_gs(self, dead_mask=None):
 
         if dead_mask.sum() == 0:
@@ -1045,6 +1045,7 @@ class GaussianModel:
 
         self.replace_tensors_to_optimizer(inds=reinit_idx)
 
+    @torch.no_grad()
     def add_new_gs(self, cap_max):
         current_num_points = self._opacity.shape[0]
         target_num = min(cap_max, int(1.05 * current_num_points))
@@ -1066,6 +1067,18 @@ class GaussianModel:
         new_unique_kfIDs = self.unique_kfIDs[add_idx]
         new_n_obs = self.n_obs[add_idx]  # FIXME should this be reinitialized to zero, as the Gaussian is newly born?
         new_n_opt = self.n_optimized[add_idx]
+
+        # NOTE due to reset_params = False the size of xyz_gradient_accum and denom will not have the correct shape
+        # -> this is problematic for covisibility pruning
+        # HACK manually concatenate these attributes and see how this works
+        # -> This does not have any effect on the MCMC strategy
+        new_xyz_gradient_accum = self.xyz_gradient_accum[add_idx]
+        new_denom = self.denom[add_idx]
+        new_max_radii2D = self.max_radii2D[add_idx]
+        # Concatenate
+        self.xyz_gradient_accum = torch.cat((self.xyz_gradient_accum, new_xyz_gradient_accum))
+        self.denom = torch.cat((self.denom, new_denom))
+        self.max_radii2D = torch.cat((self.max_radii2D, new_max_radii2D))
 
         self.densification_postfix(
             new_xyz,

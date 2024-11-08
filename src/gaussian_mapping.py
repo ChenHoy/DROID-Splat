@@ -698,6 +698,7 @@ class GaussianMapper(object):
                 view.cam_rot_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
                 view.cam_trans_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
 
+    @torch.no_grad()
     def apply_noise(self, xyz_lr: float) -> None:
         def op_sigmoid(x, k=100, x0=0.995):
             return 1 / (1 + torch.exp(-k * (x - x0)))
@@ -734,6 +735,7 @@ class GaussianMapper(object):
         if optimize_poses:
             pose_optimizer = self.get_pose_optimizer(frames)
 
+        xyz_lr = self.gaussians.update_learning_rate(iter)
         loss = 0.0
         for view in frames:
             current_loss, render_pkg = self.render_compare(view)
@@ -758,11 +760,10 @@ class GaussianMapper(object):
         # the weight should be adjusted by the batch size?
         loss = loss + self.mcmc_params.opacity_reg * torch.abs(self.gaussians.get_opacity).mean()
         loss = loss + self.mcmc_params.scale_reg * torch.abs(self.gaussians.get_scaling).mean()
-
         # Regularizer: Punish anisotropic Gaussians
-        # scaling = self.gaussians.get_scaling
-        # isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-        # loss += self.loss_params.beta1 * isotropic_loss.mean()
+        scaling = self.gaussians.get_scaling
+        isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
+        loss += self.loss_params.beta1 * isotropic_loss.mean()
 
         # NOTE chen: this can happen we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
@@ -778,8 +779,7 @@ class GaussianMapper(object):
 
         ### Update states
         self.gaussians.optimizer.step()
-        self.gaussians.optimizer.zero_grad()
-        xyz_lr = self.gaussians.update_learning_rate(iter)
+        self.gaussians.optimizer.zero_grad(set_to_none=True)
 
         ### Add noise to the Gaussians
         # FIXME this could be configured until a certain iteration or mapping.count() is reached
@@ -827,8 +827,6 @@ class GaussianMapper(object):
         self.gaussians.n_obs.fill_(0)  # Reset observation count
         for view in frames:
             render_pkg = render(view, self.gaussians, self.pipeline_params, self.background)
-            # FIXME does is_used work similar to n_touched? Check if this simply means that a Gaussian was used for rendering this frame
-            # if we have this information for each frame, then we can replicate the same covisibility checks
             visibility = (render_pkg["is_used"] > 0).long()
             occ_aware_visibility[view.uid] = visibility
             # Count when at least one pixel was touched by the Gaussian
