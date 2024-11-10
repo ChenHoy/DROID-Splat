@@ -592,7 +592,7 @@ def eval_rendering(
                 loss_func = ScaleAndShiftInvariantLoss()
             else:
                 loss_func = l1_loss
-            depth_loss = loss_func(depth_est, gt_depth, valid_depth)
+            depth_loss = loss_func(depth_est, gt_depth, mask=valid_depth)
             depth_l1.append(depth_loss.item())
 
     plot_metric_statistics(psnr_array, ssim_array, lpips_array, plot_dir)
