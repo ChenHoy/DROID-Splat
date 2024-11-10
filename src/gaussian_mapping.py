@@ -770,7 +770,6 @@ class GaussianMapper(object):
         loss.backward()
 
         ### Maybe Densify and Prune before update
-        # TODO we could combine monte-carlo and vanilla updates if wanted, but I think this would be stupid
         if self.last_idx > self.n_last_frames and prune_densify:
             # TODO why is this threshold for opacity not configurable?
             dead_mask = (self.gaussians.get_opacity <= 0.005).squeeze(-1)
@@ -1129,9 +1128,16 @@ class GaussianMapper(object):
 
         ### Prune unreliable Gaussians
         if len(self.iteration_info) % self.update_params.prune_every == 0 and delay_to_tracking:
+            # Gaussians should be visible in multiple frames
             if self.update_params.pruning.use_covisibility:
-                # Gaussians should be visible in multiple frames
                 self.covisibility_pruning(**self.update_params.pruning.covisibility)
+
+            # Gaussians should satisfy a certain absolute density, i.e. nearest neighbor distance < eps
+            if self.update_params.pruning.use_floaters:
+                start = time.time()
+                floaters = self.gaussians.prune_floaters(**self.update_params.pruning.floaters)
+                end = time.time()
+                self.info(f"(Floater) pruning took {(end - start):.2f}s, pruned: {floaters.sum()} floaters")
 
         ### Feedback new state of map to Tracker
         if (self.feedback_poses or self.feedback_disps) and self.count > self.feedback_params.warmup:

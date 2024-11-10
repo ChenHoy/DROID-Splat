@@ -4,6 +4,12 @@ defaults:
 warmup: 10 # Wait until tracking gets to this frame
 delay: 5 # Delay between tracking and mapping (This should be >= 2, because else )
 
+mcmc:
+  cap_max: 250000 # Maximum number of Gaussians in the map
+  noise_lr: 1e4 # original: 5e5
+  opacity_reg: 0.1
+  scale_reg: 0.1
+
 # Online Optimization
 online_opt:
   ## Local sliding optimization window
@@ -12,12 +18,18 @@ online_opt:
   n_rand_frames: 15 # Optimize random global frames on top
 
   ## Strategy for adding / pruning Gaussians
-  prune_every: 5 # Covisibility and opacity based pruning
+  prune_every: 4 # Covisibility and opacity based pruning
   pruning:
     use_covisibility: True
     covisibility:
       mode: "new" # ["abs", "new"] How to prune: either check for covisible frames everywhere or just in the last n frames
-      visibility_th: 3 # Gaussians not visible by at least this many frames are pruned
+      visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
+
+    use_floaters: True
+    # This is a proxy for density
+    floaters:
+      search_radius: 0.5 # Search radius for fixed radius nearest neighbor search
+      min_nn_distance: 0.05 # Minimum distance to the nearest neighbor for pruning
 
   # How often to prune and densify gaussians during optimization
   prune_densify_every: 4 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
@@ -36,7 +48,7 @@ online_opt:
   filter: # Parameter for filtering incoming points from the SLAM system
     multiview: True # Only initialize Gaussians that are consistent in multiple views
     mv_count_th: 2 # Pixels need to be consistent within bin_thresh distance across these k views
-    bin_th: 0.05 # Distance between points for binning, this depends on the scene scale, so be careful!
+    bin_th: 0.1 # Distance between points for binning, this depends on the scene scale, so be careful!
     min_disp_th: 0.05  # Relative to distribution, i.e. reject the lowest 1%
     hard_disp_th: 0.2 # Absolute, i.e. reject depth > 5m
     uncertainty: True # Only use very certain points for intializing Gaussians
@@ -63,17 +75,21 @@ opt_params:
   position_lr_max_steps: 10 # Default MonoGS: 30000
 
 loss:
-  # Weights
-  alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth
-  alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
-  beta1: 10.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
   # Decide which terms to use
-  supervise_with_prior: False # Use the prior for supervision. If not, then use the current filtered map from SLAM
+  supervise_with_prior: True # Use the prior for supervision. If not, then use the current filtered map from SLAM (Hint: this is usually better as metrics are computed on all pixels)
   with_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
-  with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
-  with_depth_smoothness: False # Similarity loss between depth and image gradients
+  with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
+  with_depth_smoothness: True # Similarity loss between depth and image gradients
+  use_ms_ssim: False # Multi-Scale SSIM loss (Hint: This improves mainly PSNR at the cost of slightly worse LPIPS and L1)
+  depth_func: l1 # 'l1', 'log_l1', 'l1_huber', 'pearson' (Hint: We achieved best results simply with l1)
+
+  # Weights
+  alpha1: 0.8 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
+  beta1: 5.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
+  beta2: 0.001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
 # Parameters for transfer SLAM -> Renderer
 input:
-  pcd_downsample_init: 4 # This is a constant downsampling factor
-  pcd_downsample: 32 # You ideally have ~5-10k points per frame
+  pcd_downsample_init: 32 # This is a constant downsampling factor
+  pcd_downsample: 64 # You ideally have ~5-10k points per frame

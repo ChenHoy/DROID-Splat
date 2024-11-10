@@ -36,6 +36,12 @@ online_opt:
       visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
       dont_prune_latest: 0 # never prune the most recent k frames (Hint: avoids to always prune and densify needlessly)
 
+    use_floaters: False
+    # This is a proxy for density
+    floaters:
+      search_radius: 0.5 # Search radius for fixed radius nearest neighbor search
+      min_nn_distance: 0.05 # Minimum distance to the nearest neighbor for pruning
+
   # How often to prune and densify gaussians during optimization
   prune_densify_every: 5 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
   prune_densify_until: 20 # dont do this after this iteration
@@ -145,7 +151,7 @@ feedback:
 # Parameters for transfer SLAM -> Renderer
 input:
   sensor_type: 'depth'
-  pcd_downsample_init: 1 # This is a constant downsampling factor
+  pcd_downsample_init: 32 # This is a constant downsampling factor
   pcd_downsample: 16 # You ideally have ~5-10k points per frame
   adaptive_pointsize: False
   point_size: 0.02

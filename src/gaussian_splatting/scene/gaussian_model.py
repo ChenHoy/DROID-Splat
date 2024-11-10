@@ -21,6 +21,7 @@ import open3d as o3d
 import torch
 from torch import nn
 import lietorch
+import frnn
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 
@@ -605,18 +606,18 @@ class GaussianModel:
         self.n_obs = self.n_obs[valid_points_mask]
         self.n_optimized = self.n_optimized[valid_points_mask]
 
-    # def prune_floaters(
-    #     self, search_radius: float = 0.1, min_nn_distance: float = 0.05, return_mask: bool = True
-    # ) -> None:
-    #     """Prune isolated outlier points which are floaters without any neighbors"""
-    #     pcd_temp = self._xyz.unsqueeze(0)
-    #     # NOTE since we search within the same point cloud, we will always get the original point as the closest neighbor with distance 0.0
-    #     all_dists, idxs, _, _ = frnn.frnn_grid_points(pcd_temp, pcd_temp, K=2, r=search_radius)
-    #     nn_dists = all_dists[..., 1]  # Get the actual nearest neighbor distance
-    #     floaters = nn_dists > min_nn_distance  # Points without a nearest neighbor in this radius are likely floaters
-    #     self.prune_points(floaters.squeeze())
-    #     if return_mask:
-    #         return floaters
+    def prune_floaters(
+        self, search_radius: float = 0.1, min_nn_distance: float = 0.05, return_mask: bool = True
+    ) -> None:
+        """Prune isolated outlier points which are floaters without any neighbors"""
+        pcd_temp = self._xyz.unsqueeze(0)
+        # NOTE since we search within the same point cloud, we will always get the original point as the closest neighbor with distance 0.0
+        all_dists, idxs, _, _ = frnn.frnn_grid_points(pcd_temp, pcd_temp, K=2, r=search_radius)
+        nn_dists = all_dists[..., 1]  # Get the actual nearest neighbor distance
+        floaters = nn_dists > min_nn_distance  # Points without a nearest neighbor in this radius are likely floaters
+        self.prune_points(floaters.squeeze())
+        if return_mask:
+            return floaters
 
     def densification_postfix(
         self,
