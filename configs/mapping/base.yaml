@@ -27,7 +27,7 @@ online_opt:
   ## Strategy for adding / pruning Gaussians
   prune_every: 4 # Covisibility and opacity based pruning
   pruning:
-    use_covisibility: False
+    use_covisibility: True
     covisibility:
       # NOTE: Using the absolute visibility check is more wasteful as we need to count the visiblity of each Gaussian!
       # -> Use 'new' for faster performance
@@ -102,7 +102,7 @@ loss:
 refinement:
   optimize_poses: False
 
-  iters: 0 # Optimize over this many different batches
+  iters: 2000 # Optimize over this many different batches
   batch_iters: 1 # Optimize each batch this many times
   lr_factor: 0.1 # Change the learning rate for refinement
   bs: 40 # Batch size for refinement 
@@ -115,8 +115,8 @@ refinement:
     use_neighborhood: False # Use neighborhoods around random frames to have more spatial overlap
     neighborhood_size: 5 # How many frames to include in the neighborhood
 
-  prune_densify_every: 50 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densificatio# This has to be an uneven number
-  densify_until: 250 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
+  prune_densify_every: 100 
+  densify_until: 1000 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
 
   densify:
     # Vanilla 3DGS splitting and densification strategy
