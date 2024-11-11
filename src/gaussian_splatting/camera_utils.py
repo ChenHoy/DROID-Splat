@@ -23,6 +23,7 @@ class Camera(nn.Module):
         img_size: Tuple[int, int],
         device: str = "cuda:0",
         mask: Optional[torch.Tensor] = None,
+        set_ray: bool = False,
     ):
         super(Camera, self).__init__()
         self.uid = uid
@@ -55,7 +56,10 @@ class Camera(nn.Module):
 
         self.projection_matrix = projection_matrix.to(device=device)
         self.rayo, self.rayd = None, None
-        self.set_ray()  # Get the camera origin and direction vector for later
+        # FIXME chen: set_ray should not be used when intializing the MappingGUI
+        # calling with the gui default transform will result in nan
+        if set_ray:
+            self.set_ray()
 
     def set_ray(self, eps: float = 1e-6):
         projectinverse = self.projection_matrix.T.inverse()
@@ -138,14 +142,14 @@ class Camera(nn.Module):
         ).transpose(0, 1)
         return Camera(
             uid,
-            None,
-            None,
-            None,
-            T,
-            projection_matrix,
-            (fx, fy, cx, cy),
-            (FoVx, FoVy),
-            (H, W),
+            None,  # color
+            None,  # depth_est
+            None,  # depth_gt
+            T,  # pose_w2c
+            projection_matrix,  # projection_matrix
+            (fx, fy, cx, cy),  # intrinsics
+            (FoVx, FoVy),  # fov
+            (H, W),  # img_size
         )
 
     @property
