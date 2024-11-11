@@ -45,6 +45,7 @@ def render(
     bg_color: torch.Tensor,
     scaling_modifier=1.0,
     override_color=None,
+    mask=None,
     device: str = "cuda",
 ):
     """
@@ -52,12 +53,14 @@ def render(
 
     Background tensor (bg_color) must be on GPU!
     """
+    if len(pc.get_xyz) == 0:
+        return None
 
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device=device) + 0
     try:
         screenspace_points.retain_grad()
-    except:
+    except Exception:
         pass
 
     # Set up rasterization configuration
@@ -114,16 +117,32 @@ def render(
         colors_precomp = override_color
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
-    rendered_image, radii, depth, opacity, n_touched = rasterizer(
-        means3D=means3D,
-        means2D=means2D,
-        shs=shs,
-        colors_precomp=colors_precomp,
-        opacities=opacity,
-        scales=scales,
-        rotations=rotations,
-        cov3D_precomp=cov3D_precomp,
-    )
+    if mask is not None:
+        rendered_image, radii, depth, opacity, n_touched = rasterizer(
+            means3D=means3D[mask],
+            means2D=means2D[mask],
+            shs=shs[mask],
+            colors_precomp=colors_precomp[mask] if colors_precomp is not None else None,
+            opacities=opacity[mask],
+            scales=scales[mask],
+            rotations=rotations[mask],
+            cov3D_precomp=cov3D_precomp[mask] if cov3D_precomp is not None else None,
+            theta=viewpoint_camera.cam_rot_delta,
+            rho=viewpoint_camera.cam_trans_delta,
+        )
+    else:
+        rendered_image, radii, depth, opacity, n_touched = rasterizer(
+            means3D=means3D,
+            means2D=means2D,
+            shs=shs,
+            colors_precomp=colors_precomp,
+            opacities=opacity,
+            scales=scales,
+            rotations=rotations,
+            cov3D_precomp=cov3D_precomp,
+            theta=viewpoint_camera.cam_rot_delta,
+            rho=viewpoint_camera.cam_trans_delta,
+        )
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.

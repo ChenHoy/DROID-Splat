@@ -140,17 +140,7 @@ class Camera(nn.Module):
         projection_matrix = getProjectionMatrix2(
             znear=0.001, zfar=10000.0, fx=fx, fy=fy, cx=cx, cy=cy, W=W, H=H
         ).transpose(0, 1)
-        return Camera(
-            uid,
-            None,  # color
-            None,  # depth_est
-            None,  # depth_gt
-            T,  # pose_w2c
-            projection_matrix,  # projection_matrix
-            (fx, fy, cx, cy),  # intrinsics
-            (FoVx, FoVy),  # fov
-            (H, W),  # img_size
-        )
+        return Camera(uid, None, None, None, T, projection_matrix, (fx, fy, cx, cy), (FoVx, FoVy), (H, W))
 
     @property
     def world_view_transform(self):
