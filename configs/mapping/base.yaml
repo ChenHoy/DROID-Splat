@@ -1,7 +1,5 @@
 warmup: 10 # Wait until tracking gets to this frame
 delay: 5 # Delay between tracking and mapping (This should be >= 2, because else )
-# NOTE chen: use MORE ITERATIONS than prune_densify_every! (newly densified Gaussians need to be optimized!)
-save_renders: False # Store some rendered images for debugging
 
 # Online Optimization
 online_opt:
