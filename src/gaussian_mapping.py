@@ -378,9 +378,9 @@ class GaussianMapper(object):
         def draw_random_batch(
             kf_cams: List[Camera],
             batch_size: int = 16,
-            weights_kf: Optional[List[float]] = None,
             nonkf_cams: Optional[List[Camera]] = None,
             kf_always: Optional[float] = None,
+            weights_kf: Optional[List[float]] = None,
         ) -> List[Camera]:
             """Draw a random mini batch. If only keyframes are passed, we draw a random batch from them.
             If importance weights are provided, we assign a higher probability to certain keyframes to be drawn.
@@ -460,39 +460,6 @@ class GaussianMapper(object):
 
             return batch
 
-        def importance_weights_from_single_pass(cams: List[Camera], batch_size: int = 16):
-            """Run a single forward pass over all frames to gather importance weights.
-            Since we need to run over a potential large batch of all frames, we use mini batches.
-            This whole operation consumes much time, so we still backpropagate the loss and optimize the Gaussians,
-            even though this does not return the "true" importance weights at timestep 0.
-            """
-            loss, weights = 0.0, []
-            for i, view in tqdm(enumerate(cams)):
-                loss_i, _ = self.render_compare(view)
-                loss += loss_i
-                weights.append(loss_i.detach().clone().item())
-
-                # Keep memory in check by only backpropagating in batches
-                if i % batch_size == 0:
-                    self.gaussians.check_nans()  # NOTE chen: this can happen we have zero depth and an inconvenient pose
-
-                    # Punish anisotropic Gaussians
-                    scaling = self.gaussians.get_scaling
-                    isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-                    loss += self.loss_params.beta1 * isotropic_loss.mean()
-                    # Backpropagate through batch
-                    self.gaussians.check_nans()  # Sanity check to avoid invalid Gaussians (e.g. from 0 depths)
-                    loss.backward()
-                    # Make step
-                    self.gaussians.optimizer.step()
-                    self.gaussians.optimizer.zero_grad()
-                    loss = 0.0  # Reset loss
-
-                    gc.collect()
-                    torch.cuda.empty_cache()
-
-            return weights
-
         kf_cams = [cam for cam in self.cameras if cam.uid in self.cam2buffer]
         has_nonkf = len(self.cameras) != len(self.cam2buffer)  # Check if we added non-keyframes
         if has_nonkf:
@@ -515,14 +482,6 @@ class GaussianMapper(object):
         self.opt_params.position_lr_final *= self.refine_params.lr_factor
         self.gaussians.training_setup(self.opt_params)
 
-        # Gather importance weights by computing the loss over all frames first
-        # Because we dont want to waste too much compute, we backpropagate over this large accumulated batch
-        if self.refine_params.sampling.weighted:
-            self.info("Gathering importance weights for refinement ...")
-            weights = importance_weights_from_single_pass(kf_cams, batch_size=self.refine_params.bs)
-        else:
-            weights = None
-
         ### Refinement loop
         total_iter = 0
         for iter1 in tqdm(
@@ -532,6 +491,7 @@ class GaussianMapper(object):
             do_densify = (
                 (iter1 + 1) % self.refine_params.prune_densify_every == 0
             ) and iter1 <= self.refine_params.densify_until
+            do_prune = (iter1 + 1) % self.refine_params.prune_every == 0 and iter1 <= self.refine_params.prune_until
 
             ### Optimize a random batch from all frames
             # In prgbd mode we cant densify non-keyframes which have the wrong scale information!
@@ -551,7 +511,6 @@ class GaussianMapper(object):
                 batch = draw_random_batch(
                     kf_cams,
                     self.refine_params.bs,
-                    weights_kf=weights,
                     nonkf_cams=non_kf_cams,
                     kf_always=self.refine_params.sampling.kf_at_least,
                 )
@@ -565,6 +524,14 @@ class GaussianMapper(object):
                     total_iter, batch, prune_densify=do_densify, optimize_poses=self.refine_params.optimize_poses
                 )
                 do_densify = False
+                if do_prune:
+                    # Gaussians should satisfy a certain absolute density, i.e. nearest neighbor distance < eps
+                    if self.update_params.pruning.use_floaters:
+                        start = time.time()
+                        floaters = self.gaussians.prune_floaters(**self.update_params.pruning.floaters)
+                        end = time.time()
+                        self.info(f"(Floater) pruning took {(end - start):.2f}s, pruned: {floaters.sum()} floaters")
+                do_prune = False
                 print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss}", "cyan"))
                 self.loss_list.append(loss)
                 if self.use_gui:
@@ -756,8 +723,7 @@ class GaussianMapper(object):
         avg_loss = loss / len(frames)  # Average over batch
 
         # Regularizer: Scale and opacity
-        # FIXME chen: the original is computed on top of the loss of a single image!
-        # the weight should be adjusted by the batch size?
+        # FIXME chen: This is somehow used in the original, I am not sure if it helps that much
         loss = loss + self.mcmc_params.opacity_reg * torch.abs(self.gaussians.get_opacity).mean()
         loss = loss + self.mcmc_params.scale_reg * torch.abs(self.gaussians.get_scaling).mean()
         # Regularizer: Punish anisotropic Gaussians
@@ -770,9 +736,9 @@ class GaussianMapper(object):
         loss.backward()
 
         ### Maybe Densify and Prune before update
-        if self.last_idx > self.n_last_frames and prune_densify:
-            # TODO why is this threshold for opacity not configurable?
-            dead_mask = (self.gaussians.get_opacity <= 0.005).squeeze(-1)
+        # NOTE chen: MCMC samplings needs the optimizer to be run at least once
+        if self.last_idx > self.n_last_frames and prune_densify and self.count > 0:
+            dead_mask = (self.gaussians.get_opacity <= self.mcmc_params.min_opacity).squeeze(-1)
             self.gaussians.relocate_gs(dead_mask=dead_mask)
             self.gaussians.add_new_gs(cap_max=self.mcmc_params.cap_max)
 
@@ -781,8 +747,9 @@ class GaussianMapper(object):
         self.gaussians.optimizer.zero_grad(set_to_none=True)
 
         ### Add noise to the Gaussians
-        # FIXME this could be configured until a certain iteration or mapping.count() is reached
         self.apply_noise(xyz_lr)
+
+        torch.cuda.empty_cache()  # Free up memory
 
         if optimize_poses:
             pose_optimizer.step()
@@ -1127,6 +1094,8 @@ class GaussianMapper(object):
         print(colored("\n[Gaussian Mapper] ", "magenta"), colored(f"Loss: {self.loss_list[-1]}", "cyan"))
 
         ### Prune unreliable Gaussians
+        # TODO Since we now dont have the vanilla densify_and_split strategy, we dont get rid of big gaussians
+        # TODO do manual big point removal?
         if len(self.iteration_info) % self.update_params.prune_every == 0 and delay_to_tracking:
             # Gaussians should be visible in multiple frames
             if self.update_params.pruning.use_covisibility:

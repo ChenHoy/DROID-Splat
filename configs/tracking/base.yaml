@@ -6,7 +6,7 @@ warmup: 8
 upsample: True
 
 motion_filter:
-  thresh: 3.0  # Consider new keyframe with motion >
+  thresh: 4.0  # Consider new keyframe with motion >
 
 frontend:
   optimize_scales: True # Whether or not to optimize scale of prgbd prior
@@ -15,7 +15,7 @@ frontend:
   iters: 4 # Actual BA iterations
   # NOTE this is actually much more important than the window in order to keep many frames in the local optimization!
   # NOTE this slows down the system a lot, since you increase the number of factors drastically
-  max_age: 30 # (default: 25) Max age of a factor, we remove these after optimizing them for so long in the current window
+  max_age: 20 # (default: 25) Max age of a factor, we remove these after optimizing them for so long in the current window
 
   keyframe_thresh: 4.0 # remove keyframe if avg flow < 
   thresh: 15.0 # Add edges between frames within this distance
@@ -32,8 +32,8 @@ backend:
   do_refinement: True # Do we want to refine the map afterwards with backend?
   window: 150 # Dont optimize more keyframes to avoid OOM
   thresh: 50.0 # Add edges between frames within this distance
-  max_factor_mult: 16
-  radius: 3
+  max_factor_mult: 12
+  radius: 2
   nms: 2
 
   use_loop_closure: False

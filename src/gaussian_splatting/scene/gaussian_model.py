@@ -346,7 +346,8 @@ class GaussianModel:
             tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group["params"][0], None)
 
-            if inds is not None:
+            # NOTE chen: if we call this on the first optimizer call, we dont have these attributes yet
+            if inds is not None and stored_state:
                 stored_state["exp_avg"][inds] = 0
                 stored_state["exp_avg_sq"][inds] = 0
             else:

@@ -514,7 +514,10 @@ def eval_rendering(
     cal_lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to("cuda")
 
     dataset.return_stat_masks = False  # Dont return dynamic object masks here
-    has_gt_depth = len(dataset.depth_paths) != 0  # Check if the dataset has depth images
+    if dataset.depth_paths is not None and len(dataset.depth_paths) > 0:
+        has_gt_depth = True
+    else:
+        has_gt_depth = False
 
     plot_dir = os.path.join(save_dir, "plots")
     print(colored(f"[Evaluation] Saving Rendering evaluation in: {save_dir}", "green"))

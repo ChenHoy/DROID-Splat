@@ -8,6 +8,7 @@ save_renders: False # Store some rendered images for debugging
 mcmc:
   cap_max: 60000 # Maximum number of Gaussians in the map
   noise_lr: 1e4 # original: 5e5
+  min_opacity: 0.005 # Gaussians below are defined as dead Gaussians
   opacity_reg: 0.1
   scale_reg: 0.1
 
@@ -46,16 +47,6 @@ online_opt:
   prune_densify_every: 5 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
   prune_densify_until: 20 # dont do this after this iteration
 
-  ## Densification parameters
-  densify:
-    accumulate_pixels: True # Take the number of pixels a Gaussian has touched into consideration
-    # Vanilla 3DGS splitting and densification strategy
-    vanilla:
-      max_grad: 0.001 # Gaussians with gradients above this are split (smaller -> denser)
-      extent: 6  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
-      min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
-      max_screen_size: 10 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
-    
   # How to Filter the Tracking Map before feeding into Mapper
   filter: # Parameter for filtering incoming points from the SLAM system
     multiview: True # Only initialize Gaussians that are consistent in multiple views
@@ -117,21 +108,21 @@ refinement:
   sampling:
     use_non_keyframes: False # Use RGB non-keyframes as well during map refinement
     kf_at_least: 0.5 # Always make sure to have > x% keyframes in a batch
-    weighted: False # Sample frames according to their loss, i.e. frames with higher loss have a higher probability
     use_neighborhood: False # Use neighborhoods around random frames to have more spatial overlap
     neighborhood_size: 5 # How many frames to include in the neighborhood
 
   prune_densify_every: 100 
   densify_until: 1000 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
 
-  densify:
-    # Vanilla 3DGS splitting and densification strategy
-    vanilla:
-      max_grad: 0.005 # Gaussians with gradients above this are split (smaller -> denser)
-      extent: 5 # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
-      min_opacity: 0.05 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
-      max_screen_size: 10 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
-
+  prune_every: 100
+  prune_until: 800
+  pruning:
+    use_floaters: False
+    # This is a proxy for density
+    floaters:
+      search_radius: 0.5 # Search radius for fixed radius nearest neighbor search
+      # NOTE this depends on the used depth sensor (monocular models have differences) and scene
+      min_nn_distance: 0.001 # Minimum distance to the nearest neighbor for pruning
 
 # Backpropagate the Render updates into Tracking system
 feedback:
