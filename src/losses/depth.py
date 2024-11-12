@@ -4,7 +4,7 @@ import ipdb
 import torch
 import torch.nn.functional as F
 
-from .misc import l1_loss, l2_loss, log_l1_loss, edge_weighted_tv
+from .misc import l1_loss, edge_weighted_tv, pearson_loss, log_l1_loss, l1_huber_loss
 from ..utils import gradient_map
 
 MAX_DEPTH = 1e7
@@ -13,45 +13,45 @@ MIN_NUM_POINTS = 50  # At least have 100 points for supervision
 
 
 def depth_loss(
-    depth_func: str,
     depth_est: torch.Tensor,
     depth_gt: torch.Tensor,
-    original_image: Optional[torch.Tensor] = None,
     with_edge_weight: bool = False,
     with_smoothness: bool = False,
     beta: float = 0.001,
+    original_image: Optional[torch.Tensor] = None,
     mask: Optional[torch.Tensor] = None,
+    depth_func: str = "l1",
 ):
-    """Vanilla Depth loss: L1 (+ smoothness) loss between estimated and ground truth depth maps."""
-    if mask is None:
-        mask = torch.ones_like(depth_est, device=depth_est.device)
+    """L1 (+ smoothness) loss between estimated and ground truth depth maps.
 
-    if depth_func == "l1":
-        loss_func = l1_loss
-    elif depth_func == "l2":
-        loss_func = l2_loss
-    elif depth_func == "log_l1":
-        loss_func = log_l1_loss
-    else:
-        raise ValueError(f"Unknown depth loss function: {depth_func}")
+    We support: 'l1', 'log_l1', 'l1_huber', 'pearson' for depth loss computation
 
-    if with_edge_weight:
-        grad_rgb = gradient_map(original_image)
-        weights = torch.exp(-grad_rgb)
-    else:
-        weights = None
-
+    NOTE: DN-Splatter https://arxiv.org/pdf/2403.17822 computes an edge-aware log-depth loss
+    """
     # Sanity check against missing depths (e.g. everything got filtered out)
     if (depth_gt > 0).sum() < MIN_NUM_POINTS or mask.sum() < MIN_NUM_POINTS:
-        err = 0.0
+        depth_loss = torch.tensor(0.0, device=depth_est.device, requires_grad=True)
     else:
-        err = loss_func(depth_est, depth_gt, weights=weights, mask=mask)
+        if with_edge_weight:
+            grad_img = gradient_map(original_image)
+            weights = torch.exp(-grad_img)
+        else:
+            weights = None
+
+        if depth_func == "l1":
+            depth_loss = l1_loss(depth_est, depth_gt, mask=mask, weights=weights)
+        elif depth_func == "log_l1":
+            depth_loss = log_l1_loss(depth_est, depth_gt, mask=mask, weights=weights)
+        elif depth_func == "l1_huber":
+            depth_loss = l1_huber_loss(depth_est, depth_gt, mask=mask)
+        elif depth_func == "pearson":
+            depth_loss = pearson_loss(depth_est, depth_gt, mask=mask)
+        else:
+            raise NotImplementedError(f"Depth loss function {depth_func} not implemented!")
 
     # Sanity check to avoid division by zero
     if with_smoothness and original_image is not None and mask.sum() > 0:
-        depth_loss = err + beta * edge_weighted_tv(depth_est, original_image, mask=mask)
-    else:
-        depth_loss = err
+        depth_loss += beta * edge_weighted_tv(depth_est, original_image, mask=mask)
 
     return depth_loss
 
@@ -108,7 +108,6 @@ class ScaleAndShiftInvariantLoss(torch.nn.Module):
         target: torch.Tensor,
         mask: torch.Tensor,
         interpolate: bool = True,
-        return_diff: bool = False,
     ) -> torch.Tensor:
         if prediction.shape[-1] != target.shape[-1] and interpolate:
             prediction = F.interpolate(prediction, target.shape[-2:], mode="bilinear", align_corners=True)
@@ -121,12 +120,7 @@ class ScaleAndShiftInvariantLoss(torch.nn.Module):
         scale, shift = self.compute_scale_and_shift(prediction, target, mask)
         scaled_prediction = scale * prediction + shift
 
-        if return_diff:
-            diff = torch.abs(scaled_prediction - target)
-            diff[mask] = 0
-            return F.l1_loss(scaled_prediction[mask], target[mask]), diff
-        else:
-            return F.l1_loss(scaled_prediction[mask], target[mask])
+        return F.l1_loss(scaled_prediction[mask], target[mask])
 
 
 def monogs_depth_reg(depth: torch.Tensor, gt_image: torch.Tensor, mask: Optional[torch.Tensor] = None) -> float:

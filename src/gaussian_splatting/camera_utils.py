@@ -38,9 +38,9 @@ class Camera(nn.Module):
         self.T_gt = pose_w2c[:3, 3]
         self.update_RT(self.R_gt, self.T_gt)
 
-        self.original_image = color.clamp(0.0, 1.0).to(self.device)
-        self.depth = depth_est.to(self.device)
-        self.depth_prior = depth_gt.to(self.device)
+        self.original_image = color.clamp(0.0, 1.0)
+        self.depth = depth_est
+        self.depth_prior = depth_gt
 
         self.grad_mask = None
         self.mask = mask  # NOTE chen: this is used for dynamic objects if we know that info
@@ -49,7 +49,7 @@ class Camera(nn.Module):
             # self.original_image *= mask.to(self.data_device)
             self.mask = mask.to(self.device)
         else:
-            self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.device)
+            self.original_image *= torch.ones((1, self.image_height, self.image_width), device=color.device)
             self.mask = None
 
         self.trans, self.scale = trans, scale

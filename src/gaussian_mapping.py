@@ -62,8 +62,6 @@ class GaussianMapper(object):
         # Given an external mask for dyn. objects, remove these from the optimization
         self.filter_dyn = cfg.get("with_dyn", False)
 
-        self.save_renders = cfg.mapping.save_renders
-
         self.opt_params = cfg.mapping.opt_params  # Optimizer
         self.loss_params = cfg.mapping.loss  # Losses
 
@@ -422,35 +420,6 @@ class GaussianMapper(object):
 
             return batch
 
-        def importance_weights_from_single_pass(cams: List[Camera], batch_size: int = 16):
-            """Run a single forward pass over all frames to gather importance weights.
-            Since we need to run over a potential large batch of all frames, we use mini batches.
-            This whole operation consumes much time, so we still backpropagate the loss and optimize the Gaussians,
-            even though this does not return the "true" importance weights at timestep 0.
-            """
-            loss, weights = 0.0, []
-            for i, view in tqdm(enumerate(cams)):
-                loss_i, _ = self.render_compare(view)
-                loss += loss_i
-                weights.append(loss_i.detach().clone().item())
-
-                # Keep memory in check by only backpropagating in batches
-                if i % batch_size == 0:
-                    self.gaussians.check_nans()  # NOTE chen: this can happen we have zero depth and an inconvenient pose
-
-                    # Backpropagate through batch
-                    self.gaussians.check_nans()  # Sanity check to avoid invalid Gaussians (e.g. from 0 depths)
-                    loss.backward()
-                    # Make step
-                    self.gaussians.optimizer.step()
-                    self.gaussians.optimizer.zero_grad()
-                    loss = 0.0  # Reset loss
-
-                    gc.collect()
-                    torch.cuda.empty_cache()
-
-            return weights
-
         kf_cams = [cam for cam in self.cameras if cam.uid in self.cam2buffer]
         has_nonkf = len(self.cameras) != len(self.cam2buffer)  # Check if we added non-keyframes
         if has_nonkf:
@@ -465,13 +434,6 @@ class GaussianMapper(object):
                     gaussians=clone_obj(self.gaussians)  # , keyframes=[cam.detach() for cam in self.cameras]
                 )
             )
-
-        # Gather importance weights by computing the loss over all frames first
-        # Because we dont want to waste too much compute, we backpropagate over this large accumulated batch
-        if self.refine_params.sampling.weighted:
-            weights = importance_weights_from_single_pass(kf_cams, batch_size=self.refine_params.bs)
-        else:
-            weights = None
 
         ### Refinement loop
         # Reset scheduler and optimizer for refinement
@@ -508,7 +470,6 @@ class GaussianMapper(object):
                 batch = draw_random_batch(
                     kf_cams,
                     self.refine_params.bs,
-                    weights_kf=weights,
                     nonkf_cams=non_kf_cams,
                     kf_always=self.refine_params.sampling.kf_at_least,
                 )
@@ -559,8 +520,8 @@ class GaussianMapper(object):
         # Regularize additional surface properties i.e. normals
         dist, normals, surf_normal = render_pkg["rend_dist"], render_pkg["rend_normal"], render_pkg["surf_normal"]
         # Only do this when we already have a decent scene model
-        lambda_normal = self.loss_params.gamma1 if self.count > 2 else 0.0
-        lambda_dist = self.loss_params.gamma2 if self.count > 2 else 0.0
+        lambda_normal = self.loss_params.gamma1 if self.count > 1 else 0.0
+        lambda_dist = self.loss_params.gamma2 if self.count > 1 else 0.0
         normal_error = (1 - (normals * surf_normal).sum(dim=0))[None]
         dist_loss = lambda_dist * (dist).mean()
         total_loss = rgbd_loss + lambda_normal * normal_error.mean() + lambda_dist * dist_loss
@@ -605,9 +566,9 @@ class GaussianMapper(object):
         avg_loss = loss / len(frames)  # Average over batch
 
         # Regularizor: Punish anisotropic Gaussians
-        # scaling = self.gaussians.get_scaling
-        # isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-        # loss += self.loss_params.beta1 * isotropic_loss.mean()
+        scaling = self.gaussians.get_scaling
+        isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
+        loss += self.loss_params.beta1 * isotropic_loss.mean()
 
         # NOTE chen: this can happen we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
@@ -805,10 +766,6 @@ class GaussianMapper(object):
         self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
         self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
 
-        if self.save_renders:
-            for cam in self.cameras:
-                self.save_render(cam, f"{self.output}/intermediate_renders/final/{cam.uid}.png")
-
         plot_losses(
             self.loss_list,
             self.refine_params.iters,
@@ -944,13 +901,6 @@ class GaussianMapper(object):
         ### Update visualization
         if self.use_gui:
             self.update_gui(last_new_cam)
-
-        ### Save renders for debugging and visualization
-        if self.save_renders:
-            # Save only every 5th camera to save disk spacse
-            for cam in self.cameras:
-                if cam.uid % 5 == 0:
-                    self.save_render(cam, f"{self.output}/intermediate_renders/temp/{cam.uid}.png")
 
         # Free memory each iteration NOTE: this slows it down a bit
         if release_cache:

@@ -22,12 +22,13 @@ def mapping_rgbd_loss(
     with_ssim: bool = False,
     with_edge_weight: bool = False,
     with_depth_smoothness: bool = False,
+    supervise_with_prior: bool = False,
+    rgb_boundary_threshold: float = 0.01,
+    use_ms_ssim: bool = False,
+    depth_func: str = "l1",
     alpha1: float = 0.8,
     alpha2: float = 0.85,
     beta2: float = 0.001,
-    rgb_boundary_threshold: float = 0.01,
-    supervise_with_prior: bool = False,
-    depth_func: str = "l1",
     **kwargs
 ):
 
@@ -50,7 +51,7 @@ def mapping_rgbd_loss(
     if cam.mask is not None:
         rgb_pixel_mask = rgb_pixel_mask & cam.mask
     rgb_mask = rgb_pixel_mask.float()
-    loss_rgb = color_loss(image, image_gt, with_ssim, alpha2, rgb_mask)
+    loss_rgb = color_loss(image, image_gt, with_ssim, use_ms_ssim=use_ms_ssim, mask=rgb_mask, alpha2=alpha2)
 
     if has_depth:
         # Only use valid depth
@@ -59,7 +60,14 @@ def mapping_rgbd_loss(
             depth_pixel_mask = depth_pixel_mask & cam.mask
 
         loss_depth = depth_loss(
-            depth_func, depth, depth_gt, image_gt, with_edge_weight, with_depth_smoothness, beta2, depth_pixel_mask
+            depth.squeeze(),
+            depth_gt.squeeze(),
+            with_edge_weight,
+            with_depth_smoothness,
+            beta2,
+            image_gt.squeeze(),
+            depth_pixel_mask.squeeze(),
+            depth_func,
         )
 
         # loss = alpha1 * loss_rgb + (1 - alpha1) * loss_depth

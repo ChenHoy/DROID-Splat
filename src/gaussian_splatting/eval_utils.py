@@ -3,7 +3,7 @@ from termcolor import colored
 from tqdm import tqdm
 import ipdb
 import pickle
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from omegaconf import DictConfig
 import os
 
@@ -358,8 +358,7 @@ def save_dense_predictions(
     fig2, ax2 = plt.subplots(1, 1)
     # Display the ground truth image
     if gt_depth is not None:
-        min_depth = min(gt_depth.min(), est_depth.min())
-        max_depth = max(gt_depth.max(), est_depth.max())
+        min_depth, max_depth = gt_depth.min(), gt_depth.max()
     else:
         min_depth, max_depth = est_depth.min(), est_depth.max()
     ax2.imshow(est_depth.squeeze(), cmap="Spectral", vmin=min_depth, vmax=max_depth)
@@ -454,6 +453,39 @@ def do_odometry_evaluation(
     return kf_result_ate, all_result_ate
 
 
+def compute_scale_and_shift(prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> Tuple[float, float]:
+    # system matrix: A = [[a_00, a_01], [a_10, a_11]]
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0)
+    if prediction.ndim == 2:
+        prediction = prediction.unsqueeze(0)
+    if target.ndim == 2:
+        target = target.unsqueeze(0)
+    # Increase precision because we sum over potentially large arrays
+    target, prediction, mask = target.double(), prediction.double(), mask.double()
+
+    a_00 = torch.sum(mask * prediction * prediction, (1, 2))
+    a_01 = torch.sum(mask * prediction, (1, 2))
+    a_11 = torch.sum(mask, (1, 2))
+
+    # right hand side: b = [b_0, b_1]
+    b_0 = torch.sum(mask * prediction * target, (1, 2))
+    b_1 = torch.sum(mask * target, (1, 2))
+
+    # solution: x = A^-1 . b = [[a_11, -a_01], [-a_10, a_00]] / (a_00 * a_11 - a_01 * a_10) . b
+    x_0 = torch.zeros_like(b_0)
+    x_1 = torch.zeros_like(b_1)
+
+    det = a_00 * a_11 - a_01 * a_01
+    # A needs to be a positive definite matrix.
+    valid = det > 0
+
+    x_0[valid] = (a_11[valid] * b_0[valid] - a_01[valid] * b_1[valid]) / det[valid]
+    x_1[valid] = (-a_01[valid] * b_0[valid] + a_00[valid] * b_1[valid]) / det[valid]
+
+    return x_0.squeeze().float(), x_1.squeeze().float()
+
+
 def eval_rendering(
     cams: List[Camera],
     tstamps: List[int],
@@ -481,7 +513,10 @@ def eval_rendering(
     cal_lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to("cuda")
 
     dataset.return_stat_masks = False  # Dont return dynamic object masks here
-    has_gt_depth = len(dataset.depth_paths) != 0  # Check if the dataset has depth images
+    if dataset.depth_paths is not None and len(dataset.depth_paths) > 0:
+        has_gt_depth = True
+    else:
+        has_gt_depth = False
 
     plot_dir = os.path.join(save_dir, "plots")
     print(colored(f"[Evaluation] Saving Rendering evaluation in: {save_dir}", "green"))
@@ -529,7 +564,14 @@ def eval_rendering(
             plt.close(fig)
         if save_predictions:
             if has_gt_depth:
-                save_dense_predictions(save_dir, idx, depth_est.cpu().numpy(), est_img_np, gt_depth.cpu().numpy())
+                if monocular:
+                    # Align depth with groundtruth, so we have a consistent color scheme
+                    valid = gt_depth > 0
+                    scale, shift = compute_scale_and_shift(depth_est, gt_depth, valid)
+                    depth_est_visu = (depth_est * scale + shift).cpu().numpy()
+                else:
+                    depth_est_visu = depth_est.cpu().numpy()
+                save_dense_predictions(save_dir, idx, depth_est_visu, est_img_np, gt_depth.cpu().numpy())
             else:
                 save_dense_predictions(save_dir, idx, depth_est.cpu().numpy(), est_img_np)
 
@@ -552,7 +594,7 @@ def eval_rendering(
                 loss_func = ScaleAndShiftInvariantLoss()
             else:
                 loss_func = l1_loss
-            depth_loss = loss_func(depth_est, gt_depth, valid_depth)
+            depth_loss = loss_func(depth_est, gt_depth, mask=valid_depth)
             depth_l1.append(depth_loss.item())
 
     plot_metric_statistics(psnr_array, ssim_array, lpips_array, plot_dir)

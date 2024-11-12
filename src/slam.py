@@ -78,9 +78,9 @@ class SLAM:
         self.device = cfg.get("device", torch.device("cuda:0"))
         self.mode = cfg.mode
         self.do_evaluate = cfg.evaluate
+        self.save_predictions = cfg.get("save_rendered_predictions", False)  # save all predictions for later
+        self.render_images = cfg.get("render_images", True)  # make a comparison figure
         # Render every 5-th frame during optimization, so we can see the development of our scene representation
-        self.save_renders = cfg.get("save_renders", False)
-        self.save_predictions = cfg.get("save_rendered_predictions", False)
         self.save_every = cfg.get("save_every", 5)
 
         self.create_out_dirs(output_folder)
@@ -237,10 +237,6 @@ class SLAM:
             self.output = "./outputs/"
 
         os.makedirs(self.output, exist_ok=True)
-        if self.save_renders:
-            os.makedirs(f"{self.output}/intermediate_renders/", exist_ok=True)
-            os.makedirs(f"{self.output}/intermediate_renders/final", exist_ok=True)
-            os.makedirs(f"{self.output}/intermediate_renders/temp", exist_ok=True)
         os.makedirs(f"{self.output}/evaluation", exist_ok=True)
 
     def update_cam(self, cfg: DictConfig) -> None:
@@ -768,15 +764,24 @@ class SLAM:
         # Evo expects floats for timestamps
         kf_tstamps = [float(i) for i in kf_tstamps]
         tstamps = [float(i) for i in tstamps]
-        kf_result_ate, all_result_ate = eval_utils.do_odometry_evaluation(
-            eval_path, tstamps=tstamps, kf_tstamps=kf_tstamps, monocular=monocular, **eval_traj
-        )
-        self.info("(Keyframes only) ATE: {}".format(kf_result_ate), logger=log)
-        self.info("(All) ATE: {}".format(all_result_ate), logger=log)
-        ### Store main results with attributes for ablation/comparison
-        odometry_results = eval_utils.create_odometry_csv(kf_result_ate, all_result_ate, self.cfg, stream.input_folder)
-        df = pd.DataFrame(odometry_results)
-        df.to_csv(os.path.join(eval_path, "odometry", "evaluation_results.csv"), index=False)
+        if stream.poses is not None:
+            kf_result_ate, all_result_ate = eval_utils.do_odometry_evaluation(
+                eval_path, tstamps=tstamps, kf_tstamps=kf_tstamps, monocular=monocular, **eval_traj
+            )
+            self.info("(Keyframes only) ATE: {}".format(kf_result_ate), logger=log)
+            self.info("(All) ATE: {}".format(all_result_ate), logger=log)
+            ### Store main results with attributes for ablation/comparison
+            odometry_results = eval_utils.create_odometry_csv(
+                kf_result_ate, all_result_ate, self.cfg, stream.input_folder
+            )
+            df = pd.DataFrame(odometry_results)
+            df.to_csv(os.path.join(eval_path, "odometry", "evaluation_results.csv"), index=False)
+
+        else:
+            self.info(
+                "Warning: Dataset has no ground truth poses available for evaluation! Skipping trajectory evaluation ...",
+                logger=log,
+            )
 
         #### ------------------- ####
         ### Rendering  evaluation ###
@@ -785,17 +790,16 @@ class SLAM:
             if self.mode == "prgbd":
                 if hasattr(stream, "switch_to_rgbd_gt") and callable(stream.switch_to_rgbd_gt):
                     self.info("Switching to RGBD groundtruth for evaluation ...", logger=log)
-                    # Only TUM_RGBD has not the a groundtruth depth for all frames
+                    # TUM only has depth for specific frames, so we will remap the indices to the right frames
                     if "tum" in stream.input_folder:
-                        self.tum_idx = stream.indices
+                        self.tum_idx = stream.indices  # Indices our our frames in prgbd mode
                         stream.switch_to_rgbd_gt()
-                        self.tum_rgbd_idx = stream.indices
+                        self.tum_rgbd_idx = stream.indices  # Indices of the rgbd frames
                     else:
                         stream.switch_to_rgbd_gt()
                 else:
-                    stream.depth_paths = None
                     self.info(
-                        "Warning: No RGBD groundtruth available for evaluation!",
+                        "Warning: No RGBD groundtruth available for evaluation! Using monocular depth predictions ...",
                         logger=log,
                     )
 
@@ -825,7 +829,7 @@ class SLAM:
                 save_dir,
                 1,
                 monocular,
-                True,
+                self.render_images,
                 self.save_predictions,
             )
             self.info(
@@ -847,7 +851,7 @@ class SLAM:
                 save_dir,
                 self.save_every,
                 monocular,
-                True,
+                self.render_images,
                 self.save_predictions,
             )
             self.info(
@@ -866,7 +870,9 @@ class SLAM:
             render_df = pd.DataFrame(rendering_results)
             render_df.to_csv(os.path.join(render_eval_path, "evaluation_results.csv"), index=False)
 
-    def get_trajectories(self, stream, gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None):
+    def get_trajectories(
+        self, stream, gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None, with_gt: bool = True
+    ):
         """Get the poses both for the whole video sequence and only the keyframes for evaluation.
         Poses are in format [B, 7, 1] as lie elements.
 
@@ -922,15 +928,16 @@ class SLAM:
             est_c2w_kf_lie = SE3.InitFromVec(est_w2c_kf_lie).inv().vec()
 
         est_c2w_all_lie, est_c2w_kf_lie = est_c2w_all_lie.cpu(), est_c2w_kf_lie.cpu()
-        gt_c2w_all_lie = eval_utils.get_gt_c2w_from_stream(stream).float().cpu()
-        gt_c2w_kf_lie = gt_c2w_all_lie[kf_tstamps]
 
         # Evo evaluation package assumes lie algebras to be in form [tx, ty, tz, qw, qx, qy, qz]
         traj_eval = {}
         traj_eval["est_c2w_all_lie"] = lie_quat_swap_convention(est_c2w_all_lie.clone()).numpy()
-        traj_eval["gt_c2w_all_lie"] = lie_quat_swap_convention(gt_c2w_all_lie).numpy()
         traj_eval["est_c2w_kf_lie"] = lie_quat_swap_convention(est_c2w_kf_lie).numpy()
-        traj_eval["gt_c2w_kf_lie"] = lie_quat_swap_convention(gt_c2w_kf_lie).numpy()
+        if with_gt and stream.poses is not None:
+            gt_c2w_all_lie = eval_utils.get_gt_c2w_from_stream(stream).float().cpu()
+            gt_c2w_kf_lie = gt_c2w_all_lie[kf_tstamps]
+            traj_eval["gt_c2w_all_lie"] = lie_quat_swap_convention(gt_c2w_all_lie).numpy()
+            traj_eval["gt_c2w_kf_lie"] = lie_quat_swap_convention(gt_c2w_kf_lie).numpy()
         return est_c2w_all_lie, traj_eval, kf_tstamps, tstamps
 
     def get_all_cams_for_rendering(

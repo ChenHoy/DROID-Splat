@@ -11,9 +11,9 @@ def color_loss(
     image_est: torch.Tensor,
     image_gt: torch.Tensor,
     with_ssim: bool = True,
-    alpha2: float = 0.85,
-    mask: Optional[torch.Tensor] = None,
     use_ms_ssim: bool = False,
+    mask: Optional[torch.Tensor] = None,
+    alpha2: float = 0.85,
 ):
     """Compute the color loss between the rendered image and the ground truth image.
     This uses a weighted sum of l1 and ssim loss.
@@ -26,7 +26,11 @@ def color_loss(
     if with_ssim:
         if use_ms_ssim:
             ssim_loss = ms_ssim(
-                image_est.unsqueeze(0), image_gt.unsqueeze(0), data_range=1.0, mask=mask.bool(), size_average=False
+                image_est.unsqueeze(0),
+                image_gt.unsqueeze(0),
+                data_range=1.0,
+                mask=mask.bool(),
+                size_average=False,
             )
         else:
             ssim_loss = ssim(
