@@ -1,10 +1,8 @@
 warmup: 10 # Wait until tracking gets to this frame
 delay: 5 # Delay between tracking and mapping (This should be >= 2, because else )
-# NOTE chen: use MORE ITERATIONS than prune_densify_every! (newly densified Gaussians need to be optimized!)
-save_renders: False # Store some rendered images for debugging
 
 # Hyperparameters for the Monte Carlo Markov Chain model
-# FIXME chen: the cap_max should be different each scene, i.e. we could match this to the averages from previous experiments so its comparable
+# NOTE chen: the cap_max should be different each scene, you have to tune this to be similar to the vanilla densification total number
 mcmc:
   cap_max: 60000 # Maximum number of Gaussians in the map
   noise_lr: 1e4 # original: 5e5
