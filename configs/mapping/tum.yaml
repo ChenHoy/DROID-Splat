@@ -42,6 +42,24 @@ online_opt:
     conf_th: 0.1 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
 
 
+# Offline Map Refinement for finetuning
+refinement:
+  iters: 2000 # Optimize over this many different batches
+  batch_iters: 1 # Optimize each batch this many times
+  lr_factor: 0.1 # Change the learning rate for refinement
+  bs: 40 # Batch size for refinement 
+
+  prune_densify_every: 100
+  densify_until: 1000
+  densify:
+    vanilla:
+      extent: 5
+      max_grad: 0.005
+      max_screen_size: 10
+      min_opacity: 0.05
+
+
+
 # MonoGS uses their defaults for a window size of 10
 # Since we want to independent to the batch_size, we adjust the learning rate accordingly
 # see: https://stackoverflow.com/questions/53033556/how-should-the-learning-rate-change-as-the-batch-size-change

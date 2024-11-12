@@ -1,7 +1,5 @@
 warmup: 10 # Wait until tracking gets to this frame
 delay: 5 # Delay between tracking and mapping (This should be >= 2, because else )
-# NOTE chen: use MORE ITERATIONS than prune_densify_every! (newly densified Gaussians need to be optimized!)
-save_renders: False # Store some rendered images for debugging
 
 # Online Optimization
 online_opt:
@@ -78,7 +76,7 @@ loss:
   supervise_with_prior: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
   with_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
   with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
-  with_depth_smoothness: True # Similarity loss between depth and image gradients
+  with_depth_smoothness: False # Similarity loss between depth and image gradients
   use_ms_ssim: False # Multi-Scale SSIM loss (Hint: This improves mainly PSNR at the cost of slightly worse LPIPS and L1)
   rgb_boundary_threshold: 0.001 # Pixel information in an image needs to be at least higher than this 
   depth_func: log_l1 # 'l1', 'log_l1', 'l1_huber', 'pearson' (Hint: We achieved best results simply with l1)
@@ -104,7 +102,6 @@ refinement:
   sampling:
     use_non_keyframes: False # Use RGB non-keyframes as well during map refinement
     kf_at_least: 0.5 # Always make sure to have > x% keyframes in a batch
-    weighted: False
     use_neighborhood: False # Use neighborhoods around random frames to have more spatial overlap
     neighborhood_size: 5 # How many frames to include in the neighborhood
 
