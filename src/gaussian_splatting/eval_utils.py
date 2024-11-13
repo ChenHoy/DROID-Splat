@@ -335,7 +335,7 @@ def create_comparison_figure(
         fig, axes = plt.subplots(1, 2, figsize=(10, 5))
 
         # Display the ground truth image
-        axes[0].imshow(gt_img.squeeez())
+        axes[0].imshow(gt_img.squeeeze())
         axes[0].set_title("Ground Truth")
         axes[0].axis("off")
 
@@ -514,7 +514,10 @@ def eval_rendering(
     cal_lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to("cuda")
 
     dataset.return_stat_masks = False  # Dont return dynamic object masks here
-    has_gt_depth = len(dataset.depth_paths) != 0  # Check if the dataset has depth images
+    if dataset.depth_paths is not None and len(dataset.depth_paths) > 0:
+        has_gt_depth = True
+    else:
+        has_gt_depth = False
 
     plot_dir = os.path.join(save_dir, "plots")
     print(colored(f"[Evaluation] Saving Rendering evaluation in: {save_dir}", "green"))
@@ -592,7 +595,7 @@ def eval_rendering(
                 loss_func = ScaleAndShiftInvariantLoss()
             else:
                 loss_func = l1_loss
-            depth_loss = loss_func(depth_est, gt_depth, valid_depth)
+            depth_loss = loss_func(depth_est, gt_depth, mask=valid_depth)
             depth_l1.append(depth_loss.item())
 
     plot_metric_statistics(psnr_array, ssim_array, lpips_array, plot_dir)
