@@ -62,8 +62,6 @@ class GaussianMapper(object):
         # Given an external mask for dyn. objects, remove these from the optimization
         self.filter_dyn = cfg.get("with_dyn", False)
 
-        self.save_renders = cfg.mapping.save_renders
-
         self.opt_params = cfg.mapping.opt_params  # Optimizer
         self.loss_params = cfg.mapping.loss  # Losses
 
@@ -359,6 +357,35 @@ class GaussianMapper(object):
                 )
             )
 
+    def rescale_gaussians(self, indices: torch.Tensor | List[int], delta_scale: torch.Tensor):
+        """After a large map change, we need to rescale the Gaussians. For this purpose we simply measure the
+        rel. mean disparity change for indidividual frames and check for large updates.
+        We can then simply multiply the respective Gaussians with the factor.
+
+        NOTE indices are positions in the video buffer since we reanchor after updates from video.ba()
+        """
+        updated_cams = []
+
+        for idx, scale in zip(indices, delta_scale):
+            # We have never mapped this frame before
+
+            if int(idx) not in self.buffer2cam:
+                continue
+            else:
+                self.gaussians.rescale(self.buffer2cam[int(idx)], scale)
+                # NOTE chen: We append to our camera list in consecutive order, i.e. this should normally be sorted!
+                # this is not a given though! be cautious, e.g. during refinement the list changes due to insertion of non-keyframes
+                cam = self.cameras[self.buffer2cam[int(idx)]]
+                updated_cams.append(cam)
+
+        # Add the kf from self.cameras[idx] to updated cameras for GUI
+        if self.use_gui:
+            self.q_main2vis.put_nowait(
+                gui_utils.GaussianPacket(
+                    gaussians=clone_obj(self.gaussians), keyframes=[cam.detached() for cam in updated_cams]
+                )
+            )
+
     def get_ram_usage(self) -> Tuple[float, float]:
         free_mem, total_mem = torch.cuda.mem_get_info(device=self.device)
         used_mem = 1 - (free_mem / total_mem)
@@ -452,39 +479,6 @@ class GaussianMapper(object):
 
             return batch
 
-        def importance_weights_from_single_pass(cams: List[Camera], batch_size: int = 16):
-            """Run a single forward pass over all frames to gather importance weights.
-            Since we need to run over a potential large batch of all frames, we use mini batches.
-            This whole operation consumes much time, so we still backpropagate the loss and optimize the Gaussians,
-            even though this does not return the "true" importance weights at timestep 0.
-            """
-            loss, weights = 0.0, []
-            for i, view in tqdm(enumerate(cams)):
-                loss_i, _ = self.render_compare(view)
-                loss += loss_i
-                weights.append(loss_i.detach().clone().item())
-
-                # Keep memory in check by only backpropagating in batches
-                if i % batch_size == 0:
-                    self.gaussians.check_nans()  # NOTE chen: this can happen we have zero depth and an inconvenient pose
-
-                    # Punish anisotropic Gaussians
-                    scaling = self.gaussians.get_scaling
-                    isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-                    loss += self.loss_params.beta1 * isotropic_loss.mean()
-                    # Backpropagate through batch
-                    self.gaussians.check_nans()  # Sanity check to avoid invalid Gaussians (e.g. from 0 depths)
-                    loss.backward()
-                    # Make step
-                    self.gaussians.optimizer.step()
-                    self.gaussians.optimizer.zero_grad()
-                    loss = 0.0  # Reset loss
-
-                    gc.collect()
-                    torch.cuda.empty_cache()
-
-            return weights
-
         kf_cams = [cam for cam in self.cameras if cam.uid in self.cam2buffer]
         has_nonkf = len(self.cameras) != len(self.cam2buffer)  # Check if we added non-keyframes
         if has_nonkf:
@@ -506,14 +500,6 @@ class GaussianMapper(object):
         self.opt_params.position_lr_init *= self.refine_params.lr_factor
         self.opt_params.position_lr_final *= self.refine_params.lr_factor
         self.gaussians.training_setup(self.opt_params)
-
-        # Gather importance weights by computing the loss over all frames first
-        # Because we dont want to waste too much compute, we backpropagate over this large accumulated batch
-        if self.refine_params.sampling.weighted:
-            self.info("Gathering importance weights for refinement ...")
-            weights = importance_weights_from_single_pass(kf_cams, batch_size=self.refine_params.bs)
-        else:
-            weights = None
 
         ### Refinement loop
         total_iter = 0
@@ -544,7 +530,6 @@ class GaussianMapper(object):
                 batch = draw_random_batch(
                     kf_cams,
                     self.refine_params.bs,
-                    weights_kf=weights,
                     nonkf_cams=non_kf_cams,
                     kf_always=self.refine_params.sampling.kf_at_least,
                 )
@@ -556,7 +541,6 @@ class GaussianMapper(object):
                 loss = self.mapping_step(
                     total_iter,  # Use the globa iteration for annedaling the learning rate!
                     batch,
-                    self.refine_params.densify.vanilla,
                     prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
                     opacity_densify=opacity_densify,  # Densify based on low opacity regions
                     optimize_poses=self.refine_params.optimize_poses,
@@ -711,7 +695,6 @@ class GaussianMapper(object):
         self,
         iter: int,
         frames: List[Camera],
-        vanilla_densify_params: Dict,
         prune_densify: bool = False,
         opacity_densify: bool = False,
         optimize_poses: bool = False,
@@ -772,18 +755,19 @@ class GaussianMapper(object):
                     self.gaussians.max_radii2D[visibility_filter_acm[idx]],
                     radii_acm[idx][visibility_filter_acm[idx]],
                 )
+                if self.update_params.densify.accumulate_pixels:
+                    pixels = touched_acm[idx]
+                else:
+                    pixels = None
                 # NOTE chen: we dont necessarily get better results when using the gradient averaging techique from Abs GS
                 self.gaussians.add_densification_stats(
-                    viewspace_point_tensor_acm[idx],
-                    visibility_filter_acm[idx],
-                    # touched_acm[idx],
-                    None,
+                    viewspace_point_tensor_acm[idx], visibility_filter_acm[idx], pixels=pixels
                 )
 
             # Prune and Densify
             if self.last_idx > self.n_last_frames and prune_densify:
                 # General pruning based on opacity and size + densification (from original 3DGS)
-                self.gaussians.densify_and_prune(**vanilla_densify_params)
+                self.gaussians.densify_and_prune(**self.update_params.densify.vanilla)
 
             # Densify in low opacity regions only after the map is stable already
             # (else we waste compute, because densify_and_prune will fill initial holes quickly)
@@ -1005,10 +989,6 @@ class GaussianMapper(object):
         self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
         self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
 
-        if self.save_renders:
-            for cam in self.cameras:
-                self.save_render(cam, f"{self.output}/intermediate_renders/final/{cam.uid}.png")
-
         plot_losses(
             self.loss_list,
             self.refine_params.iters,
@@ -1126,7 +1106,6 @@ class GaussianMapper(object):
             loss = self.mapping_step(
                 iter,
                 frames,
-                self.update_params.densify.vanilla,
                 prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
                 opacity_densify=self.update_params.densify.use_opacity,  # Densify based on low opacity regions
                 optimize_poses=self.update_params.optimize_poses,
@@ -1160,13 +1139,6 @@ class GaussianMapper(object):
         ### Update visualization
         if self.use_gui:
             self.update_gui(last_new_cam)
-
-        ### Save renders for debugging and visualization
-        if self.save_renders:
-            # Save only every 5th camera to save disk spacse
-            for cam in self.cameras:
-                if cam.uid % 5 == 0:
-                    self.save_render(cam, f"{self.output}/intermediate_renders/temp/{cam.uid}.png")
 
         # Free memory each iteration NOTE: this slows it down a bit
         if release_cache:
