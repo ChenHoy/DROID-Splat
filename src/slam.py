@@ -78,9 +78,9 @@ class SLAM:
         self.device = cfg.get("device", torch.device("cuda:0"))
         self.mode = cfg.mode
         self.do_evaluate = cfg.evaluate
+        self.save_predictions = cfg.get("save_rendered_predictions", False)  # save all predictions for later
+        self.render_images = cfg.get("render_images", True)  # make a comparison figure
         # Render every 5-th frame during optimization, so we can see the development of our scene representation
-        self.save_renders = cfg.get("save_renders", False)
-        self.save_predictions = cfg.get("save_rendered_predictions", False)
         self.save_every = cfg.get("save_every", 5)
 
         self.create_out_dirs(output_folder)
@@ -94,10 +94,6 @@ class SLAM:
 
         # Insert a dummy delay to snychronize frontend and backend as needed
         self.sleep_time = cfg.get("sleep_delay", 0.1)
-        # Manage the stream, i.e. we can also run the system only in [t0, t1]
-        self.t_start = cfg.get("t_start", 0)
-        self.t_stop = cfg.get("t_stop", None)
-
         self.start_time = torch.ones((1)).float().share_memory_()
         self.end_time = torch.ones((1)).float().share_memory_()
 
@@ -237,10 +233,6 @@ class SLAM:
             self.output = "./outputs/"
 
         os.makedirs(self.output, exist_ok=True)
-        if self.save_renders:
-            os.makedirs(f"{self.output}/intermediate_renders/", exist_ok=True)
-            os.makedirs(f"{self.output}/intermediate_renders/final", exist_ok=True)
-            os.makedirs(f"{self.output}/intermediate_renders/temp", exist_ok=True)
         os.makedirs(f"{self.output}/evaluation", exist_ok=True)
 
     def update_cam(self, cfg: DictConfig) -> None:
@@ -306,12 +298,6 @@ class SLAM:
                 static_mask = None
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
-
-            # Control when to start and when to stop the SLAM system from outside
-            if timestamp < self.t_start:
-                continue
-            if self.t_stop is not None and timestamp > self.t_stop:
-                break
 
             # Transmit the incoming stream to another visualization thread
             if self.cfg.show_stream:
@@ -517,15 +503,16 @@ class SLAM:
         self.all_finished += 1
         self.info("Backend done!")
 
-    def maybe_reanchor_gaussians(self, threshold: float = 0.001) -> None:
+    def maybe_reanchor_gaussians(self, pose_thresh: float = 0.001, scale_thresh: float = 0.1) -> None:
         """Reanchor the Gaussians to follow a big map update.
         For this purpose we simply track the pose changes after a backend optimization."""
         with self.video.get_lock():
             unit = self.video.pose_changes.clone()
 
+        # Reanchor the centers with a 3D transformation
         unit[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.device)
         delta = pose_distance(self.video.pose_changes, unit)
-        to_update = (delta > threshold).nonzero().squeeze()  # Check for frames with large updates
+        to_update = (delta > pose_thresh).nonzero().squeeze()  # Check for frames with large updates
         if (
             self.gaussian_mapper is not None
             and self.gaussian_mapper.warmup < self.frontend.optimizer.count
@@ -533,7 +520,20 @@ class SLAM:
         ):
             self.gaussian_mapper.reanchor_gaussians(to_update, self.video.pose_changes[to_update])
             with self.video.get_lock():
-                self.video.pose_changes[to_update] = unit  # Reset the pose update
+                self.video.pose_changes[to_update] = unit[to_update]  # Reset the pose update
+
+        # Rescale the Gaussians to follow a scale changes (This happens prominently when doing loop closures)
+        # scale_delta = torch.abs(self.video.scale_changes - 1.0)
+        # to_update = (scale_delta > scale_thresh).nonzero().squeeze()  # Check for frames with large updates
+        # if (
+        #     self.gaussian_mapper is not None
+        #     and self.gaussian_mapper.warmup < self.frontend.optimizer.count
+        #     and to_update.numel() > 0
+        # ):
+        #     self.info(f"Rescale Gaussians at {to_update} due to large scale change in map!")
+        #     self.gaussian_mapper.rescale_gaussians(to_update, self.video.pose_changes[to_update])
+        #     with self.video.get_lock():
+        #         self.video.scale_changes[to_update] = 1.0  # Reset the scale update
 
     def gaussian_mapping(
         self,
@@ -760,19 +760,27 @@ class SLAM:
             monocular = False
 
         est_c2w_all_lie, eval_traj, kf_tstamps, tstamps = self.get_trajectories(stream, gaussian_mapper_last_state)
-
         # Evo expects floats for timestamps
         kf_tstamps = [float(i) for i in kf_tstamps]
         tstamps = [float(i) for i in tstamps]
-        kf_result_ate, all_result_ate = eval_utils.do_odometry_evaluation(
-            eval_path, tstamps=tstamps, kf_tstamps=kf_tstamps, monocular=monocular, **eval_traj
-        )
-        self.info("(Keyframes only) ATE: {}".format(kf_result_ate), logger=log)
-        self.info("(All) ATE: {}".format(all_result_ate), logger=log)
-        ### Store main results with attributes for ablation/comparison
-        odometry_results = eval_utils.create_odometry_csv(kf_result_ate, all_result_ate, self.cfg, stream.input_folder)
-        df = pd.DataFrame(odometry_results)
-        df.to_csv(os.path.join(eval_path, "odometry", "evaluation_results.csv"), index=False)
+        if stream.poses is not None:
+            kf_result_ate, all_result_ate = eval_utils.do_odometry_evaluation(
+                eval_path, tstamps=tstamps, kf_tstamps=kf_tstamps, monocular=monocular, **eval_traj
+            )
+            self.info("(Keyframes only) ATE: {}".format(kf_result_ate), logger=log)
+            self.info("(All) ATE: {}".format(all_result_ate), logger=log)
+            ### Store main results with attributes for ablation/comparison
+            odometry_results = eval_utils.create_odometry_csv(
+                kf_result_ate, all_result_ate, self.cfg, stream.input_folder
+            )
+            df = pd.DataFrame(odometry_results)
+            df.to_csv(os.path.join(eval_path, "odometry", "evaluation_results.csv"), index=False)
+
+        else:
+            self.info(
+                "Warning: Dataset has no ground truth poses available for evaluation! Skipping trajectory evaluation ...",
+                logger=log,
+            )
 
         #### ------------------- ####
         ### Rendering  evaluation ###
@@ -783,15 +791,14 @@ class SLAM:
                     self.info("Switching to RGBD groundtruth for evaluation ...", logger=log)
                     # TUM only has depth for specific frames, so we will remap the indices to the right frames
                     if "tum" in stream.input_folder:
-                        self.tum_idx = stream.indices # Indices our our frames in prgbd mode
+                        self.tum_idx = stream.indices  # Indices our our frames in prgbd mode
                         stream.switch_to_rgbd_gt()
-                        self.tum_rgbd_idx = stream.indices # Indices of the rgbd frames
+                        self.tum_rgbd_idx = stream.indices  # Indices of the rgbd frames
                     else:
                         stream.switch_to_rgbd_gt()
                 else:
-                    stream.depth_paths = None
                     self.info(
-                        "Warning: No RGBD groundtruth available for evaluation!",
+                        "Warning: No RGBD groundtruth available for evaluation! Using monocular depth predictions ...",
                         logger=log,
                     )
 
@@ -821,7 +828,7 @@ class SLAM:
                 save_dir,
                 1,
                 monocular,
-                True,
+                self.render_images,
                 self.save_predictions,
             )
             self.info(
@@ -843,7 +850,7 @@ class SLAM:
                 save_dir,
                 self.save_every,
                 monocular,
-                True,
+                self.render_images,
                 self.save_predictions,
             )
             self.info(
@@ -911,6 +918,12 @@ class SLAM:
             # NOTE chen: even if we have optimized the poses with the GaussianMapper, we would have fed them back
             kf_tstamps = self.video.timestamp[: self.video.counter.value].int().cpu().tolist()
             est_w2c_all, tstamps = self.traj_filler(stream, return_tstamps=True)
+            # TODO this does not work
+            # # HACK chen: if we stop the stream abruptly for whatever reason, then we need to cut the trajectory
+            # if self.t_stop is not None:
+            #     est_w2c_all = est_w2c_all[: self.t_stop]
+            #     tstamps = tstamps[: self.t_stop]
+
             est_c2w_all_lie = est_w2c_all.inv().vec().cpu()  # 7x1 Lie algebra
 
             # Take from video directly without interpolation optimization
@@ -918,15 +931,16 @@ class SLAM:
             est_c2w_kf_lie = SE3.InitFromVec(est_w2c_kf_lie).inv().vec()
 
         est_c2w_all_lie, est_c2w_kf_lie = est_c2w_all_lie.cpu(), est_c2w_kf_lie.cpu()
-        gt_c2w_all_lie = eval_utils.get_gt_c2w_from_stream(stream).float().cpu()
-        gt_c2w_kf_lie = gt_c2w_all_lie[kf_tstamps]
 
         # Evo evaluation package assumes lie algebras to be in form [tx, ty, tz, qw, qx, qy, qz]
         traj_eval = {}
         traj_eval["est_c2w_all_lie"] = lie_quat_swap_convention(est_c2w_all_lie.clone()).numpy()
-        traj_eval["gt_c2w_all_lie"] = lie_quat_swap_convention(gt_c2w_all_lie).numpy()
         traj_eval["est_c2w_kf_lie"] = lie_quat_swap_convention(est_c2w_kf_lie).numpy()
-        traj_eval["gt_c2w_kf_lie"] = lie_quat_swap_convention(gt_c2w_kf_lie).numpy()
+        if stream.poses is not None:
+            gt_c2w_all_lie = eval_utils.get_gt_c2w_from_stream(stream).float().cpu()
+            gt_c2w_kf_lie = gt_c2w_all_lie[kf_tstamps]
+            traj_eval["gt_c2w_all_lie"] = lie_quat_swap_convention(gt_c2w_all_lie).numpy()
+            traj_eval["gt_c2w_kf_lie"] = lie_quat_swap_convention(gt_c2w_kf_lie).numpy()
         return est_c2w_all_lie, traj_eval, kf_tstamps, tstamps
 
     def get_all_cams_for_rendering(
