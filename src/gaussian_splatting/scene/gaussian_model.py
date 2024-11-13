@@ -871,6 +871,24 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(xyz_new, "xyz")
         self._xyz = optimizable_tensors["xyz"]
 
+    # TODO test if this works reliably
+    def rescale(self, kf_idx: torch.Tensor | List[int], delta_scale: torch.Tensor) -> None:
+        """Rescale the 3D point cloud of Gaussians attached to a keyframe idx with a scalar factor."""
+        to_update = self.unique_kfIDs == kf_idx
+        xyz_to_re = self.get_xyz[to_update]
+        scale_to_re = self._scaling[to_update]
+        xyz_new = self.get_xyz.clone()  # Make copy to replace old Variable
+        scale_new = self._scaling.clone()  # Make copy to replace old Variable
+
+        # NOTE chen: we divide here since we measure scale change in inverse disparities in Tracking
+        xyz_new[to_update] = 1 / delta_scale * xyz_to_re  # Rescale the 3D points
+        scale_new[to_update] = 1 / delta_scale * scale_to_re  # Rescale the scales
+
+        optimizable_tensors = self.replace_tensor_to_optimizer(xyz_new, "xyz")
+        self._xyz = optimizable_tensors["xyz"]
+        optimizable_tensors = self.replace_tensor_to_optimizer(scale_new, "scaling")
+        self._scaling = optimizable_tensors["scaling"]
+
     @torch.no_grad()
     def increment_n_opt_counter(
         self, visibility: Optional[torch.Tensor] = None, kf_idx: Optional[torch.Tensor] = None

@@ -67,6 +67,11 @@ class DepthVideo:
 
         # Measure the change of poses before and after backend optimization, so we can track large map changes
         self.pose_changes = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
+        # TODO chen: you rarely have large SCALE changes on indoor scenes, which is why we have not previously observed this
+        # Loop closures and large scale changes can happen on outdoor scenes pretty quickly
+        # FIXME once we initialized super large-scale big Gaussians we cannot shrink them to the correct size after closure
+        # Reoptimization is not helpful in these cases as Gaussians cannot travel large distances
+        self.scale_changes = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()  # Float
 
         self.disps = torch.ones(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
         self.disps_up = torch.zeros(buffer, ht, wd, device=device, dtype=torch.float).share_memory_()
@@ -627,6 +632,8 @@ class DepthVideo:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
             # Precondition
+            # NOTE chen: this gives only slightly improved tracking if the prior scales dont have large variance
+            # If priors have huge variances (like a generative diffusion model), dont use this!
             self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
 
             # Block coordinate descent optimization
