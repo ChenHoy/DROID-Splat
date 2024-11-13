@@ -477,6 +477,45 @@ class SlamTestbed(SLAM):
         rnd_w2c_all = rnd_w2c_all[: int(last_kf) + 1]  # Only look at interpolated poses until last keyframe
         # 3. Compare -> Same
 
+    def test_rescale(
+        self, stream, backend_freq: int = 2, render_freq: int = 5, test_until: Optional[int] = None
+    ) -> None:
+        assert self.cfg.run_backend, "Need to run backend for this test to make sense!"
+
+        for frame in tqdm(stream):
+            frontend_old_count = self.frontend.optimizer.t1  # How many times did the frontend actually run?
+
+            if self.cfg.with_dyn and stream.has_dyn_masks:
+                timestamp, image, depth, intrinsic, gt_pose, static_mask = frame
+            else:
+                timestamp, image, depth, intrinsic, gt_pose = frame
+                static_mask = None
+
+            # Control when to start and when to stop the SLAM system from outside
+            if timestamp < self.t_start:
+                continue
+            if self.t_stop is not None and timestamp > self.t_stop:
+                break
+
+            # Frontend insert new frames
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
+
+            if (
+                self.frontend.optimizer.is_initialized
+                and self.frontend.optimizer.t1 % backend_freq == 0
+                and self.cfg.run_backend
+            ):
+                self.backend()
+
+            if (
+                self.frontend.optimizer.is_initialized
+                and self.frontend.optimizer.t1 % render_freq == 0
+                and self.cfg.run_mapping
+                and frontend_old_count > self.gaussian_mapper.warmup
+            ):
+                self.maybe_reanchor_gaussians()  # If the backend is also running, we reanchor Gaussians when large map changes occur
+                self.gaussian_mapper(None, None)
+
     def run(self, stream):
         """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
 
@@ -491,8 +530,8 @@ class SlamTestbed(SLAM):
         for p in processes:
             p.start()
 
-        render_freq = 5  # Run rendering every k frontends
-        backend_freq = 10  # Run backend every 5 frontends
+        render_freq = 10  # Run rendering every k frontends
+        backend_freq = 5  # Run backend every 5 frontends
 
         # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200) # Check how much Rendering can overfit, when initialized correctly
         # self.test_tracking(stream, backend_freq=backend_freq) # Check how tracking works sequentially
@@ -500,9 +539,11 @@ class SlamTestbed(SLAM):
         # Check the add_nonkeyframe functionality and trajectory interpolation in GaussianMapper
         # self.test_nonkeyframes_mapping(stream)
 
-        self.run_track_render(
-            stream, backend_freq=backend_freq, render_freq=render_freq
-        )  # Check how Renderer works on top of all Tracker components sequentially
-        ipdb.set_trace()
+        # Check how Renderer works on top of all Tracker components sequentially
+        # self.run_track_render(
+        #     stream, backend_freq=backend_freq, render_freq=render_freq
+        # )
 
+        # Check if reanchoring/rescaling works correctly
+        self.test_rescale(stream, backend_freq=backend_freq, render_freq=render_freq)
         self.terminate(processes, stream, None)
