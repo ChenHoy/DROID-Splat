@@ -12,7 +12,7 @@ online_opt:
 
   prune_every: 4 # Prune every k Render passes
   pruning:
-    use_covisibility: False
+    use_covisibility: True
     covisibility:
       mode: "new" # ["abs", "new"] How to prune: either check for covisible frames everywhere or just in the last n frames
       last: 10 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
@@ -44,7 +44,7 @@ online_opt:
 
 # Offline Map Refinement for finetuning
 refinement:
-  iters: 2000 # Optimize over this many different batches
+  iters: 0 # Optimize over this many different batches
   batch_iters: 1 # Optimize each batch this many times
   lr_factor: 0.1 # Change the learning rate for refinement
   bs: 40 # Batch size for refinement 
@@ -57,7 +57,6 @@ refinement:
       max_grad: 0.005
       max_screen_size: 10
       min_opacity: 0.05
-
 
 
 # MonoGS uses their defaults for a window size of 10

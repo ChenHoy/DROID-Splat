@@ -41,15 +41,36 @@ opt_params:
   position_lr_final: 5e-4 # Default MonoGS: 0.0000016
   position_lr_max_steps: 100 # Default MonoGS: 30000
 
+
+# Offline Map Refinement for finetuning
+refinement:
+  iters: 0 # Optimize over this many different batches
+  batch_iters: 1 # Optimize each batch this many times
+  lr_factor: 0.1 # Change the learning rate for refinement
+  bs: 40 # Batch size for refinement 
+
+  prune_densify_every: 100
+  densify_until: 1000
+  densify:
+    vanilla:
+      extent: 5
+      max_grad: 0.005
+      max_screen_size: 10
+      min_opacity: 0.05
+
 loss:
   # Weights
-  alpha1: 0.8 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha1: 0.2 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
   beta1: 5.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
   beta2: 0.001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
+  gamma1: 0.05 # The normal consistency term aligns the rendered normal map with the gradient of the rendered depth.
+  # FIXME (according to https://github.com/hbb1/2d-gaussian-splatting/issues/71 this can be tuned to e.g. 100) but we dont see good results with this
+  gamma2: 0.0 # Depth distortion concentrates 2D primitives within a tight range along the ray 
 
 # Parameters for transfer SLAM -> Renderer
 input:
   pcd_downsample_init: 64 # This is a constant downsampling factor
   pcd_downsample: 64 # You ideally have ~5-10k points per frame
   point_size: 0.02
+  depth_ratio: 1

@@ -82,7 +82,7 @@ loss:
   depth_func: log_l1 # 'l1', 'log_l1', 'l1_huber', 'pearson' (Hint: We achieved best results simply with l1)
 
   # Weights
-  alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
+  alpha1: 0.3 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
   alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation). The higher this is, the higher the SSIM part
   beta1: 2.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
   beta2: 0.001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
