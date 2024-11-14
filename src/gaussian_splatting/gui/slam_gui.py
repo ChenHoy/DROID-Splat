@@ -494,8 +494,8 @@ class SLAM_GUI:
         current_cam = Camera.init_from_gui(
             uid=-1,
             T=T,
-            FoVx=FoVx,
-            FoVy=FoVy,
+            fov_x=FoVx,
+            fov_y=FoVy,
             fx=fx,
             fy=fy,
             cx=cx,
