@@ -614,7 +614,21 @@ class DepthVideo:
 
         self.reset_prior()  # Reset the prior and update disps_sens to fit the map
 
-    def ba_prior(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, alpha: float = 5e-3):
+    def ba_prior(
+        self,
+        target,
+        weight,
+        eta,
+        ii,
+        jj,
+        t0=1,
+        t1=None,
+        iters=2,
+        lm=1e-4,
+        ep=0.1,
+        alpha: float = 5e-3,
+        linear_align_prior: bool = False,
+    ):
         """Bundle adjustment over structure with a scalable prior.
 
         We keep the poses fixed, since this would create an unnecessary ambiguity and can make the system unstable!
@@ -632,9 +646,10 @@ class DepthVideo:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
 
             # Precondition
-            # NOTE chen: this gives only slightly improved tracking if the prior scales dont have large variance
-            # If priors have huge variances (like a generative diffusion model), dont use this!
-            self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
+            # NOTE if priors have huge variances (like a generative diffusion model), dont use this!
+            if linear_align_prior:
+                # NOTE chen: this gives only slightly improved tracking if the prior scales dont have large variance
+                self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
 
             # Block coordinate descent optimization
             for i in range(iters):
@@ -688,5 +703,5 @@ class DepthVideo:
                 self.mapping_dirty[t0:t1] = True
 
                 # After optimizing the prior, we need to update the disps_sens and reset the scales
-                # only then can we use global BA and intrinsics optimization with the CUDA kernel later
+                # only then can we use global BA and intrinsics optimization with the CUDA kernel later in backend
                 self.reset_prior()

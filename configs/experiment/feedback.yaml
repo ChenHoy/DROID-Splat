@@ -20,4 +20,4 @@ mapping:
       opacity_threshold: 0.05 # Only count Gaussians with opacity > x as valid coverage of a pixel
       ignore_frames: [0] # Never feedback the initial frames
       min_coverage: 0.5 # Min. Density of frame after eliminiating outliers
-      max_diff_to_video: 0.2 # Maximum abs. rel. deviation from the dense video depth
+      max_diff_to_video: 0.25 # Maximum abs. rel. deviation from the dense video depth
