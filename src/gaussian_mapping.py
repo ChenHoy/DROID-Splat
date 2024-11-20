@@ -755,6 +755,7 @@ class GaussianMapper(object):
                     self.gaussians.max_radii2D[visibility_filter_acm[idx]],
                     radii_acm[idx][visibility_filter_acm[idx]],
                 )
+                # FIXME this should be passed as arg to function, so it can also be set for refinement
                 if self.update_params.densify.accumulate_pixels:
                     pixels = touched_acm[idx]
                 else:

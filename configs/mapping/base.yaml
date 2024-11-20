@@ -34,6 +34,8 @@ online_opt:
 
   ## Densification parameters
   densify:
+    # FIXME this was not correctly implemented! We need to recompile the CUDA kernels with some changes added
+    accumulate_pixels: False # Abs GS / Pixel GS averaging over gradients of contributing gaussians
     # Densify Gaussians based on opacity only after k Mapper updates from https://arxiv.org/pdf/2403.12535
     use_opacity: False # Use opacity based densification
     opacity:
