@@ -9,8 +9,8 @@ cam:
   W_out: 360
   H_edge: 0 
   W_edge: 0
-  fx: 1296.0
-  fy: 1296.0
+  fx: null
+  fy: null
   cx: 540
   cy: 960
   calibration_txt: ''

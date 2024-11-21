@@ -1,0 +1,37 @@
+dataset: "folder"
+# input_folder: /media/data/Hannover/static/horse
+input_folder: /media/data/Hannover/static/triumphe
+# input_folder: /media/data/Hannover/static/trash
+
+### original camera parameters
+cam:
+  H: 1920
+  W: 1080
+  H_out: 568 # 640 # 568
+  W_out: 272 # 360
+  H_edge: 0
+  W_edge: 0 
+
+  # Unknown intrinsics
+  fx: null
+  fy: null
+  cx: null
+  cy: null
+
+  # Heuristic 
+  # fx: heuristic: 1296.0
+  # fy: heuristic: 1296.0
+  # cx: 960
+  # cy: 540
+
+  # We calibrate the camera once in prgbd mode without any scale optimization, which roughly gets the right parameters
+  # NOTE the scale depends on the metric scale of the monocular depth prediction
+  # Intrinsics on out resolution: [411.988, 473.488, 141.6, 304.032]
+  # Upscaled: 
+  # fx: 1635.835
+  # fy: 1600.523
+  # cx: 562.235
+  # cy: 1027.714
+
+  calibration_txt: ''
+  camera_model: "pinhole"
