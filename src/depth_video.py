@@ -627,7 +627,7 @@ class DepthVideo:
         lm=1e-4,
         ep=0.1,
         alpha: float = 5e-3,
-        linear_align_prior: bool = False,
+        linear_align_prior: bool = True,
     ):
         """Bundle adjustment over structure with a scalable prior.
 

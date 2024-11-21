@@ -111,7 +111,8 @@ def log_l1_loss(pred: torch.Tensor, gt: torch.Tensor, **kwargs):
 
 
 ### Generic callable for any loss function to allow weighting and masking functionality
-# TODO use true masked mean
+# NOTE for some reason, we achieve worse results using the true masked mean
+# this would require to retune the objective weighting
 def masked_loss(
     pred: torch.Tensor,
     gt: torch.Tensor,
@@ -133,10 +134,10 @@ def masked_loss(
     if weights is not None:
         err *= weights
 
+    # Naive mean
     err = err * mask
     loss = err.mean()
-
-    # # Take masked mean
+    # Take masked mean
     # num_valid = mask.sum()
     # if num_valid.item() > 0:
     #     loss = (mask * err).sum() / num_valid
