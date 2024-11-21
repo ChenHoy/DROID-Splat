@@ -83,7 +83,7 @@ def get_in_the_wild_heuristics(ht: int, wd: int, strategy: str = "generic") -> t
     else:
         fx = fy = wd * 1.2
         cx, cy = wd / 2, ht / 2
-    return torch.Tensor([fx, fy, cx, cy], dtype=torch.float32)
+    return fx, fy, cx, cy
 
 
 @hydra.main(version_base=None, config_path="./configs/", config_name="slam")
@@ -101,13 +101,13 @@ def run_slam(cfg):
     backup_source_code(os.path.join(output_folder, "code"))
 
     sys_print(f"\n\n** Running {cfg.data.input_folder} in {cfg.mode} mode!!! **\n\n")
-    dataset = get_dataset(cfg, device=cfg.device)
 
     if cfg.data.cam.fx is None or cfg.data.cam.fy is None:
         sys_print("Using generic intrinsics for in-the-wild data")
         cfg.data.cam.fx, cfg.data.cam.fy, cfg.data.cam.cx, cfg.data.cam.cy = get_in_the_wild_heuristics(
             ht=cfg.data.cam.H, wd=cfg.data.cam.W
         )
+    dataset = get_dataset(cfg, device=cfg.device)
     slam = SLAM(cfg, dataset=dataset, output_folder=output_folder)
 
     sys_print(f"Running on {len(dataset)} frames")
