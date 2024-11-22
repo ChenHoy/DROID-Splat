@@ -29,6 +29,7 @@ def mapping_rgbd_loss(
     alpha1: float = 0.8,
     alpha2: float = 0.85,
     beta2: float = 0.001,
+    sparse_spv: bool = False,
     **kwargs
 ):
 
@@ -51,6 +52,11 @@ def mapping_rgbd_loss(
     if cam.mask is not None:
         rgb_pixel_mask = rgb_pixel_mask & cam.mask
     rgb_mask = rgb_pixel_mask.float()
+
+    if sparse_spv and has_depth:
+        depth_pixel_mask = ((depth_gt > MIN_DEPTH) * (depth_gt < MAX_DEPTH)).view(*depth.shape)
+        rgb_mask = (rgb_mask.bool() & depth_pixel_mask).float()
+
     loss_rgb = color_loss(image, image_gt, with_ssim, use_ms_ssim=use_ms_ssim, mask=rgb_mask, alpha2=alpha2)
 
     if has_depth:
