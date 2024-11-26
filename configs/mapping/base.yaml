@@ -9,15 +9,13 @@ online_opt:
   iters: 100 # Optimization iterations for selected views
   n_last_frames: 10 # Always optimize the last n frames
   n_rand_frames: 15 # Optimize random global frames on top
-  # If chosen "loss" or "visited", we assign higher weights to frames with higher loss or that have been visited less
-  random_selection_weights: null # Strategy how to select random frames
 
   batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
   batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
   optimize_poses: False
 
   ## Strategy for adding / pruning Gaussians
-  prune_every: 4 # Covisibility and opacity based pruning
+  prune_every: 2 # Covisibility and opacity based pruning
   pruning:
     use_covisibility: True
     covisibility:
@@ -36,14 +34,6 @@ online_opt:
   densify:
     # FIXME this was not correctly implemented! We need to recompile the CUDA kernels with some changes added
     accumulate_pixels: False # Abs GS / Pixel GS averaging over gradients of contributing gaussians
-    # Densify Gaussians based on opacity only after k Mapper updates from https://arxiv.org/pdf/2403.12535
-    use_opacity: False # Use opacity based densification
-    opacity:
-      after: 5 # NOTE we usually run the Mapper ~30-40 times on normal videos
-      # NOTE we limit this because in unmapped areas, we suddenly would add 100k Gaussians
-      max_pixels: 2000 # Maximum number of pixels to densify
-      th: 0.05 # Opacity value below which we densify
-
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
       max_grad: 0.001 # Gaussians with gradients above this are split (smaller -> denser)
@@ -90,11 +80,12 @@ loss:
   with_depth_smoothness: False # Similarity loss between depth and image gradients
   use_ms_ssim: False # Multi-Scale SSIM loss (Hint: This improves mainly PSNR at the cost of slightly worse LPIPS and L1)
   depth_func: l1 # 'l1', 'log_l1', 'l1_huber', 'pearson' (Hint: We achieved best results simply with l1)
-  rgb_boundary_threshold: 0.001 # Pixel information in an image needs to be at least higher than this 
+  # NOTE this is from MonoGS, where they use 0.001. I dont like this setting as there are some black walls on Replica which affects performance
+  rgb_boundary_threshold: 0.0 # Pixel information in an image needs to be at least higher than this 
 
   # Weights
-  alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
-  alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
+  alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth
+  alpha2: 0.2 # Weight SSIM and L1 loss 
   beta1: 2.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
   beta2: 0.0001 # Edge-aware smoothness loss for depth (default 0.001 is common in monocular depth estimation)
 
@@ -120,12 +111,6 @@ refinement:
   densify_until: 250 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
 
   densify:
-    # Densify Gaussians based on opacity only after k Mapper updates
-    use_opacity: False # Use opacity based densification
-    opacity:
-      max_pixels: 10000 # Maximum number of pixels to densify
-      th: 0.01 # Opacity value below which we densify
-
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
       max_grad: 0.005 # Gaussians with gradients above this are split (smaller -> denser)

@@ -57,12 +57,11 @@ class SLAM:
 
         In general the Frontend should be the fastest Process and act as an upper bound to how fast we can get.
         You can expect 15 - 25 FPS on normal data with mid resolution.
-        You can see the final runtime of our system by checking the progressbar of the Frontend Process, since it waits for
-        the Mapper and the Backend runs truly in parallel, it shows the amortized costs really well.
+        You can see the final runtime of our system printed at the end
         NOTE: We usually get a significant slow down only because of the Renderer/Mapper. When configured well, we can still hit ~6 FPS with everything.
 
     Memory consumption is driven by (many) different building blocks, mainly:
-        - Video buffer in float32 with size 256 - 512 keyframes:
+        - Video buffer in float32 with size 256 - 512 keyframes
         - Neural networks for i) DROID optical flow ii) (optional) RAFT optical flow / EIGEN visual place recognition
         - Local Frontend Pose Graph
         - Global Backend Pose Graph
@@ -94,8 +93,6 @@ class SLAM:
 
         # Insert a dummy delay to snychronize frontend and backend as needed
         self.sleep_time = cfg.get("sleep_delay", 0.1)
-        self.start_time = torch.ones((1)).float().share_memory_()
-        self.end_time = torch.ones((1)).float().share_memory_()
 
         # Delete backend when hitting this threshold, so we can keep going with just frontend
         self.max_ram_usage = cfg.get("max_ram_usage", 0.8)
@@ -106,6 +103,7 @@ class SLAM:
         self.video = DepthVideo(cfg)  # store images, depth, poses, intrinsics (shared between process)
         self.traj_filler = PoseTrajectoryFiller(self.cfg, net=self.net, video=self.video, device=self.device)
         self.frontend = FrontendWrapper(cfg, self)
+
         if self.cfg.run_backend:
             self.backend = BackendWrapper(cfg, self)
             # NOTE self.frontend.window is not an accurate representation over which frames we optimize!
@@ -115,10 +113,12 @@ class SLAM:
         else:
             self.backend = None
             self.backend_warmup = 9999
+
         if cfg.run_loop_detection:
             self.loop_detector = LoopDetector(self.cfg.loop_closure, self.net, self.video, self.device)
         else:
             self.loop_detector = None
+
         if cfg.run_mapping_gui and cfg.run_mapping:
             self.q_main2vis = mp.Queue()
             self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs=(self.q_main2vis))
@@ -283,8 +283,6 @@ class SLAM:
         # Wait up for other threads to start
         while self.all_trigered < self.num_running_thread:
             pass
-
-        self.start_time *= time()
 
         # Main Loop which drives the whole system
         for frame in tqdm(stream):
@@ -751,9 +749,6 @@ class SLAM:
         #### ------------------- ####
         ### Trajectory evaluation ###
         #### ------------------- ####
-        # If we dont optimize the scales of our prior, we should also not use scale_adjustment!
-        # NOTE chen: Its unfair to not scale the trajectory when optimize_scales=False, because the monocular depth is usually not metric depth
-        # if (self.cfg.mode == "prgbd" and self.video.optimize_scales) or self.cfg.mode == "mono":
         if self.cfg.mode in ["prgbd", "mono"]:
             monocular = True
         else:
@@ -918,14 +913,7 @@ class SLAM:
             # NOTE chen: even if we have optimized the poses with the GaussianMapper, we would have fed them back
             kf_tstamps = self.video.timestamp[: self.video.counter.value].int().cpu().tolist()
             est_w2c_all, tstamps = self.traj_filler(stream, return_tstamps=True)
-            # TODO this does not work
-            # # HACK chen: if we stop the stream abruptly for whatever reason, then we need to cut the trajectory
-            # if self.t_stop is not None:
-            #     est_w2c_all = est_w2c_all[: self.t_stop]
-            #     tstamps = tstamps[: self.t_stop]
-
             est_c2w_all_lie = est_w2c_all.inv().vec().cpu()  # 7x1 Lie algebra
-
             # Take from video directly without interpolation optimization
             est_w2c_kf_lie = self.video.poses[: self.video.counter.value]
             est_c2w_kf_lie = SE3.InitFromVec(est_w2c_kf_lie).inv().vec()
@@ -933,6 +921,7 @@ class SLAM:
         est_c2w_all_lie, est_c2w_kf_lie = est_c2w_all_lie.cpu(), est_c2w_kf_lie.cpu()
 
         # Evo evaluation package assumes lie algebras to be in form [tx, ty, tz, qw, qx, qy, qz]
+        # while lietorch uses [qx, qy, qz, qw, tx, ty, tz]
         traj_eval = {}
         traj_eval["est_c2w_all_lie"] = lie_quat_swap_convention(est_c2w_all_lie.clone()).numpy()
         traj_eval["est_c2w_kf_lie"] = lie_quat_swap_convention(est_c2w_kf_lie).numpy()
@@ -997,7 +986,7 @@ class SLAM:
                 "tracking_net": self.net.state_dict(),
                 "keyframe_timestamps": self.video.timestamp,
             },
-            os.path.join(self.output, "checkpoints/go.ckpt"),
+            os.path.join(self.output, "checkpoints/droid.ckpt"),
         )
 
     def terminate(

@@ -9,7 +9,7 @@ echo "Start evaluating on Replica dataset..."
 for sc in ${scenes}
 do
   echo Running on $sc ...
-  python run.py data=Replica/base data.input_folder=/media/data/Replica/${sc} mode=$MODE evaluate=True backend_every=8 mapper_every=20 hydra.job.name=${EXPNAME}
+  python run.py data=Replica/base tacking=base mapping=replica data.input_folder=/media/data/Replica/${sc} mode=$MODE evaluate=True backend_every=8 mapper_every=20 hydra.job.name=${EXPNAME}
   echo $sc done!
 done
 echo All Done!

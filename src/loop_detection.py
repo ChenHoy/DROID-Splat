@@ -140,6 +140,8 @@ class LoopDetector:
     def info(self, msg) -> None:
         print(colored("[Loop Detection]: " + msg, "cyan"))
 
+    # NOTE chen: make sure that RAFT is setup and in PYTHONPATH here
+    # this is not standalone with our repo right now
     def load_raft(self, checkpoint: str) -> None:
         """Load a proper optical flow network like RAFT"""
         from easydict import EasyDict as edict

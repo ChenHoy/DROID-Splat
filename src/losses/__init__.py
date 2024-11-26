@@ -45,8 +45,6 @@ def mapping_rgbd_loss(
     image_gt = cam.original_image
 
     # Mask out pixels with little information (from MonoGS)
-    # FIXME chen: this is needed for masking areas out of an objective
-    # however it is also the source of a bug on Replica, where we accidentally mask out a valid wall area that is pitch black
     rgb_pixel_mask = (image_gt.sum(dim=0) >= rgb_boundary_threshold).view(*depth.shape)
     # Include additional attached masks if they exist
     if cam.mask is not None:

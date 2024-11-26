@@ -1,13 +1,13 @@
 defaults:
  - _self_
- - mapping: tum.yaml
- - tracking: tum.yaml
+ - mapping: wild.yaml
+ - tracking: base.yaml
  - loop_closure: eigen.yaml
  - data: TUM_RGBD/base.yaml
 
 hydra:
   run:
-    dir: outputs/Custom/vanilla/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}_${mode}
+    dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}_${mode}
   job:
     chdir: False
     name: droidsplat # Change this to your experiment run name, e.g. the dataset you run on or the run of a configuration

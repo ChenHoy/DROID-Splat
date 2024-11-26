@@ -12,7 +12,6 @@ from tqdm import tqdm
 import torch
 import torch.multiprocessing as mp
 from torch.utils.data import WeightedRandomSampler
-from lietorch import SE3
 
 import numpy as np
 import cv2
@@ -27,7 +26,7 @@ from .gaussian_splatting.camera_utils import Camera
 from .losses import mapping_rgbd_loss, plot_losses
 
 from .gaussian_splatting.pose_utils import update_pose
-from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov, getWorld2View2
+from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
 from .utils.multiprocessing_utils import clone_obj
 from .geom import lie_to_matrix
 from .trajectory_filler import PoseTrajectoryFiller
@@ -510,11 +509,10 @@ class GaussianMapper(object):
             do_densify = (
                 (iter1 + 1) % self.refine_params.prune_densify_every == 0
             ) and iter1 <= self.refine_params.densify_until
-            opacity_densify = self.refine_params.densify.use_opacity
 
             ### Optimize a random batch from all frames
             # In prgbd mode we cant densify non-keyframes which have the wrong scale information!
-            if self.mode == "prgbd" and (do_densify or opacity_densify):
+            if self.mode == "prgbd" and do_densify:
                 batch = draw_random_batch(kf_cams, batch_size=self.refine_params.bs)
             ### Optimize a random batch from all frames
             elif self.refine_params.sampling.use_neighborhood:
@@ -538,14 +536,11 @@ class GaussianMapper(object):
             for iter2 in tqdm(
                 range(self.refine_params.batch_iters), desc=colored("Batch Optimization", "magenta"), colour="magenta"
             ):
+                # Use the global iteration for annedaling the learning rate!
                 loss = self.mapping_step(
-                    total_iter,  # Use the globa iteration for annedaling the learning rate!
-                    batch,
-                    prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
-                    opacity_densify=opacity_densify,  # Densify based on low opacity regions
-                    optimize_poses=self.refine_params.optimize_poses,
+                    total_iter, batch, prune_densify=do_densify, optimize_poses=self.refine_params.optimize_poses
                 )
-                do_densify, opacity_densify = False, False
+                do_densify = False
                 print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss}", "cyan"))
                 self.loss_list.append(loss)
                 if self.use_gui:
@@ -679,7 +674,6 @@ class GaussianMapper(object):
                 view.cam_rot_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
                 view.cam_trans_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
 
-    # TODO is n_touched really the same as in 2D G++?
     def render_compare(self, view: Camera) -> Tuple[float, Dict, Dict]:
         """Render current view and compute loss by comparing with groundtruth"""
         render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
@@ -692,12 +686,7 @@ class GaussianMapper(object):
         return current_loss, render_pkg
 
     def mapping_step(
-        self,
-        iter: int,
-        frames: List[Camera],
-        prune_densify: bool = False,
-        opacity_densify: bool = False,
-        optimize_poses: bool = False,
+        self, iter: int, frames: List[Camera], prune_densify: bool = False, optimize_poses: bool = False
     ) -> float:
         """Takes the list of selected keyframes to optimize and performs one step of the mapping optimization."""
         # Sanity check when we dont have anything to optimize
@@ -712,7 +701,7 @@ class GaussianMapper(object):
 
         loss = 0.0
         # Collect for densification and pruning
-        opacity_acm, radii_acm, touched_acm = [], [], []
+        radii_acm, touched_acm = [], []
         visibility_filter_acm, viewspace_point_tensor_acm = [], []
         for view in frames:
             current_loss, render_pkg = self.render_compare(view)
@@ -725,7 +714,6 @@ class GaussianMapper(object):
             self.n_optimized[view.uid] += 1
 
             # Accumulate for after loss backpropagation
-            opacity_acm.append((view, render_pkg["opacity"]))
             visibility_filter_acm.append(render_pkg["visibility_filter"])
             viewspace_point_tensor_acm.append(render_pkg["viewspace_points"])
             radii_acm.append(render_pkg["radii"])
@@ -770,29 +758,12 @@ class GaussianMapper(object):
                 # General pruning based on opacity and size + densification (from original 3DGS)
                 self.gaussians.densify_and_prune(**self.update_params.densify.vanilla)
 
-            # Densify in low opacity regions only after the map is stable already
-            # (else we waste compute, because densify_and_prune will fill initial holes quickly)
-            if prune_densify and opacity_densify and self.count > self.update_params.densify.opacity.after:
-                ng_before = len(self.gaussians)
-                for i, acm_item in enumerate(opacity_acm):
-                    view, opacity = acm_item
-                    # Only densify in regions with: i) with low opacity, ii) with high rgb difference, iii) with high depth difference
-                    # see https://arxiv.org/pdf/2403.12535
-                    mask = opacity.squeeze() < self.update_params.densify.opacity.th
-                    # if this mask has too many pixels, then subsample to acceptable lower number
-                    if mask.sum() > self.update_params.densify.opacity.max_pixels:
-                        mask = random_subsample_mask(mask, self.update_params.densify.opacity.max_pixels)
-                        self.gaussians.densify_from_mask(view, mask, depthmap=view.depth_prior.cpu().numpy())
-                if (len(self.gaussians) - ng_before) > 0:
-                    self.info(f"Added {len(self.gaussians) - ng_before} gaussians based on opacity")
-
         ### Update states
         self.gaussians.optimizer.step()
         self.gaussians.optimizer.zero_grad()
         self.gaussians.update_learning_rate(iter)
 
         # Delete lists of tensors
-        del opacity_acm
         del radii_acm
         del visibility_filter_acm
         del viewspace_point_tensor_acm
@@ -859,7 +830,7 @@ class GaussianMapper(object):
         end = time.time()
         self.info(f"({mode}) Covisibility pruning took {(end - start):.2f}s, pruned: {to_prune.sum()} Gaussians")
 
-    def select_keyframes(self, random_weights: Optional[str] = None):
+    def select_keyframes(self, weights: Optional[str] = None):
         """Select the last n1 frames and n2 other random frames from all.
         If with_random_weights is set, we assign a higher sampling probability to keyframes, that have not yet been
         optimized a lot. This is measured by self.n_optimized.
@@ -877,15 +848,9 @@ class GaussianMapper(object):
             last_window = self.cameras[-self.n_last_frames :]
             window_idx = np.arange(len(self.cameras))[-self.n_last_frames :]
             if self.n_rand_frames > 0:
-                if random_weights == "visited":
+                # NOTE chen: weights should also only go from [0:-n_last_frames] !!!
+                if weights is not None:
                     to_draw = np.arange(len(self.cameras) - self.n_last_frames)  # Indices we can draw from
-                    weights = [self.n_optimized[idx] / self.mapping_iters + 1 for idx in to_draw]
-                    weights = [1 / w for w in weights]  # Invert to get higher probability for less visited frames
-                    random_idx = list(WeightedRandomSampler(weights, self.n_rand_frames, replacement=False))
-                    random_idx = to_draw[random_idx]
-                elif random_weights == "loss":
-                    to_draw = np.arange(len(self.cameras) - self.n_last_frames)  # Indices we can draw from
-                    weights = [self.last_frame_loss[idx] for idx in to_draw]
                     random_idx = list(WeightedRandomSampler(weights, self.n_rand_frames, replacement=False))
                     random_idx = to_draw[random_idx]
                 else:
@@ -1101,15 +1066,9 @@ class GaussianMapper(object):
             do_densify = (
                 iter % self.update_params.prune_densify_every == 0 and iter < self.update_params.prune_densify_until
             )
-            frames = (
-                self.select_keyframes(random_weights=self.update_params.random_selection_weights)[0] + self.new_cameras
-            )
+            frames = self.select_keyframes()[0] + self.new_cameras
             loss = self.mapping_step(
-                iter,
-                frames,
-                prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
-                opacity_densify=self.update_params.densify.use_opacity,  # Densify based on low opacity regions
-                optimize_poses=self.update_params.optimize_poses,
+                iter, frames, prune_densify=do_densify, optimize_poses=self.update_params.optimize_poses
             )
             self.loss_list.append(loss)
 
