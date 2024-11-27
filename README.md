@@ -188,6 +188,18 @@ We would like to acknowledge other works, who had the same idea and apparently b
 - We simply reanchor the Gaussians when a significant map update from the Tracker happens, they seem to have a more involved strategy. 
 - We only account for scale changes of the monocular prior in our Gaussians by reoptimization. Since the map is usually already stable when initializing Gaussians, we never have seen a problem with this. 
 
+# How to cite
+If you find this work relevant, please cite us with
+```bibtex
+@misc{homeyer2024droid,
+  title={DROID-Splat: Combining end-to-end SLAM with 3D Gaussian Splatting},
+  author={Homeyer, Christian, Begiristain, Leon and Schnoerr, Christoph},
+  journal={arXiv preprint arXiv:2411.17660},
+  year={2024}
+}
+```
+
+
 # References
 ```bibtex
 @misc{teed2021droid,
