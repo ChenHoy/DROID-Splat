@@ -23,6 +23,9 @@ This is a deep-learning-based dense visual SLAM framework that achieves **real-t
 - Dense differentiable Rendering with [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting)
 - We also support the optimization kernel from [DroidCalib](https://github.com/boschresearch/DroidCalib), which supports arbitrary camera models and optimizes the camera intrinsics on top of the map and pose graph.
 
+## :loudspeaker: Update 
+We added the **mcmc** branch, which treats Gaussian Splatting as [Markov Chain Monte Carlo](https://github.com/ubc-vision/3dgs-mcmc) and therefore has an improved densification & pruning strategy. In order to use this, simply clone the mcmc-branch and proceed with the install as usual (Our install now features one additional submodule). The rasterizer still supports pose gradient computation. We observed consistent gains in our experiments over vanilla 3D Gaussian Splatting. We will add the [2D Gaussian Splatting](https://github.com/hbb1/2d-gaussian-splatting) branch in the upcoming weeks.
+
 ## :memo: Code
 
 You can create an anaconda environment called `droidsplat`. For linux, you need to install **libopenexr-dev** before creating the environment.
