@@ -44,7 +44,7 @@ What this means is that we treat the Gaussians as a propability distribution and
 are moves in a markov model. 
 Cool features that are possible from this view: 
     - Improved densification and better scene representation. This beats vanilla 3DGS in pure performance
-    - Controllable scene representation. We can control the totla number of Gaussians and their spread in the scene with only a single hyperparameter
+    - Controllable scene representation. We can control the total number of Gaussians and their spread in the scene with only a single hyperparameter
 """
 
 
@@ -67,8 +67,6 @@ class GaussianMapper(object):
 
         # Given an external mask for dyn. objects, remove these from the optimization
         self.filter_dyn = cfg.get("with_dyn", False)
-
-        self.save_renders = cfg.mapping.save_renders
 
         self.opt_params = cfg.mapping.opt_params  # Optimizer
         self.loss_params = cfg.mapping.loss  # Losses
@@ -295,7 +293,6 @@ class GaussianMapper(object):
             R = w2c[:3, :3].unsqueeze(0).detach()
             T = w2c[:3, 3].detach()
             cam.update_RT(R, T)
-            cam.set_ray()  # Update camera origin and direction
 
         self.video.mapping_dirty[to_update] = False
 
@@ -367,6 +364,35 @@ class GaussianMapper(object):
                 )
             )
 
+    def rescale_gaussians(self, indices: torch.Tensor | List[int], delta_scale: torch.Tensor):
+        """After a large map change, we need to rescale the Gaussians. For this purpose we simply measure the
+        rel. mean disparity change for indidividual frames and check for large updates.
+        We can then simply multiply the respective Gaussians with the factor.
+
+        NOTE indices are positions in the video buffer since we reanchor after updates from video.ba()
+        """
+        updated_cams = []
+
+        for idx, scale in zip(indices, delta_scale):
+            # We have never mapped this frame before
+
+            if int(idx) not in self.buffer2cam:
+                continue
+            else:
+                self.gaussians.rescale(self.buffer2cam[int(idx)], scale)
+                # NOTE chen: We append to our camera list in consecutive order, i.e. this should normally be sorted!
+                # this is not a given though! be cautious, e.g. during refinement the list changes due to insertion of non-keyframes
+                cam = self.cameras[self.buffer2cam[int(idx)]]
+                updated_cams.append(cam)
+
+        # Add the kf from self.cameras[idx] to updated cameras for GUI
+        if self.use_gui:
+            self.q_main2vis.put_nowait(
+                gui_utils.GaussianPacket(
+                    gaussians=clone_obj(self.gaussians), keyframes=[cam.detached() for cam in updated_cams]
+                )
+            )
+
     def get_ram_usage(self) -> Tuple[float, float]:
         free_mem, total_mem = torch.cuda.mem_get_info(device=self.device)
         used_mem = 1 - (free_mem / total_mem)
@@ -378,9 +404,9 @@ class GaussianMapper(object):
         def draw_random_batch(
             kf_cams: List[Camera],
             batch_size: int = 16,
+            weights_kf: Optional[List[float]] = None,
             nonkf_cams: Optional[List[Camera]] = None,
             kf_always: Optional[float] = None,
-            weights_kf: Optional[List[float]] = None,
         ) -> List[Camera]:
             """Draw a random mini batch. If only keyframes are passed, we draw a random batch from them.
             If importance weights are provided, we assign a higher probability to certain keyframes to be drawn.
@@ -491,7 +517,6 @@ class GaussianMapper(object):
             do_densify = (
                 (iter1 + 1) % self.refine_params.prune_densify_every == 0
             ) and iter1 <= self.refine_params.densify_until
-            do_prune = (iter1 + 1) % self.refine_params.prune_every == 0 and iter1 <= self.refine_params.prune_until
 
             ### Optimize a random batch from all frames
             # In prgbd mode we cant densify non-keyframes which have the wrong scale information!
@@ -524,14 +549,6 @@ class GaussianMapper(object):
                     total_iter, batch, prune_densify=do_densify, optimize_poses=self.refine_params.optimize_poses
                 )
                 do_densify = False
-                if do_prune:
-                    # Gaussians should satisfy a certain absolute density, i.e. nearest neighbor distance < eps
-                    if self.update_params.pruning.use_floaters:
-                        start = time.time()
-                        floaters = self.gaussians.prune_floaters(**self.update_params.pruning.floaters)
-                        end = time.time()
-                        self.info(f"(Floater) pruning took {(end - start):.2f}s, pruned: {floaters.sum()} floaters")
-                do_prune = False
                 print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss}", "cyan"))
                 self.loss_list.append(loss)
                 if self.use_gui:
@@ -832,17 +849,14 @@ class GaussianMapper(object):
         random_frames = [cams[i] for i in random_idx]
         return random_frames, random_idx
 
-    def select_keyframes(self, weighting_strategy: Optional[str] = None):
+    def select_keyframes(self, weights: Optional[str] = None):
         """Select the last n1 frames and n2 other random frames from all.
         If with_random_weights is set, we assign a higher sampling probability to keyframes, that have not yet been
         optimized a lot. This is measured by self.n_optimized.
 
         NOTE this method assumes self.cameras to contain sorted keyframes with increasing uid order.
 
-        random_weights:
-            If set to "visited", we assign higher probability to frames that have been visited less often.
-            If set to "loss", we assign higher probability to frames that had a higher loss from the last optimization
-            If set to None, we draw uniformly from all frames.
+        weights: Optional weight tensors for selecting frames with higher probability
         """
         # If the batch size is too big, we can just select all frames
         if len(self.cameras) <= self.n_last_frames + self.n_rand_frames:
@@ -857,16 +871,6 @@ class GaussianMapper(object):
             rest_idx = np.arange(len(self.cameras))[: -self.n_last_frames]
             # Take additional random frames on top
             if self.n_rand_frames > 0 and len(rest) > 0:
-                if weighting_strategy == "visited":
-                    to_draw_ids = [cam.uid for cam in rest]  # Sanity check in case we dont have ordered cams
-                    weights = [self.n_optimized[idx] for idx in to_draw_ids]
-                    weights = [1 / w for w in weights]  # Invert to get higher probability for less visited frames
-                elif weighting_strategy == "loss":
-                    to_draw_ids = [cam.uid for cam in rest]  # Sanity check in case we dont have ordered cams
-                    weights = [self.last_frame_loss[idx] for idx in to_draw_ids]
-                else:
-                    weights = None
-
                 random_frames, random_idx = self.draw_random_frames(rest, weights=weights, n_frames=self.n_rand_frames)
                 keyframes = last_window + random_frames
                 keyframes_idx = np.concatenate([window_idx, rest_idx[random_idx]])
@@ -964,10 +968,6 @@ class GaussianMapper(object):
 
         self.gaussians.save_ply(f"{self.output}/mesh/final_{self.mode}.ply")
         self.info(f"Mesh saved at {self.output}/mesh/final_{self.mode}.ply")
-
-        if self.save_renders:
-            for cam in self.cameras:
-                self.save_render(cam, f"{self.output}/intermediate_renders/final/{cam.uid}.png")
 
         plot_losses(
             self.loss_list,
@@ -1080,11 +1080,7 @@ class GaussianMapper(object):
             do_densify = (
                 iter % self.update_params.prune_densify_every == 0 and iter < self.update_params.prune_densify_until
             )
-            # TODO determine the visual overlap between frames in a covisibility graph
-            # (We sometimes have batches of size 50)
-            old_keyframes = self.select_keyframes(weighting_strategy=self.update_params.random_selection_strategy)[0]
-            frames = old_keyframes + self.new_cameras
-            # Prune and densify with vanilla 3DGS strategy
+            frames = self.select_keyframes()[0] + self.new_cameras
             loss = self.mapping_step(
                 iter, frames, prune_densify=do_densify, optimize_poses=self.update_params.optimize_poses
             )
@@ -1094,19 +1090,12 @@ class GaussianMapper(object):
         print(colored("\n[Gaussian Mapper] ", "magenta"), colored(f"Loss: {self.loss_list[-1]}", "cyan"))
 
         ### Prune unreliable Gaussians
-        # TODO Since we now dont have the vanilla densify_and_split strategy, we dont get rid of big gaussians
-        # TODO do manual big point removal?
+        # TODO chen: Since we now dont have the vanilla densify_and_split strategy, we dont get rid of big gaussians
+        # TODO do manual big point removal as is done in other works?
         if len(self.iteration_info) % self.update_params.prune_every == 0 and delay_to_tracking:
             # Gaussians should be visible in multiple frames
             if self.update_params.pruning.use_covisibility:
                 self.covisibility_pruning(**self.update_params.pruning.covisibility)
-
-            # Gaussians should satisfy a certain absolute density, i.e. nearest neighbor distance < eps
-            if self.update_params.pruning.use_floaters:
-                start = time.time()
-                floaters = self.gaussians.prune_floaters(**self.update_params.pruning.floaters)
-                end = time.time()
-                self.info(f"(Floater) pruning took {(end - start):.2f}s, pruned: {floaters.sum()} floaters")
 
         ### Feedback new state of map to Tracker
         if (self.feedback_poses or self.feedback_disps) and self.count > self.feedback_params.warmup:
@@ -1126,13 +1115,6 @@ class GaussianMapper(object):
         ### Update visualization
         if self.use_gui:
             self.update_gui(last_new_cam)
-
-        ### Save renders for debugging and visualization
-        if self.save_renders:
-            # Save only every 5th camera to save disk spacse
-            for cam in self.cameras:
-                if cam.uid % 5 == 0:
-                    self.save_render(cam, f"{self.output}/intermediate_renders/temp/{cam.uid}.png")
 
         # Free memory each iteration NOTE: this slows it down a bit
         if release_cache:

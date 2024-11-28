@@ -128,6 +128,13 @@ class BaseDataset(Dataset):
 
         self.input_folder = cfg.data.input_folder
         self.color_paths = sorted(glob.glob(self.input_folder))
+
+        # Manage the stream, i.e. we can also run the system only in [t0, t1]
+        self.t_start = cfg.get("t_start", 0)
+        self.t_stop = cfg.get("t_stop", None)
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
+
         self.color_paths = self.color_paths[:: self.stride]
 
         self.has_dyn_masks = False
@@ -327,11 +334,16 @@ class ImageFolder(BaseDataset):
         if len(self.color_paths) == 0:
             input_images = os.path.join(self.input_folder, "images", "*.png")
             self.color_paths = sorted(glob.glob(input_images))
+
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
         self.color_paths = self.color_paths[:: self.stride]
 
         depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model, "*.npy")))
         if len(depth_paths) != 0:
             self.depth_paths = depth_paths
+            if self.t_stop is not None:
+                self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
             self.depth_paths = self.depth_paths[:: self.stride]
             assert len(self.depth_paths) == len(
                 self.color_paths
@@ -347,6 +359,8 @@ class Replica(BaseDataset):
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/frame*.jpg")))
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
+        self.load_poses(os.path.join(self.input_folder, "traj.txt"))
+
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
             self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model, "frame*.npy")))
@@ -356,9 +370,13 @@ class Replica(BaseDataset):
         else:
             self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/depth*.png")))
 
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
+            self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
+            self.poses = self.poses[self.t_start : self.t_stop]
+
         self.color_paths = self.color_paths[:: self.stride]
         self.depth_paths = self.depth_paths[:: self.stride]
-        self.load_poses(os.path.join(self.input_folder, "traj.txt"))
         self.poses = self.poses[:: self.stride]
 
         if self.relative_poses:
@@ -388,21 +406,27 @@ class TartanAir(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(TartanAir, self).__init__(cfg, device)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_left/*.png")))
-        # Set number of images for loading poses
         self.n_img = len(self.color_paths)
+        self.load_poses(os.path.join(self.input_folder, "pose_left.txt"))
+
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "prgbd":
             self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model + "_left", "*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
-            self.depth_paths = self.depth_paths[:: self.stride]
-
         else:
             self.depth_paths = None
 
+        if self.depth_paths is not None:
+            if self.t_stop is not None:
+                self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
+            self.depth_paths = self.depth_paths[:: self.stride]
+
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
+            self.poses = self.poses[self.t_start : self.t_stop]
         self.color_paths = self.color_paths[:: self.stride]
-        self.load_poses(os.path.join(self.input_folder, "pose_left.txt"))
         self.poses = self.poses[:: self.stride]
 
         if self.relative_poses:
@@ -451,11 +475,17 @@ class DAVIS(BaseDataset):
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
-            self.depth_paths = self.depth_paths[:: self.stride]
-
         else:
             self.depth_paths = None
 
+        if self.depth_paths is not None:
+            if self.t_stop is not None:
+                self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
+            self.depth_paths = self.depth_paths[:: self.stride]
+
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
+            self.mask_paths = self.mask_paths[self.t_start : self.t_stop]
         self.color_paths = self.color_paths[:: self.stride]
         self.mask_paths = self.mask_paths[:: self.stride]
         self.n_img = len(self.color_paths)
@@ -474,26 +504,34 @@ class TotalRecon(BaseDataset):
 
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
+        self.pose_paths = sorted(glob.glob(os.path.join(self.input_folder, "camera_rtks/*.txt")))
+
         # For Pseudo RGBD, we use monocular depth predictions in another folder
         if cfg.mode == "rgbd":
             self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depths", "*.depth")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
-            self.depth_paths = self.depth_paths[:: self.stride]
         elif cfg.mode == "prgbd":
             self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, self.mono_model, "*.npy")))
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
-            self.depth_paths = self.depth_paths[:: self.stride]
-
         else:
             self.depth_paths = None
 
+        if self.depth_paths is not None:
+            if self.t_stop is not None:
+                self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
+            self.depth_paths = self.depth_paths[:: self.stride]
+
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
+            self.mask_paths = self.mask_paths[self.t_start : self.t_stop]
+            self.pose_paths = self.pose_paths[self.t_start : self.t_stop]
+
         self.color_paths = self.color_paths[:: self.stride]
         self.mask_paths = self.mask_paths[:: self.stride]
-        self.pose_paths = sorted(glob.glob(os.path.join(self.input_folder, "camera_rtks/*.txt")))
         self.pose_paths = self.pose_paths[:: self.stride]
 
         self.has_dyn_masks = True
@@ -539,11 +577,16 @@ class KITTI(BaseDataset):
             assert (
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
-            self.depth_paths = self.depth_paths[:: self.stride]
-
         else:
             self.depth_paths = None
 
+        if self.depth_paths is not None:
+            if self.t_stop is not None:
+                self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
+            self.depth_paths = self.depth_paths[:: self.stride]
+
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
         self.color_paths = self.color_paths[:: self.stride]
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
@@ -557,9 +600,16 @@ class Azure(BaseDataset):
         super(Azure, self).__init__(cfg, device)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "color", "*.jpg")))
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", "*.png")))
+        self.load_poses(os.path.join(self.input_folder, "scene", "trajectory.log"))
+
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
+            self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
+            self.poses = self.poses[self.t_start : self.t_stop]
+
         self.color_paths = self.color_paths[:: self.stride]
         self.depth_paths = self.depth_paths[:: self.stride]
-        self.load_poses(os.path.join(self.input_folder, "scene", "trajectory.log"))
+        self.poses = self.poses[:: self.stride]
         self.n_img = len(self.color_paths)
 
     def load_poses(self, path):
@@ -594,13 +644,22 @@ class ScanNet(BaseDataset):
         self.color_paths = sorted(
             glob.glob(os.path.join(self.input_folder, "color", "*.jpg")),
             key=lambda x: int(os.path.basename(x)[:-4]),
-        )[:max_frames][:: self.stride]
+        )[:max_frames]
         self.depth_paths = sorted(
             glob.glob(os.path.join(self.input_folder, "depth", "*.png")),
             key=lambda x: int(os.path.basename(x)[:-4]),
-        )[:max_frames][:: self.stride]
+        )[:max_frames]
         self.load_poses(os.path.join(self.input_folder, "pose"))
-        self.poses = self.poses[:max_frames][:: self.stride]
+        self.poses = self.poses[:max_frames]
+
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
+            self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
+            self.poses = self.poses[self.t_start : self.t_stop]
+
+        self.color_paths = self.color_paths[:: self.stride]
+        self.depth_paths = self.depth_paths[:: self.stride]
+        self.poses = self.poses[:: self.stride]
 
         self.n_img = len(self.color_paths)
         print("INFO: {} images got!".format(self.n_img))
@@ -629,33 +688,6 @@ class ScanNet(BaseDataset):
             self.poses.append(c2w)
 
 
-class CoFusion(BaseDataset):
-    def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
-        super(CoFusion, self).__init__(cfg, device)
-        self.input_folder = os.path.join(self.input_folder)
-        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "colour", "*.png")))
-        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth_noise", "*.exr")))
-        self.color_paths = self.color_paths[:: self.stride]
-        self.depth_paths = self.depth_paths[:: self.stride]
-        # Set number of images for loading poses
-        self.n_img = len(self.color_paths)
-        self.load_poses(os.path.join(self.input_folder, "trajectories"))
-
-    def switch_to_rgbd_gt(self):
-        """When evaluating, we want to use the ground truth depth maps."""
-        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth_noise", "*.exr")))
-        self.depth_paths = self.depth_paths[:: self.stride]
-
-    def load_poses(self, path):
-        # We tried, but cannot align the coordinate frame of cofusion to ours.
-        # So here we provide identity matrix as proxy.
-        # But it will not affect the calculation of ATE since camera trajectories can be aligned.
-        self.poses = []
-        for i in range(self.n_img):
-            c2w = np.eye(4)
-            self.poses.append(c2w)
-
-
 class TUM_RGBD(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(TUM_RGBD, self).__init__(cfg, device)
@@ -664,6 +696,12 @@ class TUM_RGBD(BaseDataset):
         self.color_paths, self.depth_paths, self.poses = self.loadtum(
             self.input_folder, cfg, frame_rate=32, mode=cfg.mode
         )
+
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
+            self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
+            self.indices = self.indices[self.t_start : self.t_stop]
+            self.poses = None if self.poses is None else self.poses[self.t_start : self.t_stop]
 
         self.cfg = cfg
         self.color_paths = self.color_paths[:: self.stride]
@@ -794,6 +832,12 @@ class ETH3D(BaseDataset):
             self.image_timestamps,
         ) = self.loadtum(self.input_folder, frame_rate=-1)
 
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
+            self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
+            self.poses = None if self.poses is None else self.poses[self.t_start : self.t_stop]
+            self.image_timestamps = self.image_timestamps[self.t_start : self]
+
         self.color_paths = self.color_paths[:: self.stride]
         self.depth_paths = self.depth_paths[:: self.stride]
         self.poses = None if self.poses is None else self.poses[:: self.stride]
@@ -897,6 +941,11 @@ class EuRoC(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(EuRoC, self).__init__(cfg, device)
         self.color_paths, self.right_color_paths, self.poses = self.loadtum(self.input_folder, frame_rate=-1)
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
+            self.right_color_paths = self.right_color_paths[self.t_start : self.t_stop]
+            self.poses = None if self.poses is None else self.poses[self.t_start : self.t_stop]
+
         self.color_paths = self.color_paths[:: self.stride]
         self.right_color_paths = self.right_color_paths[:: self.stride]
         self.poses = None if self.poses is None else self.poses[:: self.stride]
@@ -1177,7 +1226,9 @@ class Sintel(BaseDataset):
     def switch_to_rgbd_gt(self):
         """When evaluating, we want to use the ground truth depth maps."""
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/depth*.png")))
-        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", cfg.data.scene, "*.dpt")))[:-1]
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", self.cfg.data.scene, "*.dpt")))[
+            :-1
+        ]
         self.depth_paths = self.depth_paths[:: self.stride]
 
     def load_poses(self, paths: List[str]):
@@ -1264,7 +1315,6 @@ dataset_dict = {
     "folder": ImageFolder,
     "replica": Replica,
     "scannet": ScanNet,
-    "cofusion": CoFusion,
     "azure": Azure,
     "tumrgbd": TUM_RGBD,
     "eth3d": ETH3D,

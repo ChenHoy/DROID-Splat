@@ -119,6 +119,16 @@ class Backend:
         self.video.pose_changes[t0:t1] = (dP * dP_prev).vec()  # You can now get g_cur = dP * g_prev
 
     @torch.no_grad()
+    def accumulate_scale_change(self, scale_prev, scale_cur, t0, t1) -> None:
+        """Consider the old mean disparity and the current one.
+
+        NOTE Since we want to apply scale changes to a 3D point cloud with depth, the inverse scale change needs to be multiplied!
+        """
+        delta = scale_cur / (scale_prev + 1e-6)
+        self.video.scale_changes[t0:t1] = delta
+        self.video.scale_changes.clamp_(0.01, 100.0)  # Clamp scale changes to reasonable values
+
+    @torch.no_grad()
     def dense_ba(
         self,
         t_start: int = 0,
@@ -149,12 +159,17 @@ class Backend:
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)
 
+        # NOTE chen: computing the scale of a scene is not straight-forward, we simply take the mean disparity as proxy
+        scales_before = self.video.disps[t_start:t_end].mean(dim=[1, 2]).clone()
         poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
         # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
         graph.update_lowmem(t0=t_start + 1, t1=t_end, steps=steps, iters=iters, max_t=t_end, motion_only=motion_only)
         poses_after = self.video.poses[t_start + 1 : t_end]  # Memoize pose before optimization
+        scales_after = self.video.disps[t_start:t_end].mean(dim=[1, 2]).clone()
         # Memoize pose change in self.video so other Processes can adapt their datastructures
         self.accumulate_pose_change(poses_before, poses_after, t0=t_start + 1, t1=t_end)
+        # Memoize scale change in self.video so other Processes can adapt their datastructures
+        self.accumulate_scale_change(scales_before, scales_after, t0=t_start, t1=t_end)
 
         graph.clear_edges()
         self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization

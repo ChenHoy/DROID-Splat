@@ -57,12 +57,11 @@ class SLAM:
 
         In general the Frontend should be the fastest Process and act as an upper bound to how fast we can get.
         You can expect 15 - 25 FPS on normal data with mid resolution.
-        You can see the final runtime of our system by checking the progressbar of the Frontend Process, since it waits for
-        the Mapper and the Backend runs truly in parallel, it shows the amortized costs really well.
+        You can see the final runtime of our system printed at the end
         NOTE: We usually get a significant slow down only because of the Renderer/Mapper. When configured well, we can still hit ~6 FPS with everything.
 
     Memory consumption is driven by (many) different building blocks, mainly:
-        - Video buffer in float32 with size 256 - 512 keyframes:
+        - Video buffer in float32 with size 256 - 512 keyframes
         - Neural networks for i) DROID optical flow ii) (optional) RAFT optical flow / EIGEN visual place recognition
         - Local Frontend Pose Graph
         - Global Backend Pose Graph
@@ -94,12 +93,6 @@ class SLAM:
 
         # Insert a dummy delay to snychronize frontend and backend as needed
         self.sleep_time = cfg.get("sleep_delay", 0.1)
-        # Manage the stream, i.e. we can also run the system only in [t0, t1]
-        self.t_start = cfg.get("t_start", 0)
-        self.t_stop = cfg.get("t_stop", None)
-
-        self.start_time = torch.ones((1)).float().share_memory_()
-        self.end_time = torch.ones((1)).float().share_memory_()
 
         # Delete backend when hitting this threshold, so we can keep going with just frontend
         self.max_ram_usage = cfg.get("max_ram_usage", 0.8)
@@ -110,6 +103,7 @@ class SLAM:
         self.video = DepthVideo(cfg)  # store images, depth, poses, intrinsics (shared between process)
         self.traj_filler = PoseTrajectoryFiller(self.cfg, net=self.net, video=self.video, device=self.device)
         self.frontend = FrontendWrapper(cfg, self)
+
         if self.cfg.run_backend:
             self.backend = BackendWrapper(cfg, self)
             # NOTE self.frontend.window is not an accurate representation over which frames we optimize!
@@ -119,10 +113,12 @@ class SLAM:
         else:
             self.backend = None
             self.backend_warmup = 9999
+
         if cfg.run_loop_detection:
             self.loop_detector = LoopDetector(self.cfg.loop_closure, self.net, self.video, self.device)
         else:
             self.loop_detector = None
+
         if cfg.run_mapping_gui and cfg.run_mapping:
             self.q_main2vis = mp.Queue()
             self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs=(self.q_main2vis))
@@ -288,8 +284,6 @@ class SLAM:
         while self.all_trigered < self.num_running_thread:
             pass
 
-        self.start_time *= time()
-
         # Main Loop which drives the whole system
         for frame in tqdm(stream):
 
@@ -302,12 +296,6 @@ class SLAM:
                 static_mask = None
             if self.mode not in ["rgbd", "prgbd"]:
                 depth = None
-
-            # Control when to start and when to stop the SLAM system from outside
-            if timestamp < self.t_start:
-                continue
-            if self.t_stop is not None and timestamp > self.t_stop:
-                break
 
             # Transmit the incoming stream to another visualization thread
             if self.cfg.show_stream:
@@ -513,15 +501,16 @@ class SLAM:
         self.all_finished += 1
         self.info("Backend done!")
 
-    def maybe_reanchor_gaussians(self, threshold: float = 0.001) -> None:
+    def maybe_reanchor_gaussians(self, pose_thresh: float = 0.001, scale_thresh: float = 0.1) -> None:
         """Reanchor the Gaussians to follow a big map update.
         For this purpose we simply track the pose changes after a backend optimization."""
         with self.video.get_lock():
             unit = self.video.pose_changes.clone()
 
+        # Reanchor the centers with a 3D transformation
         unit[:] = torch.tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.device)
         delta = pose_distance(self.video.pose_changes, unit)
-        to_update = (delta > threshold).nonzero().squeeze()  # Check for frames with large updates
+        to_update = (delta > pose_thresh).nonzero().squeeze()  # Check for frames with large updates
         if (
             self.gaussian_mapper is not None
             and self.gaussian_mapper.warmup < self.frontend.optimizer.count
@@ -529,7 +518,20 @@ class SLAM:
         ):
             self.gaussian_mapper.reanchor_gaussians(to_update, self.video.pose_changes[to_update])
             with self.video.get_lock():
-                self.video.pose_changes[to_update] = unit  # Reset the pose update
+                self.video.pose_changes[to_update] = unit[to_update]  # Reset the pose update
+
+        # Rescale the Gaussians to follow a scale changes (This happens prominently when doing loop closures)
+        # scale_delta = torch.abs(self.video.scale_changes - 1.0)
+        # to_update = (scale_delta > scale_thresh).nonzero().squeeze()  # Check for frames with large updates
+        # if (
+        #     self.gaussian_mapper is not None
+        #     and self.gaussian_mapper.warmup < self.frontend.optimizer.count
+        #     and to_update.numel() > 0
+        # ):
+        #     self.info(f"Rescale Gaussians at {to_update} due to large scale change in map!")
+        #     self.gaussian_mapper.rescale_gaussians(to_update, self.video.pose_changes[to_update])
+        #     with self.video.get_lock():
+        #         self.video.scale_changes[to_update] = 1.0  # Reset the scale update
 
     def gaussian_mapping(
         self,
@@ -747,9 +749,6 @@ class SLAM:
         #### ------------------- ####
         ### Trajectory evaluation ###
         #### ------------------- ####
-        # If we dont optimize the scales of our prior, we should also not use scale_adjustment!
-        # NOTE chen: Its unfair to not scale the trajectory when optimize_scales=False, because the monocular depth is usually not metric depth
-        # if (self.cfg.mode == "prgbd" and self.video.optimize_scales) or self.cfg.mode == "mono":
         if self.cfg.mode in ["prgbd", "mono"]:
             monocular = True
         else:
@@ -865,9 +864,7 @@ class SLAM:
             render_df = pd.DataFrame(rendering_results)
             render_df.to_csv(os.path.join(render_eval_path, "evaluation_results.csv"), index=False)
 
-    def get_trajectories(
-        self, stream, gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None, with_gt: bool = True
-    ):
+    def get_trajectories(self, stream, gaussian_mapper_last_state: Optional[eval_utils.EvaluatePacket] = None):
         """Get the poses both for the whole video sequence and only the keyframes for evaluation.
         Poses are in format [B, 7, 1] as lie elements.
 
@@ -917,7 +914,6 @@ class SLAM:
             kf_tstamps = self.video.timestamp[: self.video.counter.value].int().cpu().tolist()
             est_w2c_all, tstamps = self.traj_filler(stream, return_tstamps=True)
             est_c2w_all_lie = est_w2c_all.inv().vec().cpu()  # 7x1 Lie algebra
-
             # Take from video directly without interpolation optimization
             est_w2c_kf_lie = self.video.poses[: self.video.counter.value]
             est_c2w_kf_lie = SE3.InitFromVec(est_w2c_kf_lie).inv().vec()
@@ -925,10 +921,11 @@ class SLAM:
         est_c2w_all_lie, est_c2w_kf_lie = est_c2w_all_lie.cpu(), est_c2w_kf_lie.cpu()
 
         # Evo evaluation package assumes lie algebras to be in form [tx, ty, tz, qw, qx, qy, qz]
+        # while lietorch uses [qx, qy, qz, qw, tx, ty, tz]
         traj_eval = {}
         traj_eval["est_c2w_all_lie"] = lie_quat_swap_convention(est_c2w_all_lie.clone()).numpy()
         traj_eval["est_c2w_kf_lie"] = lie_quat_swap_convention(est_c2w_kf_lie).numpy()
-        if with_gt and stream.poses is not None:
+        if stream.poses is not None:
             gt_c2w_all_lie = eval_utils.get_gt_c2w_from_stream(stream).float().cpu()
             gt_c2w_kf_lie = gt_c2w_all_lie[kf_tstamps]
             traj_eval["gt_c2w_all_lie"] = lie_quat_swap_convention(gt_c2w_all_lie).numpy()
@@ -989,7 +986,7 @@ class SLAM:
                 "tracking_net": self.net.state_dict(),
                 "keyframe_timestamps": self.video.timestamp,
             },
-            os.path.join(self.output, "checkpoints/go.ckpt"),
+            os.path.join(self.output, "checkpoints/droid.ckpt"),
         )
 
     def terminate(

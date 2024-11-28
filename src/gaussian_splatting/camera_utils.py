@@ -1,11 +1,9 @@
 from typing import Optional, Tuple
 from omegaconf import DictConfig
-import ipdb
 
 import torch
 from torch import nn
 
-from kornia import create_meshgrid
 from .utils.graphics_utils import getProjectionMatrix2, getWorld2View2, focal2fov
 
 
@@ -23,7 +21,6 @@ class Camera(nn.Module):
         img_size: Tuple[int, int],
         device: str = "cuda:0",
         mask: Optional[torch.Tensor] = None,
-        set_ray: bool = False,
     ):
         super(Camera, self).__init__()
         self.uid = uid
@@ -55,31 +52,6 @@ class Camera(nn.Module):
         self.exposure_b = nn.Parameter(torch.tensor([0.0], requires_grad=True, device=device))
 
         self.projection_matrix = projection_matrix.to(device=device)
-        self.rayo, self.rayd = None, None
-        # FIXME chen: set_ray should not be used when intializing the MappingGUI
-        # calling with the gui default transform will result in nan
-        if set_ray:
-            self.set_ray()
-
-    def set_ray(self, eps: float = 1e-6):
-        projectinverse = self.projection_matrix.T.inverse()
-        camera2wold = self.world_view_transform.T.inverse()
-        pixgrid = create_meshgrid(
-            self.image_height, self.image_width, normalized_coordinates=False, device=self.device
-        )[0]
-        xindx, yindx = pixgrid[:, :, 0], pixgrid[:, :, 1]
-        ndcy, ndcx = pix2ndc(yindx, self.image_height), pix2ndc(xindx, self.image_width)
-        ndcx, ndcy = ndcx.unsqueeze(-1), ndcy.unsqueeze(-1)
-        ndccamera = torch.cat((ndcx, ndcy, torch.ones_like(ndcy) * (1.0), torch.ones_like(ndcy)), 2)  # N,4
-        projected = ndccamera @ projectinverse.T
-
-        directioninlocal = projected / (projected[:, :, 3:] + eps)  # v
-
-        rays_d = directioninlocal[:, :, :3] @ camera2wold[:3, :3].T
-        rays_d = rays_d / torch.norm(rays_d, dim=-1, keepdim=True)  # Make unit
-
-        self.rayo = self.camera_center.expand(rays_d.shape).permute(2, 0, 1).unsqueeze(0)
-        self.rayd = rays_d.permute(2, 0, 1).unsqueeze(0)
 
     def image_tensors_to(self, new_device: str) -> None:
         self.original_image = self.original_image.to(new_device)
@@ -184,7 +156,3 @@ class Camera(nn.Module):
 
         self.exposure_a = None
         self.exposure_b = None
-
-
-def pix2ndc(v, S):
-    return (v * 2.0 + 1.0) / S - 1.0

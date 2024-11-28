@@ -1,10 +1,8 @@
 warmup: 10 # Wait until tracking gets to this frame
 delay: 5 # Delay between tracking and mapping (This should be >= 2, because else )
-# NOTE chen: use MORE ITERATIONS than prune_densify_every! (newly densified Gaussians need to be optimized!)
-save_renders: False # Store some rendered images for debugging
 
 # Hyperparameters for the Monte Carlo Markov Chain model
-# FIXME chen: the cap_max should be different each scene, i.e. we could match this to the averages from previous experiments so its comparable
+# (Hint): the cap_max should be different each scene, i.e. we could match this to the averages from previous experiments so its comparable
 mcmc:
   cap_max: 60000 # Maximum number of Gaussians in the map
   noise_lr: 1e4 # original: 5e5
@@ -18,15 +16,13 @@ online_opt:
   iters: 100 # Optimization iterations for selected views
   n_last_frames: 10 # Always optimize the last n frames
   n_rand_frames: 15 # Optimize random global frames on top
-  # If chosen "loss" or "visited", we assign higher weights to frames with higher loss or that have been visited less
-  random_selection_strategy: null # Choices are: ["loss", "visited", null], in case of null we uniformly sample
 
   batch_mode: False # Only update a constant sized batch of frames (useful to speed things up when we run in parallel)
   batch_size: 10 # Only add 5 frames at once to increase latency when batch_mode is deactivated
   optimize_poses: False
 
   ## Strategy for adding / pruning Gaussians
-  prune_every: 4 # Covisibility and opacity based pruning
+  prune_every: 2 # Covisibility and opacity based pruning
   pruning:
     use_covisibility: True
     covisibility:
@@ -34,14 +30,8 @@ online_opt:
       # -> Use 'new' for faster performance
       mode: "new" # ["abs", "new"] How to prune: either check for covisible frames everywhere or just in the last n frames
       last: 10 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
-      visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
       dont_prune_latest: 0 # never prune the most recent k frames (Hint: avoids to always prune and densify needlessly)
-
-    use_floaters: False
-    # This is a proxy for density
-    floaters:
-      search_radius: 0.5 # Search radius for fixed radius nearest neighbor search
-      min_nn_distance: 0.05 # Minimum distance to the nearest neighbor for pruning
+      visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
 
   # How often to prune and densify gaussians during optimization
   prune_densify_every: 5 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
@@ -82,11 +72,12 @@ loss:
   # Decide which terms to use
   supervise_with_prior: True # Use the prior for supervision. If not, then use the current filtered map from SLAM (Hint: this is usually better as metrics are computed on all pixels)
   with_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
-  with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
+  with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
   with_depth_smoothness: False # Similarity loss between depth and image gradients
   use_ms_ssim: False # Multi-Scale SSIM loss (Hint: This improves mainly PSNR at the cost of slightly worse LPIPS and L1)
   depth_func: l1 # 'l1', 'log_l1', 'l1_huber', 'pearson' (Hint: We achieved best results simply with l1)
-  rgb_boundary_threshold: 0.001 # Pixel information in an image needs to be at least higher than this 
+  # NOTE this is from MonoGS, where they use 0.001. I dont like this setting as there are some black walls on Replica which affects performance
+  rgb_boundary_threshold: 0.0 # Pixel information in an image needs to be at least higher than this 
 
   # Weights
   alpha1: 0.7 # Size of the mapping loss that the rgb takes up, the rest is depth (default: 0.95)
@@ -114,15 +105,6 @@ refinement:
   prune_densify_every: 100 
   densify_until: 1000 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
 
-  prune_every: 100
-  prune_until: 800
-  pruning:
-    use_floaters: False
-    # This is a proxy for density
-    floaters:
-      search_radius: 0.5 # Search radius for fixed radius nearest neighbor search
-      # NOTE this depends on the used depth sensor (monocular models have differences) and scene
-      min_nn_distance: 0.001 # Minimum distance to the nearest neighbor for pruning
 
 # Backpropagate the Render updates into Tracking system
 feedback:

@@ -14,9 +14,6 @@ MIN_DEPTH = 0.001
 MIN_NUM_POINTS = 50  # At least have 100 points for supervision
 
 
-# TODO hack: in in-the-wild scenes, we do not want color pixels without depth supervision to guide our map
-# else we would accumulate many floaters around surface points due to sparser supervision and the color loss
-# Our model has no chance to fit a scene with conflicting depths and has to use surrounding pixels to now fit the images
 def mapping_rgbd_loss(
     image: torch.Tensor,
     depth: torch.Tensor,
@@ -31,7 +28,6 @@ def mapping_rgbd_loss(
     alpha1: float = 0.8,
     alpha2: float = 0.85,
     beta2: float = 0.001,
-    spv_sparse: bool = False,
     **kwargs
 ):
 
@@ -47,18 +43,13 @@ def mapping_rgbd_loss(
     # Transform with exposure (done in other papers)
     # image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
     image_gt = cam.original_image
-    # Mask out pixels with little information (from MonoGS) NOTE chen: this is quite conflicting
-    rgb_pixel_mask = (image_gt.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
+
+    # Mask out pixels with little information (from MonoGS) NOTE chen: this is conflicting, e.g. on Replica this breaks supervision with a completely black wall
+    rgb_pixel_mask = (image_gt.sum(dim=0) >= rgb_boundary_threshold).view(*depth.shape)
     # Include additional attached masks if they exist
     if cam.mask is not None:
         rgb_pixel_mask = rgb_pixel_mask & cam.mask
     rgb_mask = rgb_pixel_mask.float()
-
-    # Only supervise color on existing 3D points in natural unbounded scenes
-    if spv_sparse and has_depth:
-        depth_pixel_mask = ((depth_gt > MIN_DEPTH) * (depth_gt < MAX_DEPTH)).view(*depth.shape)
-        rgb_mask = (rgb_mask.bool() & depth_pixel_mask).float()
-
     loss_rgb = color_loss(image, image_gt, with_ssim, use_ms_ssim=use_ms_ssim, mask=rgb_mask, alpha2=alpha2)
 
     if has_depth:

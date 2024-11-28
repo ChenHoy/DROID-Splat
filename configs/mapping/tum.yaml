@@ -22,7 +22,6 @@ online_opt:
   prune_densify_until: 55 # dont do this after this iteration
   ## Densification parameters
   densify:
-    accumulate_pixels: False # Take the number of pixels a Gaussian has touched into consideration
     # Vanilla 3DGS splitting and densification strategy
     vanilla:
       max_grad: 0.001 # Gaussians with gradients above this are split (smaller -> denser)

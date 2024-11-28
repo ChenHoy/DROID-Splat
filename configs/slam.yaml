@@ -39,6 +39,10 @@ show_stream: False
 render_images: False # Render a comparison figure for each keyframe and kth non-keyframe
 save_rendered_predictions: False
 
+# You can start/stop in the middle of a sequence/dataset if you want
+# t_start: 0
+# t_stop: 1000
+
 ## Frequencies for synchronizing the different main parts of the pipeline
 # In an optimal setup, the Frontend would be the bottlenck, which can run at ~20-30FPS
 # Mapping takes ~5-7 iters/s, i.e. with a well tuned system each Render update hits <= 0.4fps

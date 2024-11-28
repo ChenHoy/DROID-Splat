@@ -21,7 +21,6 @@ import open3d as o3d
 import torch
 from torch import nn
 import lietorch
-import frnn
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 
@@ -40,10 +39,7 @@ from ..utils.sh_utils import RGB2SH
 
 
 """
-3D Gaussian Splatting together with techniques from  Multi-View Gaussian Splatting functions, 
-see https://github.com/xiaobiaodu/MVGS for references.
-
-NOTE chen: We vectorized the intersection tests to speed this up and corrected some minor mistakes they had in their code
+3D Gaussian Splatting together with MCMC sampling for densification and pruning of Gaussians.
 """
 
 
@@ -607,19 +603,6 @@ class GaussianModel:
         self.n_obs = self.n_obs[valid_points_mask]
         self.n_optimized = self.n_optimized[valid_points_mask]
 
-    def prune_floaters(
-        self, search_radius: float = 0.1, min_nn_distance: float = 0.05, return_mask: bool = True
-    ) -> None:
-        """Prune isolated outlier points which are floaters without any neighbors"""
-        pcd_temp = self._xyz.unsqueeze(0)
-        # NOTE since we search within the same point cloud, we will always get the original point as the closest neighbor with distance 0.0
-        all_dists, idxs, _, _ = frnn.frnn_grid_points(pcd_temp, pcd_temp, K=2, r=search_radius)
-        nn_dists = all_dists[..., 1]  # Get the actual nearest neighbor distance
-        floaters = nn_dists > min_nn_distance  # Points without a nearest neighbor in this radius are likely floaters
-        self.prune_points(floaters.squeeze())
-        if return_mask:
-            return floaters
-
     def densification_postfix(
         self,
         new_xyz,
@@ -718,6 +701,7 @@ class GaussianModel:
             fused_point_cloud, features, scales, rots, opacities = features
             self.extend_from_pcd(fused_point_cloud, features, scales, rots, opacities, cam.uid)
 
+    # FIXME chen: ABS GS has a slightly different CUDA kernel, we need to add this on top for correctness
     def add_densification_stats(
         self, viewspace_point_tensor: torch.Tensor, update_filter: torch.Tensor, pixels: Optional[torch.Tensor] = None
     ):
@@ -883,6 +867,24 @@ class GaussianModel:
 
         optimizable_tensors = self.replace_tensor_to_optimizer(xyz_new, "xyz")
         self._xyz = optimizable_tensors["xyz"]
+
+    # TODO test if this works reliably
+    def rescale(self, kf_idx: torch.Tensor | List[int], delta_scale: torch.Tensor) -> None:
+        """Rescale the 3D point cloud of Gaussians attached to a keyframe idx with a scalar factor."""
+        to_update = self.unique_kfIDs == kf_idx
+        xyz_to_re = self.get_xyz[to_update]
+        scale_to_re = self._scaling[to_update]
+        xyz_new = self.get_xyz.clone()  # Make copy to replace old Variable
+        scale_new = self._scaling.clone()  # Make copy to replace old Variable
+
+        # NOTE chen: we divide here since we measure scale change in inverse disparities in Tracking
+        xyz_new[to_update] = 1 / delta_scale * xyz_to_re  # Rescale the 3D points
+        scale_new[to_update] = 1 / delta_scale * scale_to_re  # Rescale the scales
+
+        optimizable_tensors = self.replace_tensor_to_optimizer(xyz_new, "xyz")
+        self._xyz = optimizable_tensors["xyz"]
+        optimizable_tensors = self.replace_tensor_to_optimizer(scale_new, "scaling")
+        self._scaling = optimizable_tensors["scaling"]
 
     @torch.no_grad()
     def increment_n_opt_counter(

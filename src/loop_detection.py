@@ -140,6 +140,8 @@ class LoopDetector:
     def info(self, msg) -> None:
         print(colored("[Loop Detection]: " + msg, "cyan"))
 
+    # NOTE chen: make sure that RAFT is setup and in PYTHONPATH here
+    # this is not standalone with our repo right now
     def load_raft(self, checkpoint: str) -> None:
         """Load a proper optical flow network like RAFT"""
         from easydict import EasyDict as edict
@@ -461,25 +463,33 @@ class LoopDetector:
 
     @torch.cuda.amp.autocast(enabled=True)
     @torch.no_grad()
-    def check(self) -> Tuple[List]:
-        """Check if we have inserted new keyframes into our video datastructure. If yes, then use
-        the memoized feature maps and image contexts to use the update network to compute optical flow.
-        We compute the optical flow between the latest frame and all previous frames in the video.
-        We can then memoize potential loop candidates between the latest frame and previous frames.
+    def check(self, insert_bidirectional: bool = True) -> Tuple[List]:
+        """
+        1. Motion based:
+        ---
+        Check if we have inserted new keyframes into our video datastructure.
+        i) If yes, then use the memoized feature maps and image contexts to use the update network to compute optical flow.
+        ii) We compute the optical flow between the latest frame and all previous frames in the video.
+        iii) Memoize potential loop candidates between the latest frame and previous frames.
         We return such bidirectional edges, so we can insert them into the global factor graph for loop closures.
 
+        Caveat:
+        ---
         Normally we would have to run the update network multiple times and get a sequence of residual flows.
         We heuristically just run this once as a proxy for optical flow. Because this seems to be quite inprecise, we
         also make it possible to compute proper optical flow with an external network like RAFT.
         NOTE chen: I noticed that our network seems to get quite the good mean flow distance comparably, but the range is
-        very hard to threshold. With RAFT you get proper distances like e.g. 20-30 for similar frames and > 50 for unsimilar frames.
+        very hard to threshold. With RAFT you get proper distances like e.g. 20-30 for similar frames and > 50 for very unsimilar frames.
 
         HI-SLAM has an addititional orientation check, i.e. the current estimate/pose of the keyframe should be similar
         in orientation to previous keyframes, since drift more or less just changes the position, but not the orientation.
 
+        2. Appearnace based
+        ---
         Because Optical Flow may not be a good measure for loop detection on larger maps (there can still be a lot of motion between frames),
-        we make use of more traditional place recognition techniques. ORB-SLAM uses a visual bag of words approach, based on ORB descriptor distributions.
-        This does not work well on a modern setup, so we use recent deep feature descriptors used in place recognition.
+        we make use of more traditional place recognition techniques.
+        i) ORB-SLAM uses a visual bag of words approach, based on ORB descriptor distributions.
+        ii) This does not work well on a modern setup, so we use recent deep feature descriptors used in place recognition.
         """
         # NOTE chen: extract value here because it could change during this update in multi-thread setup
         with self.video.get_lock():
@@ -512,7 +522,11 @@ class LoopDetector:
                 # self.visualize_place_recognition_matches(i, matches, show_only=self.cfg.k_nearest)
                 # ipdb.set_trace()
                 # Insert bidirectional edges
-                candidates.append((torch.cat((ii, jj)), torch.cat((jj, ii))))
+                if insert_bidirectional:
+                    candidates.append((torch.cat((ii, jj)), torch.cat((jj, ii))))
+                # Only insert a unidirectional edge
+                else:
+                    candidates.append(((ii), (jj)))
 
         # Increment to latest frame like video
         self.counter.value = kf_counter
