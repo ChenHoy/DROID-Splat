@@ -32,3 +32,6 @@
 [submodule "thirdparty/ZoeDepth"]
 	path = thirdparty/ZoeDepth
 	url = https://github.com/ChenHoy/ZoeDepth.git
+[submodule "thirdparty/diff-gaussian-rasterization-mcmc"]
+	path = thirdparty/diff-gaussian-rasterization-mcmc
+	url = https://github.com/ChenHoy/diff-gaussian-rasterization-mcmc.git
