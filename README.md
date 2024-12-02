@@ -6,6 +6,8 @@
 <h1 align="center"> DROID-Splat </h1> 
 <h2 align="center"> Combining dense end-to-end SLAM with dense 3D Gaussian Splatting. </h2> 
 
+[![button](https://img.shields.io/badge/Paper-blue?style=for-the-badge)](https://arxiv.org/pdf/2411.17660)
+
 <p align="center">
   <a href="">
     <img src="assets/output_cropped.gif" width="75%">
