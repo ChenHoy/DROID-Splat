@@ -94,7 +94,7 @@ We run multiple components in parallel based on concurrency.
 - How often the _Backend_ and _Renderer_ are run is determined by ```backend_every``` and ```mapper_every```. 
 
 We synchronize the threads, such that the Backend truly runs in parallel, but the Frontend will wait until a Rendering pass is finished.  
-This sacrifies a few FPS for additional stability/robustness.
+This sacrifices a few FPS for additional stability/robustness.
 
 ### :diamonds: How to configure your Tracker
 Our Tracker consists of three components: 
