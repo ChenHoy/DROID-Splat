@@ -171,6 +171,17 @@ bash scripts/evaluation/evaluate_on_tum.sh mode name_experiment
 ```
 where mode can be either ```mono```, ```prgbd``` or ```rgbd```. When ```evaluate=True```, the results will be automatically stored in the experiment subfolders of a scene.
 
+# How to cite
+If you find this work relevant, please cite us with
+```bibtex
+@misc{homeyer2024droid,
+  title={DROID-Splat: Combining end-to-end SLAM with 3D Gaussian Splatting},
+  author={Homeyer, Christian, Begiristain, Leon and Schnoerr, Christoph},
+  journal={arXiv preprint arXiv:2411.17660},
+  year={2024}
+}
+```
+
 # Acknowledgments
 We are standing on the shoulder of giants and would like to thank all the people, who have open-sourced their Code! 
 
