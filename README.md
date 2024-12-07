@@ -6,6 +6,8 @@
 <h1 align="center"> DROID-Splat </h1> 
 <h2 align="center"> Combining dense end-to-end SLAM with dense 3D Gaussian Splatting. </h2> 
 
+[![button](https://img.shields.io/badge/Paper-blue?style=for-the-badge)](https://arxiv.org/pdf/2411.17660)
+
 <p align="center">
   <a href="">
     <img src="assets/output_cropped.gif" width="75%">
@@ -81,7 +83,7 @@ My Dataset
 │   ├── frame_0002.png
 │   ├── frame_0003.png
 |   ...
-│   └── frame_1000.npy
+│   └── frame_1000.png
 └── raw.mp4
 ```
 
@@ -94,7 +96,7 @@ We run multiple components in parallel based on concurrency.
 - How often the _Backend_ and _Renderer_ are run is determined by ```backend_every``` and ```mapper_every```. 
 
 We synchronize the threads, such that the Backend truly runs in parallel, but the Frontend will wait until a Rendering pass is finished.  
-This sacrifies a few FPS for additional stability/robustness.
+This sacrifices a few FPS for additional stability/robustness.
 
 ### :diamonds: How to configure your Tracker
 Our Tracker consists of three components: 
@@ -168,6 +170,17 @@ You can evaluate by running
 bash scripts/evaluation/evaluate_on_tum.sh mode name_experiment
 ```
 where mode can be either ```mono```, ```prgbd``` or ```rgbd```. When ```evaluate=True```, the results will be automatically stored in the experiment subfolders of a scene.
+
+# How to cite
+If you find this work relevant, please cite us with
+```bibtex
+@misc{homeyer2024droid,
+  title={DROID-Splat: Combining end-to-end SLAM with 3D Gaussian Splatting},
+  author={Homeyer, Christian, Begiristain, Leon and Schnoerr, Christoph},
+  journal={arXiv preprint arXiv:2411.17660},
+  year={2024}
+}
+```
 
 # Acknowledgments
 We are standing on the shoulder of giants and would like to thank all the people, who have open-sourced their Code! 
