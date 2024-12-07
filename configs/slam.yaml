@@ -7,7 +7,7 @@ defaults:
 
 hydra:
   run:
-    dir: outputs/2D_GS_surfel/tum_rgbd/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}_${mode}
+    dir: outputs/2D_GS_surfel/log_l1/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}_${mode}
   job:
     chdir: False
     name: droidsplat # Change this to your experiment run name, e.g. the dataset you run on or the run of a configuration
@@ -47,4 +47,4 @@ backend_every: 8 # Run global bundle adjustment only every k Frontend updates
 mapper_every: 20 # Run Renderer every k Frontend updates
 
 ## Evaluation
-evaluate: False
+evaluate: True

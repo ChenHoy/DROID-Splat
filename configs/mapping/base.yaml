@@ -75,10 +75,10 @@ loss:
   ## (We already achieve good results with a simple l1 loss and nothing further)
   supervise_with_prior: True # Use the prior for supervision. If not, then use the current filtered map from SLAM
   with_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
-  with_edge_weight: True # Weight informative pixels with high image gradient higher in loss
+  with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
   with_depth_smoothness: False # Similarity loss between depth and image gradients
   use_ms_ssim: False # Multi-Scale SSIM loss (Hint: This improves mainly PSNR at the cost of slightly worse LPIPS and L1)
-  rgb_boundary_threshold: 0.001 # Pixel information in an image needs to be at least higher than this 
+  rgb_boundary_threshold: 0.0 # Pixel information in an image needs to be at least higher than this 
   depth_func: log_l1 # 'l1', 'log_l1', 'l1_huber', 'pearson' (Hint: We achieved best results simply with l1)
 
   # Weights
@@ -135,4 +135,4 @@ pipeline_params:
   # surf depth is either median or expected by setting depth_ratio to 1 or 0
   # for bounded scene, use median depth, i.e., depth_ratio = 1;
   # for unbounded scene, use expected depth, i.e., depth_ration = 0, to reduce disk aliasing.
-  depth_ratio: 0
+  depth_ratio: 1
