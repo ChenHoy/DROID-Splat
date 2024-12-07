@@ -697,7 +697,7 @@ class GaussianMapper(object):
     def render_compare(self, view: Camera) -> Tuple[float, Dict, Dict]:
         """Render current view and compute loss by comparing with groundtruth"""
         render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
-        # NOTE chen: this can be None when self.gaussians is 0. This can happen in some cases
+        # NOTE chen: this can be None when len(self.gaussians) is 0. This can happen in some cases
         if render_pkg is None:
             return 0.0
 
@@ -713,7 +713,7 @@ class GaussianMapper(object):
         if len(self.gaussians) == 0:
             return 0.0
 
-        # NOTE chen: this can happen we have zero depth and an inconvenient pose
+        # NOTE chen: this can happen if we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
 
         if optimize_poses:
