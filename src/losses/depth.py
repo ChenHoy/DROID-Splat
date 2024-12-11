@@ -51,7 +51,7 @@ def depth_loss(
 
     # Sanity check to avoid division by zero
     if with_smoothness and original_image is not None and mask.sum() > 0:
-        depth_loss += beta * edge_weighted_tv(depth_est, original_image, mask=mask)
+        depth_loss = depth_loss + beta * edge_weighted_tv(depth_est, original_image, mask=mask)
 
     return depth_loss
 
