@@ -3,21 +3,20 @@ defaults:
  - mapping: wild.yaml
  - tracking: base.yaml
  - loop_closure: eigen.yaml
- - data: TUM_RGBD/base.yaml
+ - data: Replica/base.yaml
 
 hydra:
   run:
     dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}_${mode}
   job:
     chdir: False
-    name: droidsplat # Change this to your experiment run name, e.g. the dataset you run on or the run of a configuration
+    name: test_loop # Change this to your experiment run name, e.g. the dataset you run on or the run of a configuration
 
 device: "cuda:0"
 sync_method: strict
-output_folder: ./outputs/
 
 stride: 1
-mode: "prgbd"  # 'mono', 'prgbd', 'rgbd'
+mode: "rgbd"  # 'mono', 'prgbd', 'rgbd'
 mono_depth: "metric3d-vit_giant2" # 'lotus_d' 'zoed-nk', 'metric3d-vit_giant2', 'depthany-vitl-outdoor', 'depthany-vitl-indoor'
 with_dyn: False # Filter out dynamic objects if masks are provided in the dataset
 opt_intr: False # Optimizes additional intrinsic parameters
@@ -26,12 +25,14 @@ sleep_delay: 0.45 # Sleep timer to cool off the system sometimes
 ## Components
 run_frontend: True # This should always be True!
 run_backend: True # Global optimization
-run_loop_detection: False # Loop closure detection
-run_mapping: True # Rendering 
+# NOTE when detection=True and closure=False, we supply the edges to the backend
+run_loop_detection: True # Detect loops based on visual similarity
+run_loop_closure: True # Perform a classical loop closure with the candidates
+run_mapping: False # Rendering 
 
 ## Visualizations / GUIs
 run_visualization: False
-run_mapping_gui: True
+run_mapping_gui: False
 show_stream: False
 # plot_uncertainty: True # To show the uncertainty of the pose graph optimization
 

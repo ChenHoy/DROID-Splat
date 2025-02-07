@@ -2,3 +2,12 @@ min_temporal_distance: 10 # Keyframes should be at least this far apart for a va
 max_orientation_difference: 15.0 # Rotation difference in degrees (avg over rpy axis) of the estimated keyframe poses
 # This is used for e.g. motion between frames or feature distance
 threshold: 10.0 # Threshold for frame distance, i.e. candidate pairs should have distance < threshold
+
+min_num_inliers: 30
+ransac_thresh: 0.1
+ransac_iters: 400
+max_depth: 20.0
+nms: 30 # Suppression for redundant matches
+
+check_consecutive: True # Check for consecutive frames
+n_repeat: 3 # Loop closures are only valid, if they have k consecutive detections

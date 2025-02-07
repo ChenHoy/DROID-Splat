@@ -2280,6 +2280,7 @@ SparseBlock schur_block(torch::Tensor E,
 }
 
 
+// TODO this has some edge cases, which we just never use in practice, e.g. Optimizing intrinsics + Structure, but no motion
 std::vector<torch::Tensor> ba_cuda(
     torch::Tensor poses, 
     torch::Tensor disps, 
@@ -2297,6 +2298,7 @@ std::vector<torch::Tensor> ba_cuda(
     const float lm,
     const float ep,
     const bool motion_only,
+    const bool structure_only,
     const bool opt_intr)
 {
   auto opts = poses.options();
@@ -2449,8 +2451,6 @@ std::vector<torch::Tensor> ba_cuda(
       for (int i=0; i<n_intr; i++){
         intrinsics[i] += dI[i];
       }
-
-      
     }
     
     else {
@@ -2479,18 +2479,27 @@ std::vector<torch::Tensor> ba_cuda(
 
       dz = Q * (w - accum_cuda(dw, ii_exp, kx));
 
-      // update poses
-      pose_retr_kernel<<<1, THREADS>>>(
-        poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
-        dx.packed_accessor32<float,2,torch::RestrictPtrTraits>(), t0, t1);
+      if (structure_only) {
+        // update disparity maps
+        disp_retr_kernel<<<kx.size(0), THREADS>>>(
+          disps.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
+          dz.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+          kx.packed_accessor32<long,1,torch::RestrictPtrTraits>());
+      }
 
-      // update disparity maps
-      disp_retr_kernel<<<kx.size(0), THREADS>>>(
-        disps.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-        dz.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
-        kx.packed_accessor32<long,1,torch::RestrictPtrTraits>());
+      else {
+        // update poses
+        pose_retr_kernel<<<1, THREADS>>>(
+          poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+          dx.packed_accessor32<float,2,torch::RestrictPtrTraits>(), t0, t1);
+
+        // update disparity maps
+        disp_retr_kernel<<<kx.size(0), THREADS>>>(
+          disps.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
+          dz.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+          kx.packed_accessor32<long,1,torch::RestrictPtrTraits>());
+      }
     }
-
   }
 
   return {dx, dz, dI};

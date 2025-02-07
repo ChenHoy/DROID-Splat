@@ -187,6 +187,7 @@ def projective_transform(
 
     # poses: SE3, [batch, num, 7]; Gij: SE3, [batch, N, 7]
     Gij = poses[:, jj] * poses[:, ii].inv()
+    # FIXME what is it with the -0.1?!
     Gij.data[:, ii == jj] = torch.tensor([-0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], device=Gij.device)
     X1, Ja = actp(Gij, X0, jacobian=jacobian)  # X1: [batch, N, h, w, 4], Ja: [batch, N, h, w, 4, 6]
 
@@ -194,7 +195,9 @@ def projective_transform(
     x1, Jp = proj(X1, intrinsics[:, jj], jacobian=jacobian, return_depth=return_depth)
 
     # exclude points too close to camera
-    valid = ((X1[..., 2] > MIN_DEPTH) & (X0[..., 2] > MIN_DEPTH)).float()
+    # NOTE chen: for some reason this was indexed with 2 in previous code
+    # however, it is pretty clear, that depth/Z is at index 3
+    valid = ((X1[..., 3] > MIN_DEPTH) & (X0[..., 3] > MIN_DEPTH)).float()
     valid = valid.unsqueeze(dim=-1)  # [batch, N, h, w, 1]
 
     if jacobian:

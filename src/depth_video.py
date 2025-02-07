@@ -49,10 +49,11 @@ class DepthVideo:
         c = 1 if not self.stereo else 2
         self.scale_factor = 8
         s = self.scale_factor
-        buffer = cfg.tracking.buffer
+        self.buffer_size = cfg.tracking.buffer
         # Whether we upsample the predictions or not
         self.upsampled = cfg.tracking.upsample
 
+        buffer = cfg.tracking.buffer
         ### state attributes -> Raw map ###
         self.timestamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
         # List for keeping track of updated frames for visualization
@@ -64,6 +65,9 @@ class DepthVideo:
         self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
         self.poses = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
         self.poses_gt = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
+
+        # store relative poses for removed frames
+        self.delta = {}  # NOTE we use these for the Pose Graph Optimization (PGO) during loop closures
 
         # Measure the change of poses before and after backend optimization, so we can track large map changes
         self.pose_changes = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
@@ -417,8 +421,15 @@ class DepthVideo:
             cur_ix = self.counter.value
             s = self.disps[:cur_ix].mean()
             self.disps[:cur_ix] /= s
+
+            # TODO chen: why do we multiply the poses by the scale?
             self.poses[:cur_ix, :3] *= s  # [tx, ty, tz, qx, qy, qz, qw]
+            # NOTE: due to the scale optimization in the DVPO loop closure, we might have a first pose
+            # that is not an identity -> we need to normalize the poses to the first pose
+            self.poses[:cur_ix] = (lietorch.SE3(self.poses[:cur_ix]) * lietorch.SE3(self.poses[[0]]).inv()).data
+            # Update visualization, etc.
             self.dirty[:cur_ix] = True
+            # TODO should we also use mapping_dirty here?
 
     def reproject(self, ii, jj):
         """project points from ii -> jj"""
@@ -544,7 +555,7 @@ class DepthVideo:
                 disps_sens = self.disps_sens
 
             # FIXME chen: This sometimes causes a malloc error :/
-            # I am not sure how to fix this
+            # NOTE errors are not due to the Renderer, but when running frontend and backend in parallel sometimes
             droid_backends.ba(
                 self.poses,
                 self.disps,
@@ -562,6 +573,7 @@ class DepthVideo:
                 lm,
                 ep,
                 motion_only,
+                False,  # Structure Only BA
                 self.opt_intr,
             )
             self.disps.clamp_(min=1e-3)  # Always make sure that Disparities are non-negative!!!
@@ -676,6 +688,7 @@ class DepthVideo:
                     lm,
                     ep,
                     True,
+                    False,
                     False,
                 )
                 # Joint Depth and Scale Adjustment(JDSA)

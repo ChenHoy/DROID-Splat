@@ -14,6 +14,8 @@ dependencies:
   - cudatoolkit
   - tensorboard
   - pytorch3d==0.7.7 # This version is very important!
+  - pypose
+  - numba
   - scipy
   - opencv==4.9
   - tqdm
@@ -49,7 +51,7 @@ dependencies:
     - PyQt5
     - matplotlib
     - evo
-    - imageio
+    - imageio==2.34.1
     - networkx
     - pandas
     - trimesh # TODO do we really need this?

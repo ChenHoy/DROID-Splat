@@ -25,9 +25,9 @@ from .depth_video import DepthVideo
 from .geom import pose_distance
 from .visualization import droid_visualization, depth2rgb, uncertainty2rgb
 from .trajectory_filler import PoseTrajectoryFiller
-from .loop_detection import LoopDetector, merge_candidates
-from .gaussian_mapping import GaussianMapper
+from .loop_closure import LoopDetector, LongTermLoopClosure, merge_candidates
 
+from .gaussian_mapping import GaussianMapper
 from .gaussian_splatting.camera_utils import Camera
 from .gaussian_splatting import eval_utils
 from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
@@ -45,6 +45,7 @@ class SLAM:
         - Backend Bundle Adjustment, which optimizes the map over a global optimization window
         - Loop Detector, which computes visual similarity between the current keyframe and all past keyframes. If suitable candidates are found,
             these are send as additional edges to the Backend optimization.
+        - Loop Closer, which performs Pose Graph Optimization over the whole map to close detected loop candidates and reduce drift
         - Gaussian Mapping, which optimizes the map into multiple 3D Gaussian based on a dense Rendering objective
         - Visualizers for showing the incoming RGB(D) stream, the current pose graph, the 3D point clouds of the map, optimized Gaussians
 
@@ -75,8 +76,8 @@ class SLAM:
 
         self.cfg = cfg
         self.device = cfg.get("device", torch.device("cuda:0"))
-        self.mode = cfg.mode
-        self.do_evaluate = cfg.evaluate
+        self.mode = cfg.get("mode", "mono")
+        self.do_evaluate = cfg.get("evaluate", False)
         self.save_predictions = cfg.get("save_rendered_predictions", False)  # save all predictions for later
         self.render_images = cfg.get("render_images", True)  # make a comparison figure
         # Render every 5-th frame during optimization, so we can see the development of our scene representation
@@ -114,11 +115,20 @@ class SLAM:
             self.backend = None
             self.backend_warmup = 9999
 
+        # Detect loop candidate edges with an image similarity detector
         if cfg.run_loop_detection:
-            self.loop_detector = LoopDetector(self.cfg.loop_closure, self.net, self.video, self.device)
+            self.loop_detector = LoopDetector(self.cfg.loop_closure, self.video, self.device)
         else:
             self.loop_detector = None
 
+        # Run old-school PGO loop closure
+        if cfg.run_loop_closure:
+            assert cfg.run_loop_detection, "Need to run loop detection to run loop closure!"
+            self.loop_closer = LongTermLoopClosure(self.cfg.loop_closure, self.video, self.device)
+        else:
+            self.loop_closer = None
+
+        # Run the Gaussian Mapper to optimize the map into a set of 3D Gaussians
         if cfg.run_mapping_gui and cfg.run_mapping:
             self.q_main2vis = mp.Queue()
             self.gaussian_mapper = GaussianMapper(cfg, self, gui_qs=(self.q_main2vis))
@@ -165,6 +175,7 @@ class SLAM:
         self.mapping_done = torch.zeros((1)).int().share_memory_()
         self.mapping_done += 1  # Set to 1, so Tracking does not wait for mapping
         self.loop_detection_finished = torch.zeros((1)).int().share_memory_()
+        self.loop_closure_finished = torch.zeros((1)).int().share_memory_()
         self.visualizing_finished = torch.zeros((1)).int().share_memory_()
         self.mapping_visualizing_finished = torch.zeros((1)).int().share_memory_()
 
@@ -215,10 +226,9 @@ class SLAM:
                 """If you want to use the Mapping GUI, you also need to run the Mapping process!""",
                 "red",
             )
-        if self.cfg.run_loop_detection:
+        if self.cfg.run_loop_detection and not self.cfg.run_loop_closure:
             assert self.cfg.run_backend, colored(
-                """We only do loop closure optimization in the backend, which optimizes the global map. 
-                Use the loop detector always together with the backend enabled!""",
+                "If detecting loops without a classical loop closure, we add the edges into our global BA backend graph!",
                 "red",
             )
 
@@ -348,9 +358,9 @@ class SLAM:
         """
 
         if run:
-            assert self.loop_detector is not None, "Loop Detection is not enabled, but we are running it!"
+            assert self.loop_detector is not None, "Loop Detection is not enabled, but we are trying to run it!"
             # Initialize network during worker process, since torch.hub models need to, see https://github.com/Lightning-AI/pytorch-lightning/issues/17637
-            if self.loop_detector.method == "eigen" and self.loop_detector.net is None:
+            if self.loop_detector.net is None:
                 self.loop_detector.net = self.loop_detector.load_eigen()
 
         self.info("Loop Detection thread started!")
@@ -358,7 +368,7 @@ class SLAM:
 
         # Run as long as Frontend tracking gives use new frames
         while self.tracking_finished < 1 and run:
-            candidates = self.loop_detector.check()
+            candidates = self.loop_detector()
             if candidates is not None:
                 self.loop_detector.info("Sending loop candidates ...")
                 loop_queue.put(candidates)
@@ -371,6 +381,33 @@ class SLAM:
         self.loop_detection_finished += 1
         self.all_finished += 1
         self.info("Loop Detection done!")
+
+    def loop_closure(self, rank: int, loop_queue: mp.Queue, run: bool = False) -> None:
+        """Run a loop closure in parallel, which waits for loop candidates to be passed from
+        the loop_detector. If a loop candidate is found, we run a Pose Graph Optimization over
+        our whole map to refine the map and close the loop.
+        """
+
+        self.info("Loop closure thread started!")
+        self.all_trigered += 1
+
+        if run:
+            assert self.loop_closer is not None, "Loop Closure is not enabled, but we are trying to run it!"
+
+            # Run as long as Frontend tracking gives use new frames
+            while self.tracking_finished < 1 and run:
+                loop_ii, loop_jj, scores = self.get_potential_loop_update(loop_queue)
+                # Perform PGO over map until loop_ii.max() if candidates exist
+                self.loop_closer(loop_ii, loop_jj, scores)
+
+        # Free memory
+        del self.loop_closer
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        self.loop_closure_finished += 1
+        self.all_finished += 1
+        self.info("Loop Closure done!")
 
     def get_ram_usage(self) -> Tuple[float, float]:
         free_mem, total_mem = torch.cuda.mem_get_info(device=self.device)
@@ -406,16 +443,32 @@ class SLAM:
         """Extract the loop candidates from the Queue and merge them into one set of edges."""
         try:
             new_loops = get_all_queue(loop_queue)  # Empty the whole Queue at once
-            new_loops = merge_candidates(new_loops)  # In case we had multiple loop updates
-            self.backend.info("Received loop candidates!")
+            # Queue was empty
+            if len(new_loops) == 0:
+                return None, None, None
+
             candidates = clone_obj(new_loops)
             del new_loops
-            loop_ii, loop_jj = candidates
+            if self.cfg.run_loop_closure:
+                self.loop_closer.info("Received loop candidates for loop closure!")
+            else:
+                self.backend.info("Received loop candidates!")
+
+            # Unpack multiple Queue elements into separate objects
+            loop_ii, loop_jj, scores = [], [], []
+            for loop in candidates:
+                loop_ii.append(loop[0])
+                loop_jj.append(loop[1])
+                scores.append(loop[2])
+            loop_ii, loop_jj = torch.cat(loop_ii), torch.cat(loop_jj)
+            scores = torch.cat(scores)
+
         except Exception as e:
             self.info("Could not get anything from the Queue! :(")
             print(colored(e, "red"))
-            loop_ii, loop_jj = None, None
-        return loop_ii, loop_jj
+            loop_ii, loop_jj = None, None, None
+
+        return loop_ii, loop_jj, scores
 
     def global_ba(
         self, rank: int, semaBackend: mp.Semaphore, loop_queue: Optional[mp.Queue] = None, run: bool = False
@@ -438,22 +491,25 @@ class SLAM:
             memoized_backend_count = self.ram_safeguard_backend(
                 max_ram=self.max_ram_usage, count_to_set=memoized_backend_count
             )
+            # Backend got deactivated due to OOM
             if self.backend is None:
                 continue
 
             ## If we run an additional loop detector -> Pull in visually similar candidate edges as well
             loop_ii, loop_jj = None, None
-            if self.cfg.run_loop_detection and loop_queue is not None:
+            if self.cfg.run_loop_detection and not self.cfg.run_loop_closure and loop_queue is not None:
                 if not loop_queue.empty():
-                    loop_ii, loop_jj = self.get_potential_loop_update(loop_queue)
-                    # memoize all loop candidates to always give all candidates to the backend as edges!
+                    loop_ii, loop_jj, scores = self.get_potential_loop_update(loop_queue)
+                    # Memoize all loop candidates to always give all candidates to the backend as edges!
                     if loop_ii is not None and loop_jj is not None:
                         all_lc_candidates.append((loop_ii, loop_jj))
                         all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
 
             ### Actual Backend call
+            # Use GO-SLAM's loop closure bundle adjustment
             if self.backend.enable_loop:
                 self.backend(local_graph=self.frontend.optimizer.graph, add_ii=all_loop_ii, add_jj=all_loop_jj)
+            # Use vanilla Graph for Bundle adjustment
             else:
                 self.backend(add_ii=all_loop_ii, add_jj=all_loop_jj)
 
@@ -501,6 +557,7 @@ class SLAM:
         self.all_finished += 1
         self.info("Backend done!")
 
+    # TODO update with new delta's from the loop closure object
     def maybe_reanchor_gaussians(self, pose_thresh: float = 0.001, scale_thresh: float = 0.1) -> None:
         """Reanchor the Gaussians to follow a big map update.
         For this purpose we simply track the pose changes after a backend optimization."""
@@ -1041,11 +1098,16 @@ class SLAM:
                 args=(3, self.loop_queue, self.cfg.run_loop_detection),
                 name="Loop Detector",
             ),
-            mp.Process(target=self.visualizing, args=(4, self.cfg.run_visualization), name="Visualizing"),
+            mp.Process(
+                target=self.loop_closure,
+                args=(4, self.loop_queue, self.cfg.run_loop_closure and self.cfg.run_loop_detection),
+                name="Loop Closure PGO",
+            ),
+            mp.Process(target=self.visualizing, args=(5, self.cfg.run_visualization), name="Visualizing"),
             mp.Process(
                 target=self.gaussian_mapping,
                 args=(
-                    5,
+                    6,
                     self.communication_lock,
                     self.condTracking,
                     self.semaMapping,
@@ -1057,7 +1119,7 @@ class SLAM:
             ),
             mp.Process(
                 target=self.mapping_gui,
-                args=(6, self.cfg.run_mapping_gui and self.cfg.run_mapping),
+                args=(7, self.cfg.run_mapping_gui and self.cfg.run_mapping),
                 name="Mapping GUI",
             ),
         ]

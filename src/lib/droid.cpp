@@ -65,6 +65,7 @@ std::vector<torch::Tensor> ba_cuda(
     const float lm,
     const float ep,
     const bool motion_only,
+    const bool structure_only,
     const bool optimize_intrinsics);
 
 std::vector<torch::Tensor> corr_index_cuda_forward(
@@ -113,6 +114,7 @@ std::vector<torch::Tensor> ba(
     const float lm,
     const float ep,
     const bool motion_only,
+    const bool structure_only,
     const bool optimize_intrinsics) {
 
   CHECK_INPUT(targets);
@@ -125,7 +127,7 @@ std::vector<torch::Tensor> ba(
   CHECK_INPUT(jj);
 
   return ba_cuda(poses, disps, intrinsics, disps_sens, targets, weights,
-                 eta, ii, jj, t0, t1, iterations, model_id, lm, ep, motion_only, optimize_intrinsics);
+                 eta, ii, jj, t0, t1, iterations, model_id, lm, ep, motion_only, structure_only, optimize_intrinsics);
 
 }
 
