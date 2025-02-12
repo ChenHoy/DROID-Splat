@@ -124,7 +124,11 @@ class SLAM:
         # Run old-school PGO loop closure
         if cfg.run_loop_closure:
             assert cfg.run_loop_detection, "Need to run loop detection to run loop closure!"
-            self.loop_closer = LongTermLoopClosure(self.cfg.loop_closure, self.video, self.device)
+
+            self.viz_loop_queue = mp.Queue()  # Communicate data between Mapping <-> main thread
+            self.loop_closer = LongTermLoopClosure(
+                self.cfg.loop_closure, self.video, self.device, log_folder=output_folder, viz_queue=self.viz_loop_queue
+            )
         else:
             self.loop_closer = None
 
@@ -681,6 +685,22 @@ class SLAM:
         self.all_finished += 1
         self.info("Mapping GUI done!")
 
+    def show_loop(self, rank, loop_viz_queue: mp.Queue, run=True) -> None:
+        self.info("Loop Vizualization thread started!")
+        self.all_trigered += 1
+
+        while (self.tracking_finished + self.backend_finished < 2) and run:
+            if not self.viz_loop_queue.empty():
+                obj = self.viz_loop_queue.get()
+                copy_obj = clone_obj(obj)
+                del obj
+                fname, img = copy_obj
+                self.info("Received image to save at {}".format(fname))
+                cv2.imwrite(fname, img)
+
+        self.all_finished += 1
+        self.info("Show Loop Done!")
+
     def show_stream(self, rank, input_queue: mp.Queue, run=True) -> None:
         """Show the input RGBD stream (+ confidence of network) in separate windows"""
         self.info("OpenCV Image stream thread started!")
@@ -1074,7 +1094,8 @@ class SLAM:
         """Main SLAM function to manage the multi-threaded application."""
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
-            mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
+            # mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
+            # mp.Process(target=self.show_loop, args=(0, self.viz_loop_queue, True), name="Loop Visualizer"),
             mp.Process(
                 target=self.tracking,
                 args=(
