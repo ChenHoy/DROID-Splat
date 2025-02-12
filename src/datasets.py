@@ -569,6 +569,8 @@ class KITTI(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(KITTI, self).__init__(cfg, device)
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_2/*.png")))
+
+        sequence = Path(self.input_folder).name
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
@@ -591,8 +593,30 @@ class KITTI(BaseDataset):
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
 
-        # TODO read the actual poses from the dataset
-        self.poses = None
+        self.pose_path = os.path.join(self.input_folder, "../../poses", f"{sequence}.txt")
+        # We only have groundtruth poses for sequences 00 to 10, i.e. 11 training sequences
+        # The other sequences are part of the online test evaluation for the benchmark.
+        if os.path.exists(self.pose_path):
+            self.poses = self.load_poses(self.pose_path)
+            if self.t_stop is not None:
+                self.poses = self.poses[self.t_start : self.t_stop]
+            self.poses = self.poses[:: self.stride]
+        else:
+            self.poses = None
+
+    def load_poses(self, path: str):
+        """KITTI stores 4x4 homogeneous matrices as 12 entry rows."""
+        poses = []
+        with open(path, "r") as f:
+            lines = f.readlines()
+
+        for i in range(len(lines)):
+            line = list(map(float, lines[i].split()))
+            c2w = np.eye(4)
+            c2w[:3, :] = np.array(line).reshape(3, 4)
+            poses.append(c2w)
+
+        return poses
 
 
 class Azure(BaseDataset):
