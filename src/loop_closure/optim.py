@@ -141,6 +141,7 @@ def ransac_umeyama(src_points, dst_points, iterations=1, threshold=0.1):
         transformed = (src_points @ (R * s).T) + t
 
         # Count inliers (not ideal because depends on scene scale)
+        # FIXME
         distances = np.sum((transformed - dst_points) ** 2, axis=1) ** 0.5
         inlier_mask = distances < threshold
         inliers = np.sum(inlier_mask)
@@ -221,7 +222,7 @@ def run_DPVO_PGO(
     # NOTE Returns [cur_t, 8] SIM(3) poses
     final_est = perform_updates(pred_poses, loop_poses, loop_ii, loop_jj, **kwargs)
     # Only optimized until this value
-    safe_i = loop_ii.max().item() + 1
+    safe_i = loop_ii.max().item()
     # Convert video.poses to SIM(3)
     aa = SE3_to_Sim3(pred_poses.cpu())
     # Update poses by rel. delta from loop closure
