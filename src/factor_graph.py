@@ -18,10 +18,11 @@ class FactorGraph:
         self,
         video,
         update_op,
-        device="cuda:0",
-        corr_impl="volume",
-        max_factors=-1.0,
-        upsample=False,
+        device: str = "cuda:0",
+        corr_impl: str = "volume",
+        max_factors: float = -1.0,
+        upsample: bool = False,
+        max_distance: int = 200,
     ):
         self.video = video
         self.update_op = update_op
@@ -30,9 +31,8 @@ class FactorGraph:
         self.corr_impl = corr_impl
         self.upsample = upsample
 
-        # TODO make configurable?
         # Max. distance between frames to consider adding edges
-        self.max_distance = 200
+        self.max_distance = max_distance
 
         self.scale_priors = self.video.optimize_scales
 

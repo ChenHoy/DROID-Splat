@@ -1,22 +1,24 @@
 defaults:
  - _self_
- - mapping: wild.yaml
- - tracking: base.yaml
+ - mapping: tum.yaml
+ - tracking: kitti.yaml
  - loop_closure: eigen.yaml
- - data: Replica/base.yaml
+ - data: KITTI/base.yaml
+#  - data: Replica/base.yaml
+#  - data: Custom/hannover.yaml
 
 hydra:
   run:
     dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}_${mode}
   job:
     chdir: False
-    name: test_loop # Change this to your experiment run name, e.g. the dataset you run on or the run of a configuration
+    name: test_kitti # Change this to your experiment run name, e.g. the dataset you run on or the run of a configuration
 
 device: "cuda:0"
 sync_method: strict
 
 stride: 1
-mode: "rgbd"  # 'mono', 'prgbd', 'rgbd'
+mode: "pgbd"  # 'mono', 'prgbd', 'rgbd'
 mono_depth: "metric3d-vit_giant2" # 'lotus_d' 'zoed-nk', 'metric3d-vit_giant2', 'depthany-vitl-outdoor', 'depthany-vitl-indoor'
 with_dyn: False # Filter out dynamic objects if masks are provided in the dataset
 opt_intr: False # Optimizes additional intrinsic parameters
@@ -31,9 +33,9 @@ run_loop_closure: True # Perform a classical loop closure with the candidates
 run_mapping: False # Rendering 
 
 ## Visualizations / GUIs
-run_visualization: False
+run_visualization: True
 run_mapping_gui: False
-show_stream: False
+show_stream: True
 # plot_uncertainty: True # To show the uncertainty of the pose graph optimization
 
 # Flag for saving all rendered predictions for later purpose like visualization
@@ -47,6 +49,7 @@ save_rendered_predictions: True
 ## Frequencies for synchronizing the different main parts of the pipeline
 # In an optimal setup, the Frontend would be the bottlenck, which can run at ~20-30FPS
 # Mapping takes ~5-7 iters/s, i.e. with a well tuned system each Render update hits <= 0.4fps
+# NOTE for long-term outdoor SLAM, we dont need this high backend frequency! e.g. on KITTI every 20th is ok
 backend_every: 10 # Run global bundle adjustment only every k Frontend updates
 # NOTE this is a trade-off between accuracy and speed, we can also add more compute to refinement!
 mapper_every: 15 # Run Renderer every k Frontend updates

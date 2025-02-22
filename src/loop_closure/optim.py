@@ -102,6 +102,7 @@ def umeyama_alignment(x: np.ndarray, y: np.ndarray):
     # SVD (text betw. eq. 38 and 39)
     u, d, v = np.linalg.svd(cov_xy)
     if np.count_nonzero(d > np.finfo(d.dtype).eps) < m - 1:
+        print("Warning. Degenerate covariance matrix in SVD for Umeyama")
         return None, None, None  # Degenerate covariance rank, Umeyama alignment is not possible
 
     # S matrix, eq. 43
@@ -121,11 +122,10 @@ def umeyama_alignment(x: np.ndarray, y: np.ndarray):
 
 
 @nb.njit(cache=True)
-def ransac_umeyama(src_points, dst_points, iterations=1, threshold=0.1):
-    best_inliers = 0
-    best_R = None
-    best_t = None
-    best_s = None
+def ransac_umeyama(src_points, dst_points, iterations=1, threshold=0.1, optim_inliers: int = 100):
+    best_inliers, best_distances = 0, None
+    best_R, best_t, best_s = None, None, None
+
     for _ in range(iterations):
         # Randomly select three points
         indices = np.random.choice(src_points.shape[0], 3, replace=False)
@@ -134,6 +134,7 @@ def ransac_umeyama(src_points, dst_points, iterations=1, threshold=0.1):
 
         # Estimate transformation
         R, t, s = umeyama_alignment(src_sample.T, dst_sample.T)
+        # Just skip over degenerate cases
         if t is None:
             continue
 
@@ -141,7 +142,7 @@ def ransac_umeyama(src_points, dst_points, iterations=1, threshold=0.1):
         transformed = (src_points @ (R * s).T) + t
 
         # Count inliers (not ideal because depends on scene scale)
-        # FIXME
+        # FIXME how to make this scale-invariant?
         distances = np.sum((transformed - dst_points) ** 2, axis=1) ** 0.5
         inlier_mask = distances < threshold
         inliers = np.sum(inlier_mask)
@@ -150,11 +151,14 @@ def ransac_umeyama(src_points, dst_points, iterations=1, threshold=0.1):
         if inliers > best_inliers:
             best_inliers = inliers
             best_R, best_t, best_s = umeyama_alignment(src_points[inlier_mask].T, dst_points[inlier_mask].T)
+            best_distances = distances
 
-        if inliers > 100:
+        # If we have > 100 inliers, the model is likely pretty good
+        # TODO chen: I dont like this, as this depends on the number of input points
+        if inliers > optim_inliers:
             break
 
-    return best_R, best_t, best_s, best_inliers
+    return best_R, best_t, best_s, best_inliers, best_distances
 
 
 def batch_jacobian(func, x):

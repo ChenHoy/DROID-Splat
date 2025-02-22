@@ -422,10 +422,8 @@ class DepthVideo:
             s = self.disps[:cur_ix].mean()
             self.disps[:cur_ix] /= s
 
-            # TODO chen: why do we multiply the poses by the scale?
             self.poses[:cur_ix, :3] *= s  # [tx, ty, tz, qx, qy, qz, qw]
-            # NOTE: due to the scale optimization in the DVPO loop closure, we might have a first pose
-            # that is not an identity -> we need to normalize the poses to the first pose
+            # Make sure that the first pose is always identity
             self.poses[:cur_ix] = (lietorch.SE3(self.poses[:cur_ix]) * lietorch.SE3(self.poses[[0]]).inv()).data
             # Update visualization, etc.
             self.dirty[:cur_ix] = True

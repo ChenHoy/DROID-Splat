@@ -152,9 +152,9 @@ class Backend:
         # (16 for DROID-SLAM), ((int(self.video.stereo) + (self.radius + 2) * 2) for GO-SLAM)
         max_factors = self.max_factor * n
 
-        graph = FactorGraph(self.video, self.update_op, self.device, "alt", max_factors, self.upsample)
+        graph = FactorGraph(self.video, self.update_op, self.device, "alt", max_factors, self.upsample, max_distance=n)
         n_edges = graph.add_proximity_factors(
-            rad=self.radius, nms=self.nms, beta=self.beta, thresh=self.thresh, remove=False
+            rad=self.radius, nms=self.nms, beta=self.beta, thresh=self.thresh, remove=True
         )
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)

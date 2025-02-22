@@ -404,6 +404,18 @@ class SLAM:
                 # Perform PGO over map until loop_ii.max() if candidates exist
                 self.loop_closer(loop_ii, loop_jj, scores)
 
+            # Check for final loops after tracking finished
+            if not loop_queue.empty():
+                loop_ii, loop_jj, scores = self.get_potential_loop_update(loop_queue)
+                self.loop_closer(loop_ii, loop_jj, scores)
+
+            # TODO maybe we need to add another while loop for emptying the find buffer until this is reduced
+            while len(self.loop_closer.found) > 0:
+                i, j = self.loop_closer.found.pop()
+                self.loop_closer.attempt_loop_closure(i, j)
+
+        self.loop_closer.info(f"Closed {len(self.loop_closer.prev_loop_closes)} loops!")
+
         # Free memory
         del self.loop_closer
         torch.cuda.empty_cache()
@@ -696,7 +708,8 @@ class SLAM:
                 del obj
                 fname, img = copy_obj
                 self.info("Received image to save at {}".format(fname))
-                cv2.imwrite(fname, img)
+                # Convert RGB to BGR for cv2 pipeline
+                cv2.imwrite(fname, img[..., ::-1])
 
         self.all_finished += 1
         self.info("Show Loop Done!")
@@ -1095,7 +1108,7 @@ class SLAM:
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             # mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
-            # mp.Process(target=self.show_loop, args=(0, self.viz_loop_queue, True), name="Loop Visualizer"),
+            mp.Process(target=self.show_loop, args=(0, self.viz_loop_queue, True), name="Loop Visualizer"),
             mp.Process(
                 target=self.tracking,
                 args=(

@@ -604,6 +604,7 @@ class KITTI(BaseDataset):
         else:
             self.poses = None
 
+    # FIXME poses need to be returned so that they are consistent with our evaluation code
     def load_poses(self, path: str):
         """KITTI stores 4x4 homogeneous matrices as 12 entry rows."""
         poses = []

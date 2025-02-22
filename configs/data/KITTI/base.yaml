@@ -1,5 +1,5 @@
 dataset: 'kitti'
-input_folder: /media/data/KITTI/raw/sequences/05/
+input_folder: /media/data/KITTI/raw/sequences/00/
 png_depth_scale: 1.0
 
 ### original camera parameters
@@ -10,8 +10,8 @@ cam:
   fy: 718.856 
   cx: 607.1928
   cy: 185.2157
-  H_edge: 0
-  W_edge: 0
-  H_out: 370
-  W_out: 1226
+  H_edge: 8
+  W_edge: 8
+  H_out: 152
+  W_out: 480
   camera_model: "pinhole"

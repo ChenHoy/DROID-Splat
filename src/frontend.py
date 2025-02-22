@@ -133,7 +133,7 @@ class Frontend:
             t0 = max(1, self.graph.ii.min().item() + 1)
             t1 = max(self.graph.ii.max().item(), self.graph.jj.max().item()) + 1
             msg = "Running frontend over [{}, {}] with {} factors.".format(t0, t1, self.graph.ii.numel())
-            self.info(msg)
+            # self.info(msg)
 
             ### 2nd update
             for itr in range(self.steps2):

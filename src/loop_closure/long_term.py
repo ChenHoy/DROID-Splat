@@ -71,8 +71,13 @@ class LongTermLoopClosure:
     ):
         self.cfg = cfg
 
+        # 2D feature detector
+        self.detector_window = self.cfg.get("detector_window", 15)
+        self.score_threshold = self.cfg.get("score_threshold", 40.0)
+
         # RANSAC Point Cloud Registration
         self.min_num_inliers = self.cfg.get("min_num_inliers", 30)
+        self.perc_inliers = self.cfg.get("perc_inliers", 0.3)
         self.ransac_thresh = self.cfg.get("ransac_thresh", 0.1)
         self.ransac_iters = self.cfg.get("ransac_iters", 400)
         self.nms = self.cfg.get("nms", 50)
@@ -80,6 +85,7 @@ class LongTermLoopClosure:
         self.num_repeat = self.cfg.get("num_repeat", 3)
         self.triplet_stride = self.cfg.get("triplet_stride", 1)
         self.max_2d_residual = self.cfg.get("max_2d_residual", 2.0)
+        self.delay = self.cfg.get("delay", 5)  # Delay to the frontend
 
         self.max_depth = self.cfg.get("max_depth", 20.0)
         self.device = device
@@ -127,6 +133,7 @@ class LongTermLoopClosure:
     def is_runnable(self, i, j, delay: int = 5):
         """Check if we can actually run the loop closure on the given edge.
         This looks if the video is already far enough to close the loop, i.e. we have valid poses for both triplets.
+        NOTE: we use a delay here, so that the poses and disps are already optimized at least a once
         """
         assert len(self.found) > 0, "Only check on valid loop edges, none were inserted in self.found!"
         with self.video.get_lock():
@@ -144,7 +151,9 @@ class LongTermLoopClosure:
         ii: Optional[torch.Tensor] = None,
         jj: Optional[torch.Tensor] = None,
         scores: Optional[torch.Tensor] = None,
-    ):
+    ) -> bool:
+        performed_lc = False
+
         """Given a set of edges (ii, jj), attempt to close the loop for each candidate edge (i, j).
         If succesful, update pose graph with relative. pose and record completed closure.
         """
@@ -158,25 +167,31 @@ class LongTermLoopClosure:
                 # Ensure that this edge is not redundant
                 dists_sq = [(np.square(i - a) + np.square(j - b)) for a, b in self.prev_loop_closes]
                 if min(dists_sq, default=np.inf) < np.square(self.nms):
+                    self.info(
+                        f"Rejection for ({i}, {j})! Redundant edge, as we already had a previous loop closure nearby."
+                    )
                     continue
 
                 self.found.append((i, j))
 
         if self.lc_in_progress:
-            return
+            return performed_lc
 
         # Just try to close every edge in the buffer
         if not self.check_consecutive:
             while len(self.found) > 0:
                 # Wait for the main system to be ahead here, so we can triangulate with neighboring frames
-                if not self.is_runnable(*self.found[0]):
+                if not self.is_runnable(*self.found[0], delay=self.delay):
                     break
 
                 i, j = self.found.pop(0)
-                self.attempt_loop_closure(i, j)
+                closed_loop = self.attempt_loop_closure(i, j)
+                # If closed loop = True, then this edge actually got inserted into the pose graph
+                performed_lc = closed_loop or performed_lc
         else:
             # Pop off buffer and perform repetition check
             while len(self.found) >= self.num_repeat:
+                # self.info("Currently holding {} candidates for loop closure".format(len(self.found)))
                 # Check if we n consecutive detections for a valid loop closure
                 # NOTE we for this reason filter edges for a given frame, i.e. for every i we only allow the edge to the most similar frame > thresh.
                 # Use last index of the repetition window for comparison
@@ -184,7 +199,7 @@ class LongTermLoopClosure:
                 cands = self._repetition_check(self.found[self.num_repeat - 1][0])
                 if cands is not None:
                     # Wait for main system to be ahead so we can triangulate with neighboring frames
-                    if not self.is_runnable(*cands):
+                    if not self.is_runnable(*cands, delay=self.delay):
                         break
 
                     self.attempt_loop_closure(*cands)
@@ -208,7 +223,9 @@ class LongTermLoopClosure:
         else:
             return None
 
-    def attempt_loop_closure(self, i: int, j: int):
+    def attempt_loop_closure(self, i: int, j: int) -> bool:
+        was_successful = False
+
         start = time.time()
         # Try to close the loop
         result = self.close_loop(i, j)
@@ -221,8 +238,10 @@ class LongTermLoopClosure:
             self.lc_callback(result)
             end = time.time()
             self.info(f"Loop closure took {end - start:.2f} seconds")
+            was_successful = True
 
         self.lc_in_progress = False
+        return was_successful
 
     def close_loop(self, i, j):
         """Close a loop closure by using 3D registration based on RANSAC and
@@ -236,11 +255,11 @@ class LongTermLoopClosure:
         this updates all poses and disparities in the window [0, self.video.counter.value] when a loop is closed.
         """
         ### 3D Keypoint Estimation
-        i_pts, i_feat = self.estimate_3d_keypoints_dpvo(
-            i, stride=self.triplet_stride, max_residual=self.max_2d_residual
+        i_pts, i_feat, i_matches = self.estimate_3d_keypoints_dpvo(
+            i, stride=self.triplet_stride, max_residual=self.max_2d_residual, return_matches=True
         )
-        j_pts, j_feat = self.estimate_3d_keypoints_dpvo(
-            j, stride=self.triplet_stride, max_residual=self.max_2d_residual
+        j_pts, j_feat, j_matches = self.estimate_3d_keypoints_dpvo(
+            j, stride=self.triplet_stride, max_residual=self.max_2d_residual, return_matches=True
         )
         # FIXME Pure DROID-SLAM kernel achieves slighly different results here
         # i_pts_droid, i_feat_droid = self.estimate_3d_keypoints_droid(i, stride=self.triplet_stride, max_residual=self.max_2d_residual)
@@ -256,8 +275,11 @@ class LongTermLoopClosure:
             i_feat[key] = i_feat[key][:, iz < self.max_depth]
             j_feat[key] = j_feat[key][:, jz < self.max_depth]
 
+        self.info(f"{i_pts.size(0)} and {j_pts.size(0)} points left after depth filter for edge ({i}, {j})")
+
         # Early exit
-        if i_pts.numel() < self.min_num_inliers:
+        # We need at least num_inliers 2D keypoints for each frame i or j
+        if i_pts.numel() < self.min_num_inliers or j_pts.numel() < self.min_num_inliers:
             self.info(
                 f"Rejection for ({i}, {j})! Too few inliers (A, Detection): {i_pts.numel()} / {self.min_num_inliers}"
             )
@@ -267,24 +289,49 @@ class LongTermLoopClosure:
         # NOTE chen: this reduces the succesful triangulated matches further
         out = self.matcher({"image0": i_feat, "image1": j_feat})
         i_ind, j_ind = out["matches"][0].mT
+        self.info(f"Matched {i_ind.size(0)}, {j_ind.size(0)} 2D keypoints between {i} and {j}")
         i_pts = i_pts[i_ind]
         j_pts = j_pts[j_ind]
         assert i_pts.shape == j_pts.shape, (i_pts.shape, j_pts.shape)
         i_pts, j_pts = asnumpy(i_pts.double()), asnumpy(j_pts.double())
 
+        # TODO Delete after tests
+        # Visualize the matches
+        if os.path.join(self.log_folder, "loop_closures") is not None:
+            os.makedirs(os.path.join(self.log_folder, "loop_closures"), exist_ok=True)
+            os.makedirs(os.path.join(self.log_folder, "loop_closures", "triangulation"), exist_ok=True)
+        # Plot the 2D triangulated matches
+        fname2d_i = os.path.join(self.log_folder, "loop_closures", "triangulation", f"lc_tri_{i}.png")
+        self.plot_triplet_matches(save=True, fname=fname2d_i, **i_matches)
+        fname2d_j = os.path.join(self.log_folder, "loop_closures", "triangulation", f"lc_tri_{j}.png")
+        self.plot_triplet_matches(save=True, fname=fname2d_j, **j_matches)
+        fname3d = os.path.join(self.log_folder, "loop_closures", f"lc_3d_{i}_{j}.png")
+        self.plot_matches(i_feat, j_feat, self.video.images[i], self.video.images[j], out, save=True, fname=fname3d)
+
         # Early exit
-        if i_pts.size < self.min_num_inliers:
+        num_matched_points = min(i_pts.shape[0], j_pts.shape[0])
+        if num_matched_points < self.min_num_inliers:
             self.info(
-                f"Rejection for ({i}, {j})! Too few inliers (B, Matching): {i_pts.size} / {self.min_num_inliers}"
+                f"Rejection for ({i}, {j})! Too few inliers (B, Matching): {num_matched_points} / {self.min_num_inliers}"
             )
             return None
 
         ### Point CLound Registration
-        r, t, s, num_inliers = ransac_umeyama(i_pts, j_pts, iterations=self.ransac_iters, threshold=self.ransac_thresh)
+        r, t, s, num_inliers, distances = ransac_umeyama(
+            i_pts, j_pts, iterations=self.ransac_iters, threshold=self.ransac_thresh
+        )
+        ratio_inliers = num_inliers / num_matched_points
         # Exist if number of inlier matches is too small
-        if num_inliers < self.min_num_inliers:
-            self.info(f"Rejection for ({i}, {j})! Too few inliers (C, RANSAC): {num_inliers} / {self.min_num_inliers}")
+        self.info(f"RANSAC distances for ({i}, {j}): {distances}")
+        if ratio_inliers < self.perc_inliers or num_inliers < self.min_num_inliers:
+            self.info(
+                f"Rejection for ({i}, {j})! Too few inliers (C, RANSAC): {num_inliers} with {round(ratio_inliers*100, 2)}%"
+            )
             return None
+        else:
+            self.info(
+                f"Edge ({i}, {j})! RANSAC inliers: {num_inliers} with {round(ratio_inliers*100, 2)}% >= {self.perc_inliers*100}%"
+            )
 
         # Pose-Graph Optimization (PGO)
         far_rel_pose = make_pypose_Sim3(r, t, s)[None]
@@ -299,19 +346,17 @@ class LongTermLoopClosure:
         with self.video.get_lock():
             cur_t = self.video.counter.value
 
-        if cur_t <= loop_ii.max().item():
-            self.info(f"Discarding loop closure between {i} and {j}! Video counter is not far enough ...")
-            return None
-
         pred_poses = pp.SE3(self.video.poses[:cur_t]).Inv().cpu()
         self.loop_ii, self.loop_jj = loop_ii, loop_jj
 
         self.lc_in_progress = True
+        # FIXME does DPVO really use the exact same pose graph structure lik DROID?
         final_est = run_DPVO_PGO(pred_poses.data, loop_poses.data, loop_ii, loop_jj)
         self.info(f"Success! Closed loop between {i} and {j}")
         self.lc_in_progress = False
         return final_est
 
+    # FIXME does this really work here?
     def lc_callback(self, final_est: torch.Tensor):
         """Check if the PGO finished running"""
         safe_i, _ = final_est.shape
@@ -325,6 +370,7 @@ class LongTermLoopClosure:
             self.video.poses[:safe_i] = SE3(res).inv().data
 
             self.video.disps[:safe_i] /= s.view(safe_i, 1, 1)
+            self.video.disps_up[:safe_i] /= s.view(safe_i, 1, 1)
             # TODO do we really ever need the deltas?
             self._rescale_deltas(s1)
             # normalize so we always have identity pose for the first frame
@@ -359,12 +405,20 @@ class LongTermLoopClosure:
         """Pretty self explanitory! Alas, we can only use disk w/ lightglue. ORB is brittle"""
         _, _, h, w = images.shape
         wh = torch.tensor([w, h]).view(1, 2).float().cuda()
-        features = self.detector(images, num_features, pad_if_not_divisible=True, window_size=15, score_threshold=40.0)
+        features = self.detector(
+            images,
+            num_features,
+            pad_if_not_divisible=True,
+            window_size=self.detector_window,
+            score_threshold=self.score_threshold,
+        )
         return [
             {"keypoints": f.keypoints[None], "descriptors": f.descriptors[None], "image_size": wh} for f in features
         ]
 
-    def estimate_3d_keypoints_dpvo(self, i: int, stride: int = 1, max_residual: float = 5.0) -> Dict:
+    def estimate_3d_keypoints_dpvo(
+        self, i: int, stride: int = 1, max_residual: float = 5.0, return_matches: bool = False
+    ) -> Dict:
         """Detect, match and triangulate 3D points"""
 
         # Load triplet [i-1, i, i+1]
@@ -393,11 +447,9 @@ class LongTermLoopClosure:
 
         ### What do the keypoints look like?
         # self.plot_keypoints(fl, images)
-        if os.path.join(self.log_folder, "loop_closures") is not None:
-            os.makedirs(os.path.join(self.log_folder, "loop_closures"), exist_ok=True)
-        self.plot_matches(
-            fl, images, out1, out2, save=True, fname=os.path.join(self.log_folder, "loop_closures", f"lc_{i}.png")
-        )
+        # self.plot_triplet_matches(
+        #     fl, images, out1, out2, save=True, fname=os.path.join(self.log_folder, "loop_closures", f"lc_{i}.png")
+        # )
 
         a, b, c = trajectories.mT
         n, _ = trajectories.shape
@@ -414,7 +466,7 @@ class LongTermLoopClosure:
         jj[n:] = 2
 
         # Construct mini graph
-        true_disp = self.video.disps[i].median()
+        true_disp = self.video.disps_up[i].median()
         patches = torch.cat((kps1, torch.ones(1, n, 1).cuda() * true_disp), dim=-1)
         patches = repeat(patches, "1 n uvd -> 1 n uvd 3 3", uvd=3)
         target = rearrange(torch.stack((kps0, kps2)), "ot 1 n uv -> 1 (ot n) uv", uv=2, n=n, ot=2)
@@ -446,11 +498,23 @@ class LongTermLoopClosure:
         points = patch_iproj(patches, intrinsics[:, torch.ones(n, device="cuda", dtype=torch.long)])
         points = points[..., 1, 1, :3] / points[..., 1, 1, 3:]
 
-        return points[:, mask].squeeze(0), {
-            "keypoints": kps1[:, mask],
-            "descriptors": desc1[:, mask],
-            "image_size": image_size,
-        }
+        if return_matches:
+            matches = {"images": images, "fl": fl, "matches1": out1, "matches2": out2}
+            return (
+                points[:, mask].squeeze(0),
+                {
+                    "keypoints": kps1[:, mask],
+                    "descriptors": desc1[:, mask],
+                    "image_size": image_size,
+                },
+                matches,
+            )
+        else:
+            return points[:, mask].squeeze(0), {
+                "keypoints": kps1[:, mask],
+                "descriptors": desc1[:, mask],
+                "image_size": image_size,
+            }
 
     def estimate_3d_keypoints_droid(self, i: int, stride: int = 1, max_residual: float = 5.0) -> Dict:
         """Use matched 2D keypoints for triangulation and return 3D points"""
@@ -479,7 +543,7 @@ class LongTermLoopClosure:
 
         ### What do the keypoints look like?
         # self.plot_keypoints(fl, images)
-        # self.plot_matches(fl, images, out1, out2)
+        # self.plot_triplet_matches(fl, images, out1, out2)
 
         trajectories = trajectories[torch.randperm(2048)]
         trajectories = trajectories[trajectories.min(dim=1).values >= 0]
@@ -625,16 +689,13 @@ class LongTermLoopClosure:
         plt.show()
 
     def plot_matches(
-        self, fl: List, images: torch.Tensor, matches1, matches2, save: bool = True, fname: Optional[str] = None
-    ) -> None:
+        self, fl1, fl2, img1: torch.Tensor, img2: torch.Tensor, matches, save: bool = True, fname: Optional[str] = None
+    ):
         from kornia_moons.viz import draw_LAF_matches
         import matplotlib.pyplot as plt
 
-        img1, img2, img3 = images
-        fl1, fl2, fl3 = fl
-        kp1, kp2, kp3 = fl1["keypoints"], fl2["keypoints"], fl3["keypoints"]
-        idxs1 = matches1["matches"][0]
-        idxs2 = matches2["matches"][0]
+        kp1, kp2 = fl1["keypoints"], fl2["keypoints"]
+        idxs1 = matches["matches"][0]
 
         if save:
             fig, ax = draw_LAF_matches(
@@ -677,43 +738,17 @@ class LongTermLoopClosure:
             )
             plt.show()
 
-        if save:
-            fig, ax = draw_LAF_matches(
-                KF.laf_from_center_scale_ori(kp3.cpu()),
-                KF.laf_from_center_scale_ori(kp2.cpu()),
-                idxs2.cpu(),
-                K.tensor_to_image(img3.cpu()),
-                K.tensor_to_image(img2.cpu()),
-                draw_dict={
-                    "tentative_color": (1, 1, 0.2, 0.3),
-                    "feature_color": None,
-                    "vertical": False,
-                },
-                return_fig_ax=True,
-            )
-            fig.tight_layout()
-            ax.margins(0)
-            fig.canvas.draw()
-            img_from_plot = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-            img_from_plot = img_from_plot.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    def plot_triplet_matches(
+        self, fl: List, images: torch.Tensor, matches1, matches2, save: bool = True, fname: Optional[str] = None
+    ) -> None:
+        img1, img2, img3 = images
+        fl1, fl2, fl3 = fl
 
-            if fname is not None:
-                fname23 = str(Path(fname).parent / (Path(fname).stem + "_matches_23.png"))
-            else:
-                fname23 = "matches_23.png"
-            self.viz_queue.put((fname23, img_from_plot))
-            plt.close(fig)
+        if fname is not None:
+            fname12 = str(Path(fname).parent / (Path(fname).stem + "_matches_12.png"))
+            fname23 = str(Path(fname).parent / (Path(fname).stem + "_matches_23.png"))
         else:
-            draw_LAF_matches(
-                KF.laf_from_center_scale_ori(kp3.cpu()),
-                KF.laf_from_center_scale_ori(kp2.cpu()),
-                idxs2.cpu(),
-                K.tensor_to_image(img3.cpu()),
-                K.tensor_to_image(img2.cpu()),
-                draw_dict={
-                    "tentative_color": (1, 1, 0.2, 0.3),
-                    "feature_color": None,
-                    "vertical": False,
-                },
-            )
-            plt.show()
+            fname12, fname23 = "matches_12.png", "matches_23.png"
+
+        self.plot_matches(fl1, fl2, img1, img2, matches1, save, fname12)
+        self.plot_matches(fl3, fl2, img3, img2, matches2, save, fname23)
