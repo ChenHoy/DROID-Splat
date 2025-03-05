@@ -31,6 +31,9 @@ class FrontendWrapper(torch.nn.Module):
 
         self.count = 0
 
+    def info(self, msg: str):
+        print(colored("[Frontend] " + msg, "yellow"))
+
     @torch.no_grad()
     def forward(self, timestamp, image, depth, intrinsic, gt_pose=None, static_mask=None):
         """Add new keyframes according to apparent motion and run a local bundle adjustment optimization.
@@ -118,7 +121,7 @@ class Frontend:
         for itr in range(self.steps1):
             self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True)
 
-        # set initial pose for next frame
+        # Check distance
         d = self.video.distance([self.t1 - 3], [self.t1 - 2], beta=self.beta, bidirectional=True)
 
         # If the distance is too small, remove the last keyframe
@@ -132,8 +135,8 @@ class Frontend:
         else:
             t0 = max(1, self.graph.ii.min().item() + 1)
             t1 = max(self.graph.ii.max().item(), self.graph.jj.max().item()) + 1
-            msg = "Running frontend over [{}, {}] with {} factors.".format(t0, t1, self.graph.ii.numel())
-            # self.info(msg)
+            msg = f"Added Keyframe with motion distance: {round(d.item(), 2)}! Running frontend over [{t0}, {t1}] with {self.graph.ii.numel()} factors."
+            self.info(msg)
 
             ### 2nd update
             for itr in range(self.steps2):

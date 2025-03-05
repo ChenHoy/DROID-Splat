@@ -176,10 +176,12 @@ def _residual(C, Gi, Gj):
 
 
 def residual(Ginv, input_poses, dSloop, ii, jj, jacobian=False):
-
-    # prep
+    """
+    Given a set of poses and loop closures, compute the residual of the loop closure constraints.
+    """
     device = Ginv.device
     assert parse_shape(input_poses, "_ d") == dict(d=7)
+    # NOTE Ginv = SE3_to_Sim3(input_poses).Inv().Log()
     pred_inv_poses = SE3_to_Sim3(input_poses).Inv()
 
     # free variables
@@ -188,6 +190,7 @@ def residual(Ginv, input_poses, dSloop, ii, jj, jacobian=False):
     ll = kk - 1
 
     # constants
+    # NOTE these are just the rel. poses for each i to i-1
     Ti = pred_inv_poses[kk]
     Tj = pred_inv_poses[ll]
     dSij = Tj @ Ti.Inv()
@@ -202,35 +205,36 @@ def residual(Ginv, input_poses, dSloop, ii, jj, jacobian=False):
 
     J_Ginv_i, J_Ginv_j = batch_jacobian(_residual, (constants, Ginv[iii], Ginv[jjj]))
     return resid, (J_Ginv_i, J_Ginv_j, iii, jjj)
-    # print(f"{J_Ginv_i.shape=} {J_Ginv_j.shape=} {resid.shape=} {iii.shape=} {jjj.shape=}")
-
-    r = iii.numel()
-    assert parse_shape(J_Ginv_i, "r do di") == parse_shape(J_Ginv_j, "r do di") == dict(r=r, do=7, di=7)
-    J = torch.zeros(r, n, 7, 7, device=device)
-    rr = torch.arange(r, device=device)
-    J[rr, iii] = J_Ginv_i
-    J[rr, jjj] = J_Ginv_j
-    J = rearrange(J, "r n do di -> r do n di")
-
-    return resid, J, (J_Ginv_i, J_Ginv_j, iii, jjj)
 
 
-# TODO DPVO actually runs this in separate Process Pool asynchronoously, i.e. this runs a lot of times
-# I dont expect this to be a bottleneck though, i.e. the whole things should still run quickly in parallel
+# NOTE DPVO actually runs this in separate Process Pool asynchronously, i.e. this runs a lot of times
+# Since we rarely run a loop closure and we let the other threads wait for this to finish for system stability,
+# we just run this synchronously
 def run_DPVO_PGO(
     pred_poses: torch.Tensor, loop_poses: torch.Tensor, loop_ii: torch.Tensor, loop_jj: torch.Tensor, **kwargs
 ):
     """Run a PoseGraph Optimiztion on a window of poses given certain loop edges.
     This takes n pred_poses and optimizes all poses in the window [0, n].
+
+    args:
+    ---
+    pred_poses: torch.Tensor [cur_t, 7] SE(3) abs. poses
+    loop_poses: torch.Tensor [num_prev_loops + 1, 7] SIM(3) rel. poses
+        These are all previous loop edge relative poses and the current loop edge, where we estimated the rel. pose with 3D registration
+    loop_ii: torch.Tensor [num_prev_loops] int64
+        The i indices of the loop edges
+    loop_jj: torch.Tensor [num_prev_loops] int64
+        The j indices of the loop edges
     """
     # NOTE Returns [cur_t, 8] SIM(3) poses
     final_est = perform_updates(pred_poses, loop_poses, loop_ii, loop_jj, **kwargs)
-    # Only optimized until this value
-    safe_i = loop_ii.max().item()
-    # Convert video.poses to SIM(3)
+
+    safe_i = loop_ii.max().item()  # Only optimized until the most recent loop closure
+
     aa = SE3_to_Sim3(pred_poses.cpu())
-    # Update poses by rel. delta from loop closure
+    # Get the relative pose, but only for the newester loop node (i)
     rel_delta = aa[[safe_i]] * final_est[[safe_i]].Inv()
+    # Update all poses with this optimized relative pose, so the loop get closed
     final_est = rel_delta * final_est
     return final_est[:safe_i]
 
@@ -245,7 +249,11 @@ def perform_updates(
     lmbda: float = 1e-6,
     fix_opt_window: bool = False,
 ):
-    """Run the Levenberg Marquardt algorithm"""
+    """Run the Levenberg Marquardt algorithm
+
+    NOTE DPVO uses a very conservative 1e-6 lambda initial step size
+    NOTE DPVO does not use any numerical damping that is applied on the system diagonal for some reason
+    """
 
     input_poses = input_poses.clone()
 
@@ -254,7 +262,7 @@ def perform_updates(
     else:
         freen = -1
 
-    Ginv = SE3_to_Sim3(input_poses).Inv().Log()
+    Ginv = SE3_to_Sim3(input_poses).Inv().Log()  # Use Lie algebra for updates
 
     residual_history = []
 
@@ -264,9 +272,10 @@ def perform_updates(
         # print("#Residual", residual_history[-1])
         (delta_pose,) = dpvo_backends.solve_system(J_Ginv_i, J_Ginv_j, iii, jjj, resid, ep, lmbda, freen)
         assert Ginv.shape == delta_pose.shape
-        Ginv_tmp = Ginv + delta_pose
+        Ginv_tmp = Ginv + delta_pose  # Update in exponential space
 
         new_resid = residual(Ginv_tmp, input_poses, dSloop, ii_loop, jj_loop)
+        # Old school Levenberg-Marquart update rule for step size
         if new_resid.square().mean() < residual_history[-1]:
             Ginv = Ginv_tmp
             lmbda /= 2
@@ -276,4 +285,4 @@ def perform_updates(
         if (residual_history[-1] < 1e-5) and (itr >= 4) and ((residual_history[-5] / residual_history[-1]) < 1.5):
             break
 
-    return pp.Exp(Ginv).Inv()
+    return pp.Exp(Ginv).Inv()  # Map back to group in c2w

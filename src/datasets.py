@@ -2,8 +2,10 @@ import glob
 import os
 import ipdb
 from omegaconf import DictConfig
+from collections import namedtuple
+from time import time
 from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple, List, Dict
 
 import cv2
 import numpy as np
@@ -14,6 +16,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from kornia.geometry.linalg import compose_transformations
 
+from .utils import utils_lidar
 from .geom import matrix_to_lie
 
 
@@ -174,7 +177,6 @@ class BaseDataset(Dataset):
             depth_data /= self.png_depth_scale
         elif ".npy" in depth_path:
             depth_data = np.load(depth_path).astype(np.float32)
-
         elif ".depth" in depth_path:  # NOTE leon: totalrecon depth files
             with open(depth_path, "rb") as depth_fh:
                 raw_bytes = depth_fh.read()
@@ -247,9 +249,8 @@ class BaseDataset(Dataset):
         outsize = (H_out_with_edge, W_out_with_edge)
 
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
-        # bgr -> rgb, [0, 1]
-
-        color_data = torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
+        # bgr -> rgb
+        color_data = torch.from_numpy(color_data).permute(2, 0, 1)[[2, 1, 0], :, :]
         color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
 
         depth_data = self.depthloader(index)
@@ -568,9 +569,21 @@ class TotalRecon(BaseDataset):
 class KITTI(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(KITTI, self).__init__(cfg, device)
-        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_2/*.png")))
 
         sequence = Path(self.input_folder).name
+        self.use_lidar = cfg.mode == "rgbd"
+
+        self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_2/*.png")))
+        # We assume all images have the same size
+        self.H, self.W = cv2.imread(self.color_paths[0]).shape[:2]
+
+        # Get the calibration data and transforms for lidar alignment
+        # see reference https://github.com/PRBonn/PIN_SLAM/blob/main/dataset/dataloaders/kitti.py
+        self.calibration = self.read_calib_file(os.path.join(self.input_folder, "calib.txt"))
+        self.calib_data = self._load_calib()  # load all calib first
+        self.fx, self.fy = self.calib_data["K_cam2"][0, 0], self.calib_data["K_cam2"][1, 1]
+        self.cx, self.cy = self.calib_data["K_cam2"][0, 2], self.calib_data["K_cam2"][1, 2]
+
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
@@ -580,7 +593,7 @@ class KITTI(BaseDataset):
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
         else:
-            self.depth_paths = None
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "velodyne", "*.bin")))
 
         if self.depth_paths is not None:
             if self.t_stop is not None:
@@ -604,7 +617,159 @@ class KITTI(BaseDataset):
         else:
             self.poses = None
 
-    # FIXME poses need to be returned so that they are consistent with our evaluation code
+    def read_point_cloud(self, scan_file: str):
+        points = np.fromfile(scan_file, dtype=np.float32).reshape((-1, 4))[:, :4].astype(np.float32)
+        return points  # N, 4
+
+    def persepective_cam2image(self, points: np.ndarray, K_mat: np.ndarray):
+        ndim = points.ndim
+        if ndim == 2:
+            points = np.expand_dims(points, 0)
+        points_proj = np.matmul(K_mat[:3, :3].reshape([1, 3, 3]), points)
+        depth = points_proj[:, 2, :]
+        u = np.round(points_proj[:, 0, :] / (np.abs(depth) + 1e-6)).astype(int)
+        v = np.round(points_proj[:, 1, :] / (np.abs(depth) + 1e-6)).astype(int)
+
+        if ndim == 2:
+            u = u[0]
+            v = v[0]
+            depth = depth[0]
+        return u, v, depth
+
+    # partially from kitti360 dev kit
+    def points2depth_cam(
+        self, points: np.ndarray, img_height: int, img_width: int, T_c_l: np.ndarray, K_mat: np.ndarray
+    ):
+
+        # points as np.numpy (N,4)
+        points[:, 3] = 1  # homo coordinate
+
+        # transfrom velodyne points to camera coordinate
+        points_cam = np.matmul(T_c_l, points.T).T  # N, 4
+        points_cam = points_cam[:, :3]  # N, 3
+
+        # project to image space
+        u, v, depth = self.persepective_cam2image(points_cam.T, K_mat)
+        u = u.astype(np.int32)
+        v = v.astype(np.int32)
+
+        depth_map = np.zeros((img_height, img_width))
+        mask = np.logical_and(np.logical_and(np.logical_and(u >= 0, u < img_width), v >= 0), v < img_height)
+        # depth mask
+        min_depth = 0.5
+        max_depth = 100.0
+        mask = np.logical_and(np.logical_and(mask, depth > min_depth), depth < max_depth)
+
+        v_valid = v[mask]
+        u_valid = u[mask]
+
+        depth_map[v_valid, u_valid] = depth[mask]
+        return depth_map
+
+    @staticmethod
+    def read_calib_file(file_path: str) -> dict:
+        calib_dict = {}
+        with open(file_path, "r") as calib_file:
+            for line in calib_file.readlines():
+                tokens = line.split(" ")
+                if tokens[0] == "calib_time:":
+                    continue
+                # Only read with float data
+                if len(tokens) > 0:
+                    values = [float(token) for token in tokens[1:]]
+                    values = np.array(values, dtype=np.float32)
+
+                    # The format in KITTI's file is <key>: <f1> <f2> <f3> ...\n -> Remove the ':'
+                    key = tokens[0][:-1]
+                    calib_dict[key] = values
+        return calib_dict
+
+    # from pykitti
+    def _load_calib(self) -> Dict:
+        """Load and compute intrinsic and extrinsic calibration parameters."""
+        # We'll build the calibration parameters as a dictionary, then
+        # convert it to a namedtuple to prevent it from being modified later
+        data = {}
+
+        filedata = self.calibration
+
+        # Create 3x4 projection matrices
+        P_rect_00 = np.reshape(filedata["P0"], (3, 4))
+        P_rect_10 = np.reshape(filedata["P1"], (3, 4))
+        P_rect_20 = np.reshape(filedata["P2"], (3, 4))
+        P_rect_30 = np.reshape(filedata["P3"], (3, 4))
+
+        data["P_rect_00"] = P_rect_00
+        data["P_rect_10"] = P_rect_10
+        data["P_rect_20"] = P_rect_20
+        data["P_rect_30"] = P_rect_30
+
+        # Compute the rectified extrinsics from cam0 to camN
+        T1 = np.eye(4)
+        T1[0, 3] = P_rect_10[0, 3] / P_rect_10[0, 0]
+        T2 = np.eye(4)
+        T2[0, 3] = P_rect_20[0, 3] / P_rect_20[0, 0]
+        T3 = np.eye(4)
+        T3[0, 3] = P_rect_30[0, 3] / P_rect_30[0, 0]
+
+        # Compute the velodyne to rectified camera coordinate transforms
+        data["T_cam0_velo"] = np.reshape(filedata["Tr"], (3, 4))
+        data["T_cam0_velo"] = np.vstack([data["T_cam0_velo"], [0, 0, 0, 1]])
+        data["T_cam1_velo"] = T1.dot(data["T_cam0_velo"])
+        data["T_cam2_velo"] = T2.dot(data["T_cam0_velo"])
+        data["T_cam3_velo"] = T3.dot(data["T_cam0_velo"])
+
+        # Compute the camera intrinsics
+        data["K_cam0"] = P_rect_00[0:3, 0:3]
+        data["K_cam1"] = P_rect_10[0:3, 0:3]
+        data["K_cam2"] = P_rect_20[0:3, 0:3]
+        data["K_cam3"] = P_rect_30[0:3, 0:3]
+
+        # Compute the stereo baselines in meters by projecting the origin of
+        # each camera frame into the velodyne frame and computing the distances
+        # between them
+        p_cam = np.array([0, 0, 0, 1])
+        p_velo0 = np.linalg.inv(data["T_cam0_velo"]).dot(p_cam)
+        p_velo1 = np.linalg.inv(data["T_cam1_velo"]).dot(p_cam)
+        p_velo2 = np.linalg.inv(data["T_cam2_velo"]).dot(p_cam)
+        p_velo3 = np.linalg.inv(data["T_cam3_velo"]).dot(p_cam)
+
+        data["b_gray"] = np.linalg.norm(p_velo1 - p_velo0)  # gray baseline
+        data["b_rgb"] = np.linalg.norm(p_velo3 - p_velo2)  # rgb baseline
+
+        return data
+
+    def depthloader(self, index: int) -> np.ndarray:
+        """Read depth data from file, return as numpy array."""
+        if self.depth_paths is None:
+            return None
+        depth_path = self.depth_paths[index]
+        if ".png" in depth_path:
+            depth_data = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32)
+            depth_data /= self.png_depth_scale
+        elif ".exr" in depth_path:
+            depth_data = readEXR_onlydepth(depth_path).astype(np.float32)
+            depth_data /= self.png_depth_scale
+        elif ".npy" in depth_path:
+            depth_data = np.load(depth_path).astype(np.float32)
+        elif ".bin" in depth_path:
+            depth_data = self.read_point_cloud(depth_path)
+        elif ".depth" in depth_path:  # NOTE leon: totalrecon depth files
+            with open(depth_path, "rb") as depth_fh:
+                raw_bytes = depth_fh.read()
+                decompressed_bytes = liblzfse.decompress(raw_bytes)
+                depth_data = np.frombuffer(decompressed_bytes, dtype=np.float32)
+                depth_data = np.copy(depth_data.reshape(256, 192))  # NOTE leon: their depth shape
+        elif ".dpt" in depth_path:  # NOTE chen: Sintel depth files
+            depth_data = read_sintel_depth(depth_path)
+        else:
+            raise TypeError(depth_path)
+
+        # Sanity check, because some datasets did not clean their depths
+        depth_data[np.isnan(depth_data)] = 0.0
+
+        return depth_data
+
     def load_poses(self, path: str):
         """KITTI stores 4x4 homogeneous matrices as 12 entry rows."""
         poses = []
@@ -618,6 +783,127 @@ class KITTI(BaseDataset):
             poses.append(c2w)
 
         return poses
+
+    def plot_rgbd(self, rgb: np.ndarray, depth: np.ndarray):
+        import matplotlib.pyplot as plt
+
+        plt.figure()
+        plt.subplot(1, 2, 1)
+        plt.imshow(rgb)
+        plt.axis("off")
+        plt.subplot(1, 2, 2)
+        plt.imshow(depth)
+        plt.axis("off")
+        plt.show()
+
+    def __getitem__(self, index: int):
+        color_path = self.color_paths[index]
+        color_data = cv2.imread(color_path)
+
+        if self.distortion is not None:
+            K = np.eye(3)
+            K[0, 0], K[0, 2], K[1, 1], K[1, 2] = self.fx, self.cx, self.fy, self.cy
+            # undistortion is only applied on color image, not depth!
+            color_data = cv2.undistort(color_data, K, self.distortion)
+
+        H_out_with_edge, W_out_with_edge = (self.H_out + self.H_edge * 2, self.W_out + self.W_edge * 2)
+        outsize = (H_out_with_edge, W_out_with_edge)
+        color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
+        # bgr -> rgb
+        color_data = torch.from_numpy(color_data).permute(2, 0, 1)[[2, 1, 0], :, :]
+        color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
+
+        intrinsic = torch.as_tensor([self.fx, self.fy, self.cx, self.cy]).float()
+        intrinsic[0] *= W_out_with_edge / self.W
+        intrinsic[1] *= H_out_with_edge / self.H
+        intrinsic[2] *= W_out_with_edge / self.W
+        intrinsic[3] *= H_out_with_edge / self.H
+
+        depth_data = self.depthloader(index)
+        if depth_data is not None:
+            # In case of rgbd, we get a lidar point cloud back -> Project and Upsample into image
+            if self.use_lidar:
+                large_params = {"filtering": 1, "upsample": 4}
+                intr_large = self.calib_data["K_cam2"].copy()
+                intr_large[0, :] *= W_out_with_edge / self.W
+                intr_large[1, :] *= H_out_with_edge / self.H
+                # Turn into a projection matrix
+                intr_large_append = np.append(intr_large, np.array([[0, 0, 0]]).T, axis=1)
+                # FIXME this densification is terribly slow :/
+                # Do this once over the whole dataset and save the results
+                depth_map = utils_lidar.generate_depth(
+                    depth_data,
+                    intr_large_append,
+                    self.calib_data["T_cam2_velo"],
+                    W_out_with_edge,
+                    H_out_with_edge,
+                    large_params,
+                )
+                depth_data = torch.from_numpy(depth_map).float()
+            else:
+                depth_data = torch.from_numpy(depth_data).float()
+                depth_data = F.interpolate(depth_data[None, None], outsize, mode="nearest")[0, 0]
+
+            # Crop
+            if self.H_edge > 0:
+                edge = self.H_edge
+                depth_data = depth_data[edge:-edge, :]
+            if self.W_edge > 0:
+                edge = self.W_edge
+                depth_data = depth_data[:, edge:-edge]
+
+        # crop image edge, there are invalid value on the edge of the color image
+        if self.H_edge > 0:
+            edge = self.H_edge
+            color_data = color_data[:, :, edge:-edge, :]
+            intrinsic[3] -= edge
+
+        if self.W_edge > 0:
+            edge = self.W_edge
+            color_data = color_data[:, :, :, edge:-edge]
+            intrinsic[2] -= edge
+
+        # # Crop the image to avoid the sparse sky
+        # if self.use_lidar and depth_data is not None:
+        #     crop_h = 32
+        #     color_data = color_data[:, :, crop_h:, :]
+        #     depth_data = depth_data[crop_h:, :]
+        #     self.cy -= crop_h  # Update the intrinsic matrix
+
+        # self.plot_rgbd(color_data.squeeze().permute(1, 2, 0).numpy(), depth_data.numpy())
+
+        if self.poses is not None:
+            pose = matrix_to_lie(torch.tensor(self.poses[index])).float()
+        else:
+            pose = None
+
+        if self.has_dyn_masks and self.mask_paths is not None:
+            # NOTE chen: in case we have multiple objects this mask could have range [0, 255]
+            # -> TODO: in this case create array of masks with index 0 static scene, and others individual dyn. masks?
+            # NOTE right now we only store a single static scene mask
+            mask = cv2.imread(self.mask_paths[index], cv2.IMREAD_GRAYSCALE)
+            mask = mask == self.background_value  # static mask
+            if self.dilate_masks:
+                mask = np.uint8(~mask)  # Invert to dynamic mask
+                kernel = np.ones((self.dilation_kernel_size, self.dilation_kernel_size), np.uint8)
+                mask = cv2.dilate(mask, kernel, iterations=1)
+                mask = ~mask.astype(bool)  # Return back to static mask
+            mask = np.uint8(mask)
+            mask = cv2.resize(mask, (W_out_with_edge, H_out_with_edge))
+            mask = torch.from_numpy(mask).bool()
+            if self.H_edge > 0:
+                mask = mask[edge:-edge, :]
+            if self.W_edge > 0:
+                mask = mask[:, edge:-edge]
+
+        if self.return_stat_masks:
+            if not self.has_dyn_masks:
+                raise Warning(
+                    "Warning. Dataset does not have any dynamic masks, please provide some if you want to return them!"
+                )
+            return index, color_data, depth_data, intrinsic, pose, mask
+        else:
+            return index, color_data, depth_data, intrinsic, pose
 
 
 class Azure(BaseDataset):
@@ -1078,18 +1364,14 @@ class EuRoC(BaseDataset):
         )
 
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
-        color_data = (
-            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
-        )  # bgr -> rgb, [0, 1]
+        color_data = torch.from_numpy(color_data).permute(2, 0, 1)[[2, 1, 0], :, :]  # bgr -> rgb
         color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
 
         if self.stereo:
             right_color_path = self.right_color_paths[index]
             right_color_data = self.load_right_image(right_color_path)
             right_color_data = cv2.resize(right_color_data, (W_out_with_edge, H_out_with_edge))
-            right_color_data = (
-                torch.from_numpy(right_color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
-            )  # bgr -> rgb, [0, 1]
+            right_color_data = torch.from_numpy(right_color_data).permute(2, 0, 1)[[2, 1, 0], :, :]  # bgr -> rgb
             right_color_data = right_color_data.unsqueeze(dim=0)  # [1, 3, h, w]
             color_data = torch.cat([color_data, right_color_data], dim=0)
 

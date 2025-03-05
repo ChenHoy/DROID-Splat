@@ -181,7 +181,7 @@ def evaluate_evo(
     with open(os.path.join(save_dir, "stats_{}.json".format(str(label))), "w", encoding="utf-8") as f:
         json.dump(ape_stats, f, indent=4)
 
-    plot_mode = PlotMode.xy
+    plot_mode = PlotMode.xz
     fig = plt.figure()
     ax = prepare_axis(fig, plot_mode)
     ax.set_title(f"ATE RMSE: {rmse}")
@@ -196,6 +196,7 @@ def evaluate_evo(
         plot_start_end_markers=True,
     )
     ax.legend()
+    plt.show()  # TODO delete after tests
     plt.savefig(os.path.join(plot_dir, "evo_2dplot_{}.png".format(str(label))), dpi=90)
 
     return ape_stats

@@ -1,14 +1,20 @@
 import gc
 from termcolor import colored
 from copy import deepcopy
-from typing import Optional
+from typing import Optional, List
+from omegaconf import DictConfig
 import ipdb
 
 import torch
-import numpy as np
 
+from .utils.loop_utils import TrajectorySegment, TrajectorySegmentManager
 from .factor_graph import FactorGraph
 import lietorch
+
+# TODO refactor this into a more elegant way
+
+# TODO always check if we have too many factors in the graph, in this case simply use a sliding window
+# TODO always use a sliding window in case the optimization gets too large, but still optimize over the whole map
 
 
 class BackendWrapper(torch.nn.Module):
@@ -16,7 +22,7 @@ class BackendWrapper(torch.nn.Module):
     Wrapper class for Backend optimization
     """
 
-    def __init__(self, cfg, slam):
+    def __init__(self, cfg: DictConfig, slam, empty_cache: bool = True):
         super(BackendWrapper, self).__init__()
 
         self.cfg = cfg
@@ -41,10 +47,12 @@ class BackendWrapper(torch.nn.Module):
 
         self.count = 0
         self.optimizer = Backend(self.net, self.video, self.cfg)
+        self.empty_cache = empty_cache
 
     def info(self, msg: str) -> None:
         print(colored("[Backend] " + msg, "blue"))
 
+    # TODO Dont cut off the window, but instead perform multiple BA updates in sliding window fashion
     def forward(
         self,
         local_graph: Optional[FactorGraph] = None,
@@ -63,6 +71,9 @@ class BackendWrapper(torch.nn.Module):
             t_start = 0
         t_end = cur_t
 
+        # FIXME how exactly is this called in GO-SLAM?!?!?!
+        # We did not get the right results here and do it differently, i.e. we use a different t_start and attach the frontend graph
+        # TODO But what does GO-SLAM do?!
         if self.enable_loop:
             _, n_edges = self.optimizer.loop_ba(
                 t_start, t_end, self.steps, self.iters, False, local_graph=local_graph, add_ii=add_ii, add_jj=add_jj
@@ -74,6 +85,10 @@ class BackendWrapper(torch.nn.Module):
             )
             msg = "Full BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
         self.info(msg)
+
+        if self.empty_cache:
+            torch.cuda.empty_cache()
+            gc.collect()
 
         self.last_t = cur_t
         self.count += 1
@@ -107,6 +122,9 @@ class Backend:
         self.loop_thresh = cfg.tracking.backend.get("loop_thresh", 30.0)
         self.loop_max_factor = cfg.tracking.backend.get("loop_max_factor_mult", 16)
 
+    def info(self, msg: str) -> None:
+        print(colored("[Backend] " + msg, "blue"))
+
     @torch.no_grad()
     def accumulate_pose_change(self, pose_prev, pose_cur, t0, t1) -> None:
         """Consider old video.pose_changes to accumulate over multiple backend updates -> dP_cur = dP * dP_prev
@@ -129,36 +147,7 @@ class Backend:
         self.video.scale_changes.clamp_(0.01, 100.0)  # Clamp scale changes to reasonable values
 
     @torch.no_grad()
-    def dense_ba(
-        self,
-        t_start: int = 0,
-        t_end: Optional[int] = None,
-        steps: int = 8,
-        iters: int = 2,
-        motion_only: bool = False,
-        add_ii: Optional[torch.Tensor] = None,
-        add_jj: Optional[torch.Tensor] = None,
-    ):
-        """Dense Bundle Adjustment over the whole map. Used for global optimization in the Backend."""
-
-        with self.video.get_lock():
-            if t_end is None:
-                t_end = self.video.counter.value
-        n = t_end - t_start
-
-        # NOTE chen: This is one of the most important numbers for loop closures!
-        # If you have a large map, then keep this number really high or else the drift could mess up the map
-        # NOTE chen: Using only the frontend keeps sometimes a better global scale than mixing frontend + backend if loop closures are missed!
-        # (16 for DROID-SLAM), ((int(self.video.stereo) + (self.radius + 2) * 2) for GO-SLAM)
-        max_factors = self.max_factor * n
-
-        graph = FactorGraph(self.video, self.update_op, self.device, "alt", max_factors, self.upsample, max_distance=n)
-        n_edges = graph.add_proximity_factors(
-            rad=self.radius, nms=self.nms, beta=self.beta, thresh=self.thresh, remove=True
-        )
-        if add_ii is not None and add_jj is not None:
-            graph.add_factors(add_ii, add_jj)
-
+    def perform_ba(self, graph: FactorGraph, t_start: int, t_end: int, steps: int, iters: int, motion_only: bool):
         # NOTE chen: computing the scale of a scene is not straight-forward, we simply take the mean disparity as proxy
         scales_before = self.video.disps[t_start:t_end].mean(dim=[1, 2]).clone()
         poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
@@ -171,10 +160,50 @@ class Backend:
         # Memoize scale change in self.video so other Processes can adapt their datastructures
         self.accumulate_scale_change(scales_before, scales_after, t0=t_start, t1=t_end)
 
-        graph.clear_edges()
+    @torch.no_grad()
+    def dense_ba(
+        self,
+        t_start: int = 0,
+        t_end: Optional[int] = None,
+        steps: int = 8,
+        iters: int = 2,
+        motion_only: bool = False,
+        add_ii: Optional[torch.Tensor] = None,
+        add_jj: Optional[torch.Tensor] = None,
+    ):
+        """Dense Bundle Adjustment over the whole map. Used for global optimization in the Backend.
+
+        NOTE self.max_factor of the Graph is useless in case the window gets too big, because the function only removes edges not within
+        a specific radius/nms neighborhood. The proximity factors will ALWAYS be added to the graph. So if you have a huge window, it will easily exceed the
+        number of factors.
+        NOTE chen: Since we dont use t0, t1 and max_t here together with t_start and t_end (like DROID-SLAM), not all factors will be used and
+        max_factors / n_edges is not as informative of GPU use as you would believe
+        """
+
+        with self.video.get_lock():
+            if t_end is None:
+                t_end = self.video.counter.value
+        n = t_end - t_start
+
+        # NOTE chen: This is one of the most important numbers for loop closures!
+        # If you have a large map, then keep this number really high or else the drift could mess up the map
+        # NOTE chen: Using only the frontend keeps sometimes a better global scale than mixing frontend + backend if loop closures are missed!
+        # (16 for DROID-SLAM), ((int(self.video.stereo) + (self.radius + 2) * 2) for GO-SLAM)
+        max_factors = self.max_factor * n
+
+        # FIXME simply del and rebuild the graph in a sliding window fashion in case we have too many factors
+        graph = FactorGraph(self.video, self.update_op, self.device, "alt", max_factors, self.upsample)
+        n_edges = graph.add_proximity_factors(rad=self.radius, nms=self.nms, beta=self.beta, thresh=self.thresh)
+        if add_ii is not None and add_jj is not None:
+            graph.add_factors(add_ii, add_jj)
+
+        # Filter out low confidence edges
+        graph.filter_edges()
+        self.perform_ba(graph, t_start, t_end, steps, iters, motion_only)
         self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
 
         # Free up memory again after optimization
+        graph.clear_edges()
         del graph
         torch.cuda.empty_cache()
         gc.collect()
@@ -195,8 +224,13 @@ class Backend:
         add_ii: Optional[torch.Tensor] = None,
         add_jj: Optional[torch.Tensor] = None,
     ):
-        """Perform an update on the graph with loop closure awareness. This uses a higher step size
+        """Perform an update on the graph with loop closure awareness according to GO-SLAM. This uses a higher step size
         for optimization than the dense bundle adjustment of the backend and rest of frontend.
+
+        NOTE This does not add explicit loop constraints, but only adds edges with very low optical flow / distance to the graph for a given segment
+        within the loop radius.
+        NOTE This somehow does not work well on our setup and I suspect that in theory this can only partially reduce drift because in a large graph
+        the influence of a small set of edges is not enough to correct the drift.
         """
         with self.video.get_lock():
             if t_end is None:
@@ -216,6 +250,7 @@ class Backend:
             max_factors=max_factors,
             upsample=self.upsample,
         )
+        # Add local graph if wanted, e.g. this could be the current frontend graph
         if local_graph is not None:
             copy_attr = ["ii", "jj", "age", "net", "target", "weight"]
             for key in copy_attr:
@@ -239,56 +274,238 @@ class Backend:
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)
 
-        poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
-        # fix the start point to avoid drift, be sure to use t_start_loop rather than t_start here.
-        graph.update_lowmem(
-            t0=t_start_loop + 1, t1=t_end, steps=steps, iters=iters, max_t=t_end, lm=lm, ep=ep, motion_only=motion_only
-        )
-        poses_after = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
-        # Memoize pose change in self.video so other Processes can adapt their datastructures
-        self.accumulate_pose_change(poses_before, poses_after, t0=t_start + 1, t1=t_end)
+        # Filter out low confidence edges
+        graph.filter_edges()
+        self.perform_ba(graph, t_start, t_end, steps, iters, motion_only)
+        self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
 
-        graph.clear_edges()
         # Free up memory again after optimization
+        graph.clear_edges()
         del graph
         torch.cuda.empty_cache()
         gc.collect()
 
-        self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
-
         return n, n_edges
 
-    # TODO implement sparse Pose Graph Optimization similar to HI-SLAM or other systems like ORB-SLAMv3
-    # we dont want to optimize all the local frames, only global links in a loop closure fashion
-    # This only optimizes the SIM3 poses, not disparity or intrinsics
-    # -> How would you transform a normal pose graph into segments with relative pose edges?!
-    # i) We need to cluster our graph into distinct segments, we could take e.g. the frontend windows as segments
-    # ii) We need to add relative pose edges between the segments, these should not be in SE3, but SIM3 in order to correct scale drift
-    # iii) We add a regularization term to our pose graph optimization, which minimizes the difference between the relative pose and the diff. between estimated poses
-    #       see https://alida.tistory.com/69#5.-relative-pose-error-pgo
-    # -> This would require to either implement a pure Python optimization or adapt the CUDA kernels
-    # -> We can use the reference implementation in: https://github.com/princeton-vl/lietorch/blob/master/examples/pgo/main.py, but we first need to define edge sets for this!
-    # TODO build up segment datastructure which allows to register a new frontend segment to previous segments
+    # TODO check if we still have space left in max_window after adding the segments,
+    # if yes, then simply add more adjacent frames around the segments until max_window is full
     @torch.no_grad()
-    def sparse_ba(
-        self, t_start: int = 0, t_end: Optional[int] = None, steps: int = 6, iter: int = 4, motion_only: bool = False
+    def sparse_segment_ba(
+        self,
+        index: int,
+        segments: TrajectorySegmentManager,
+        max_window: int = 500,
+        segment_padding: int = 5,
+        num_neighbors: int = 1,
+        steps=8,
+        iters=2,
+        motion_only=False,
+        lm=5e-5,
+        ep=5e-2,
+        local_graph: Optional[FactorGraph] = None,
+        add_ii: Optional[torch.Tensor] = None,
+        add_jj: Optional[torch.Tensor] = None,
     ):
-        """Pose graph optimization over multiple segments of the map. Used as sparse global optimization in the Backend.
+        """For large-scale outdoor scenes (e.g. KITTI), where we encounter loop closures, use a sparse segment optimization based on the
+        loop edges, i.e. we divide the map into distinct segments between loop closures and optimize the segments separately.
+        In case we have a very large window, we do multiple optimizations over multiple segments in the window.
 
-        This is much more memory efficient and allows to scale to long-term video with thousands of key frames.
+        This can be used quite flexibly, most of the time you want to optimize your current segment and its past neighbor.
+
+        TODO we could also cluster the map in different ways, i.e. spatial clustering, octrees, features clustering, etc.
         """
+        # Update counter of segments in case index lies in an open segment
+        with self.video.get_lock():
+            cur_t = self.video.counter.value
+        segments.advance_counter(cur_t)  # Limit the current open window to the current time frame
+        n_factors, print_segments = 0, []
 
-        if t_end is None:
-            t_end = self.video.counter.value
-        n = t_end - t_start
-        max_factors = (int(self.video.stereo) + (self.radius + 2) * 2) * n
+        # Get the current segment + neighboring segments, with max. num_neighbors segments to left and right (mostly left/past usually)
+        segs_in_window = segments.get_neighbor_segments(index, max_window=max_window, num_neighbors=num_neighbors)
 
         graph = FactorGraph(
             self.video,
             self.update_op,
             device=self.device,
             corr_impl="alt",
-            max_factors=max_factors,
+            max_factors=self.max_factor,
             upsample=self.upsample,
         )
-        raise NotImplementedError("Sparse BA not yet implemented")
+        # Add local graph if wanted, e.g. this could be the current frontend graph
+        if local_graph is not None:
+            copy_attr = ["ii", "jj", "age", "net", "target", "weight"]
+            for key in copy_attr:
+                val = getattr(local_graph, key)
+                if val is not None:
+                    setattr(graph, key, deepcopy(val))
+
+        # BA will be run over the whole video buffer between [t0, t1], but respect the sparsity of the graph
+        t_start, t_end = segs_in_window[0].start - segment_padding, segs_in_window[0].end + segment_padding
+        for seg in segs_in_window[1:]:
+            t_start = min(t_start, seg.start - segment_padding)
+            t_end = max(t_end, seg.end + segment_padding)
+        t_start, t_end = max(0, t_start), min(t_end, cur_t)
+        n = t_end - t_start
+
+        ### Build up sparse graph
+        # Build proximity within each segment
+        for i, seg in enumerate(segs_in_window):
+            t0, t1 = max(seg.start - segment_padding, 0), min(seg.end + segment_padding, cur_t)
+            # NOTE proximity factors are built by interlacing (t0, max_t) and (t1, max_t) for each segment
+            # NOTE vanilla BA in DROID-SLAM uses t0=t1=0 and max_t=cur_t, but then runs BA only over [t0, t1]
+            print_segments.append((t0, t1))
+            new_factors = graph.add_proximity_factors(
+                t0=t0, t1=t0, rad=self.radius, nms=self.nms, beta=self.beta, thresh=self.thresh, max_t=t1
+            )
+            n_factors += new_factors
+            if n_factors > self.max_factor:
+                self.info(
+                    f"Warning. Reached maximum number of factors in sparse segment optimization! Only adding {i}/{len(segs_in_window)} segments"
+                )
+                break
+
+        # Build edges between current segment and others
+        t00, t01 = segs_in_window[0].start - segment_padding, segs_in_window[0].end + segment_padding
+        for ii, seg in enumerate(segs_in_window[1:]):
+            t10, t11 = seg.start - segment_padding, seg.end + segment_padding
+            t10, t11 = max(t10, 0), min(t11, cur_t)
+            new_factors = graph.add_cross_window_edges(
+                t00, t01, t10, t11, beta=self.beta, thresh=self.thresh, max_factors=self.max_factor
+            )
+            n_factors += new_factors
+            if n_factors > self.max_factor:
+                self.info(
+                    f"Warning. Reached maximum number of factors in sparse segment optimization! Not adding edges between {index} and ({seg.start}, {seg.end})"
+                )
+                break
+
+        if add_ii is not None and add_jj is not None:
+            graph.add_factors(add_ii, add_jj)
+
+        # Filter out low confidence edges
+        graph.filter_edges()
+        self.perform_ba(graph, t_start, t_end, steps, iters, motion_only)
+        self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
+
+        # Free up memory again after optimization
+        graph.clear_edges()
+        del graph
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        self.info("Optimized segments together: {}".format(print_segments))
+
+        return n, n_factors
+
+    # TODO should we use the parent?
+    # TODO check if we still have space left in max_window after adding the segments,
+    # if yes, then simply add more adjacent frames around the segments until max_window is full
+    @torch.no_grad()
+    def sparse_loop_segment_ba(
+        self,
+        index: int,
+        loop_edges: List,
+        segments: TrajectorySegmentManager,
+        max_window: int = 500,
+        segment_padding: int = 5,
+        steps=8,
+        iters=2,
+        motion_only=False,
+        lm=5e-5,
+        ep=5e-2,
+        local_graph: Optional[FactorGraph] = None,
+    ):
+        """Given an index (usually the current time frame), we optimize the current segment and check if a loop edge lies adjacent to this segment. We then
+        use the edge to find spatially adjacent segments and optimize them together with the current segment."""
+        # Update counter of segments in case index lies in an open segment
+        with self.video.get_lock():
+            cur_t = self.video.counter.value
+        segments.advance_counter(cur_t)
+        n_factors, print_segments = 0, []
+
+        graph = FactorGraph(
+            self.video,
+            self.update_op,
+            device=self.device,
+            corr_impl="alt",
+            max_factors=self.max_factor,
+            upsample=self.upsample,
+        )
+        # Add local graph if wanted, e.g. this could be the current frontend graph
+        if local_graph is not None:
+            copy_attr = ["ii", "jj", "age", "net", "target", "weight"]
+            for key in copy_attr:
+                val = getattr(local_graph, key)
+                if val is not None:
+                    setattr(graph, key, deepcopy(val))
+
+        # Get the minimal leaf segment and if merged with others due to bigger loops, its parent segment
+        # NOTE usually you dont care about the parent
+        current_parent, current_min_segment = segments.find_segment_for_index(index)
+        t00, t01 = current_min_segment.start - segment_padding, current_min_segment.end + segment_padding
+        t00, t01 = max(t00, 0), min(t01, cur_t)
+        n = t01 - t00
+
+        # Build proximity within the current segment
+        new_factors = graph.add_proximity_factors(
+            t0=t00, t1=t00, rad=self.radius, nms=self.nms, beta=self.beta, thresh=self.thresh, max_t=t01
+        )
+        print_segments.append((t00, t01))
+        n_factors += new_factors
+        if n_factors > self.max_factor:
+            self.info(
+                f"Warning. Reached maximum number of factors in sparse segment optimization! Only optimizing over current segment ..."
+            )
+
+        # Check if a loop edge (i, j) lies within the current segment, to see if there is a connection
+        edge_in_seg = None
+        for edge in loop_edges:
+            if edge[0] >= t00 and edge[0] <= t01:
+                edge_in_seg = edge
+                break
+
+        # Add the connected previous segment to our optimization
+        if edge_in_seg is not None:
+            # Search with j to receiving node
+            # FIXME since edge_inseg[1] (j) is right at the end of the segment, its not clear which segment to use (the previous or after the loop closed?)
+            # TODO its not clear if we can add both, which one makes more sense?
+            # NOTE I think the next one makes sense, because the loop closure usually marks the beginning of overlapping parts
+            prev_parent, prev_min_segment = segments.find_segment_for_index(edge_in_seg[1] + 1)
+            t10, t11 = prev_min_segment.start - segment_padding, prev_min_segment.end + segment_padding
+            t10, t11 = max(t10, 0), min(t11, cur_t)
+            print_segments.append((t10, t11))
+
+            new_factors = graph.add_proximity_factors(
+                t0=t10, t1=t10, rad=self.radius, nms=self.nms, beta=self.beta, thresh=self.thresh, max_t=t11
+            )
+            n_factors += new_factors
+            if n_factors > self.max_factor:
+                self.info(
+                    f"Warning. Overshot maximum number of factors: {n_factors} > {self.max_factor}in sparse segment optimization!"
+                )
+            else:
+                # Add the edge between the two segments
+                new_factors = graph.add_cross_window_edges(
+                    t00, t01, t10, t11, beta=self.beta, thresh=self.thresh, max_factors=self.max_factor
+                )
+                n_factors += new_factors
+                if n_factors > self.max_factor:
+                    self.info(
+                        f"Warning. Overshot maximum number of factors: {n_factors} > {self.max_factor}in sparse segment optimization!"
+                    )
+
+        t_start, t_end = min(t00, t10), max(t01, t11)
+        # Filter out low confidence edges
+        graph.filter_edges()
+        self.perform_ba(graph, t_start, t_end, steps, iters, motion_only)
+        self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
+
+        # Free up memory again after optimization
+        graph.clear_edges()
+        del graph
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        self.info("Optimized segments together: {}".format(print_segments))
+
+        return n, n_factors

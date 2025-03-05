@@ -22,7 +22,7 @@ class FactorGraph:
         corr_impl: str = "volume",
         max_factors: float = -1.0,
         upsample: bool = False,
-        max_distance: int = 200,
+        max_distance: int = 200,  # TODO is this not actually a little high?
     ):
         self.video = video
         self.update_op = update_op
@@ -89,10 +89,10 @@ class FactorGraph:
             msg += f" {e[0]:05d}, {e[1]:05d}, {e[2]:.4f}\n"
         print(msg)
 
-    def filter_edges(self):
+    def filter_edges(self, conf_thresh=1e-3):
         """remove bad edges"""
         conf = torch.mean(self.weight, dim=[0, 2, 3, 4], keepdim=False)
-        mask = (torch.abs(self.ii - self.jj) > 2) & (conf < 1e-3)
+        mask = (torch.abs(self.ii - self.jj) > 2) & (conf < conf_thresh)
 
         self.ii_bad = torch.cat([self.ii_bad, self.ii[mask]], dim=0)
         self.jj_bad = torch.cat([self.jj_bad, self.jj[mask]], dim=0)
@@ -222,7 +222,7 @@ class FactorGraph:
         self.jj[self.jj >= ix] -= 1
         self.rm_factors(m, store=False)
 
-    def add_neighborhood_factors(self, t0, t1, r=3):
+    def add_neighborhood_factors(self, t0: int, t1: int, r: int = 3) -> None:
         """add edges between neighboring frames within radius r"""
         ii, jj = torch.meshgrid(
             torch.arange(t0, t1),
@@ -237,6 +237,31 @@ class FactorGraph:
         keep = ((ii - jj).abs() > c) & ((ii - jj).abs() <= r)
 
         self.add_factors(ii[keep], jj[keep])
+
+    # TODO test this
+    def add_neighbors(self, ii, jj, radius: int = 3) -> None:
+        """Given edges (i, j), add the neighboring edges within radius r.
+        Background: When we detect a loop edge (i, j), we have similar edges with low motion in (i-1, j-1), ...
+        """
+        with self.video.get_lock():
+            cur_t = self.video.counter.value
+
+        add_i, add_j = [], []
+        for i, j in zip(ii, jj):
+            for r in range(1, radius + 1):
+                if i - r >= 0 and j - r >= 0:
+                    if (i - r) not in add_i:
+                        add_i.append(i - r)
+                    if (j - r) not in add_j:
+                        add_j.append(j - r)
+
+                if i + r < cur_t and j + r < cur_t:
+                    if (i + r) not in add_i:
+                        add_i.append(i + r)
+                    if (j + r) not in add_j:
+                        add_j.append(j + r)
+
+        self.add_factors(torch.tensor(add_i, device=self.device), torch.tensor(add_j, device=self.device))
 
     def add_proximity_factors(
         self,
@@ -262,6 +287,7 @@ class FactorGraph:
         jj = jj.reshape(-1)
 
         d = self.video.distance(ii, jj, beta=beta)
+
         d[ii - rad < jj] = np.inf
         d[d > self.max_distance] = np.inf
         d = d.reshape(ilen, jlen)
@@ -270,9 +296,11 @@ class FactorGraph:
         ii1 = torch.cat([self.ii, self.ii_bad, self.ii_inac], dim=0)
         jj1 = torch.cat([self.jj, self.jj_bad, self.jj_inac], dim=0)
 
+        # NMS will suppress neighboring edges around existing old ones
         for i, j in zip(ii1.cpu().numpy(), jj1.cpu().numpy()):
             if (t0 <= i < t) and (t1 <= j < t):
                 di, dj = i - t0, j - t1
+
                 d[di, dj] = np.inf
                 d[
                     max(0, di - nms) : min(ilen, di + nms + 1),
@@ -280,7 +308,6 @@ class FactorGraph:
                 ] = np.inf
 
         es = []
-        # build edges within local window [i-rad-1, i]
         for i in range(t0, t):
             if self.video.stereo:
                 es.append((i, i))
@@ -411,8 +438,7 @@ class FactorGraph:
                             num_loop += 1
                             if si != sj:
                                 sub_es += [(si, sj)]
-                # TODO why do we need to check for this random number?!
-                # why is this threshold computed this way?
+                # NOTE if enough nearby frames meet the distance criteria, add the loop closure, i.e. this checks for repeating loop frames
                 if num_loop > int(((n_neighboring * 2 + 1) ** 2) * 0.5):
                     es += sub_es
             else:
@@ -432,6 +458,143 @@ class FactorGraph:
         self.add_factors(ii, jj, remove=remove)
         edge_num = len(self.ii)
         return edge_num
+
+    def add_cross_window_edges(
+        self,
+        t0: int,
+        t1: int,
+        t2: int,
+        t3: int,
+        beta: float = 0.25,
+        thresh: float = 16.0,
+        max_factors: int = 1000,
+        remove: bool = False,
+    ):
+        """
+        Compute edges between two separate windows similar to
+        """
+        # Create index ranges for both windows
+        ix1 = torch.arange(t0, t1)
+        ix2 = torch.arange(t2, t3)
+
+        # Collect all existing edges from the graph
+        existing_edges_set = set(
+            zip(
+                torch.cat([self.ii, self.ii_bad, self.jj_inac]).cpu().numpy(),
+                torch.cat([self.jj, self.jj_bad, self.jj_inac]).cpu().numpy(),
+            )
+        )
+
+        # Create meshgrid of cross-window indices
+        ii, jj = torch.meshgrid(ix1, ix2, indexing="ij")
+        ii = ii.reshape(-1)
+        jj = jj.reshape(-1)
+
+        # Compute distances between windows
+        d = self.video.distance(ii, jj, beta=beta)
+
+        # Sort and select cross-window edges
+        vals, ix = torch.sort(d.reshape(-1), descending=False)
+        ix = ix[vals <= thresh]
+        ix = ix.tolist()
+
+        # Generate cross-window edges
+        cross_window_edges = []
+        while len(ix) > 0 and len(cross_window_edges) < max_factors:
+            k = ix.pop(0)
+
+            if d[k] > thresh:
+                continue
+
+            i, j = ii[k], jj[k]
+
+            # Skip if edge already exists
+            if (i, j) in existing_edges_set or (j, i) in existing_edges_set:
+                continue
+
+            cross_window_edges.append((i, j))
+            cross_window_edges.append((j, i))
+
+        # Convert to tensors and add factors
+        if cross_window_edges:
+            ii, jj = torch.tensor(cross_window_edges, device=self.device).unbind(dim=-1)
+            self.add_factors(ii, jj, remove)
+
+        return len(self.ii)
+
+    def add_strided_cross_window_edges(
+        self, t0=0, t1=10, t2=20, t3=30, beta=0.25, thresh=16.0, cross_stride=5, remove=False, max_factors=1000
+    ):
+        """
+        Add proximity-based edges between specific endpoints of two windows
+
+        Args:
+        - t0, t1: Start and end of first window
+        - t2, t3: Start and end of second window
+        """
+        # Collect all existing edges from the graph
+        existing_edges_set = set(
+            zip(
+                torch.cat([self.ii, self.ii_bad, self.jj_inac]).cpu().numpy(),
+                torch.cat([self.jj, self.jj_bad, self.jj_inac]).cpu().numpy(),
+            )
+        )
+
+        # Key points to connect
+        key_points = [t0, t1, t2, t3]
+
+        # Stores all edges to be added
+        cross_window_edges = []
+
+        # Generate cross-window edges
+        for i in range(len(key_points)):
+            for j in range(i + 1, len(key_points)):
+                point1, point2 = key_points[i], key_points[j]
+
+                # Skip points from the same window
+                if (point1 in [t0, t1] and point2 in [t0, t1]) or (point1 in [t2, t3] and point2 in [t2, t3]):
+                    continue
+
+                # Compute distance with strided sampling
+                dist_mask = torch.arange(0, 1, 1 / cross_stride)
+
+                for alpha in dist_mask:
+                    # Interpolate between points
+                    i_interp = int(point1 * (1 - alpha) + point2 * alpha)
+                    j_interp = int(point2 * (1 - alpha) + point1 * alpha)
+
+                    # Skip if edge already exists
+                    if (i_interp, j_interp) in existing_edges_set or (j_interp, i_interp) in existing_edges_set:
+                        continue
+
+                    # Compute distance
+                    dist = self.video.distance(
+                        torch.tensor([i_interp], device=self.device),
+                        torch.tensor([j_interp], device=self.device),
+                        beta=beta,
+                    ).item()
+
+                    # Apply constraints
+                    if dist <= thresh and dist <= self.max_distance:
+                        cross_window_edges.append((i_interp, j_interp))
+                        cross_window_edges.append((j_interp, i_interp))
+
+                    # Stop if max factors reached
+                    if len(cross_window_edges) >= max_factors:
+                        break
+                # Early stopping
+                if len(cross_window_edges) >= max_factors:
+                    break
+            # Early stopping
+            if len(cross_window_edges) >= max_factors:
+                break
+
+        # Convert to tensors and add factors
+        if cross_window_edges:
+            ii, jj = torch.tensor(cross_window_edges, device=self.device).unbind(dim=-1)
+            self.add_factors(ii, jj, remove)
+
+        return len(self.ii)
 
     def remove_dynamic_pixels(self, weight: torch.Tensor, ii: torch.Tensor) -> torch.Tensor:
         """Simply use an external mask to remove dynamic pixels from the optimization"""
