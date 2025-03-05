@@ -1,4 +1,5 @@
 import copy
+from typing import Tuple
 
 import torch
 import torch.multiprocessing as mp
@@ -54,3 +55,9 @@ def get_all_queue(queue: mp.Queue):
             result.append(clone_obj(latest))
         del latest
     return result
+
+
+def get_ram_usage(device: str) -> Tuple[float, float]:
+    free_mem, total_mem = torch.cuda.mem_get_info(device=device)
+    used_mem = 1 - (free_mem / total_mem)
+    return used_mem, free_mem
