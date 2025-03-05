@@ -56,6 +56,8 @@ def backup_source_code(backup_directory):
         "*media*",
         "*.so",
         "*.pyc",
+        "*.npy",
+        "*.npz",
         "*.Python",
         "*.eggs*",
         "*.DS_Store*",
