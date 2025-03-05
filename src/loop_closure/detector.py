@@ -12,6 +12,7 @@ from torch.multiprocessing import Value
 
 import lietorch
 from ..depth_video import DepthVideo
+from ..utils import merge_candidates
 
 import faiss
 import faiss.contrib.torch_utils
@@ -25,34 +26,6 @@ def show_nan(tensor: torch.Tensor) -> None:
     plt.imshow(tensor.isnan().squeeze().cpu().numpy())
     plt.axis("off")
     plt.show()
-
-
-def merge_candidates(
-    all_candidates: List[Tuple[torch.Tensor, torch.Tensor]], scores: Optional[List[torch.Tensor]] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """We communicate the loop candidates as Tuples (ii, jj) into a multiprocessing Queue.
-    Since the loop detector runs extremely fast, the Queue will likely contain multiple sets when
-    its being pulled from. We therefore might have to merge multiple together.
-    """
-    if len(all_candidates) == 1:
-        if scores is not None:
-            return all_candidates[0][0], all_candidates[0][1], scores[0]
-        else:
-            return all_candidates[0][0], all_candidates[0][1]
-
-    all_ii, all_jj, all_scores = [], [], []
-    for i, candidates in enumerate(all_candidates):
-        all_ii.append(candidates[0])
-        all_jj.append(candidates[1])
-        if scores is not None:
-            all_scores.append(scores[i])
-
-    all_ii, all_jj = torch.cat(all_ii), torch.cat(all_jj)
-    if scores is not None:
-        scores = torch.cat(scores)
-        return all_ii, all_jj, scores
-    else:
-        return all_ii, all_jj
 
 
 class LoopDetector:
@@ -140,7 +113,7 @@ class LoopDetector:
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             with self.video.get_lock():
                 image = self.video.images[idx]
-            image = self.normalize(image.unsqueeze(0))
+            image = self.normalize(image.float().unsqueeze(0) / 255.0)
             features = self.net(image)
         return features.cpu()
 
