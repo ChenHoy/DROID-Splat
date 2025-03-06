@@ -81,7 +81,6 @@ class LongTermLoopClosure:
         self.num_repeat = self.cfg.get("num_repeat", 3)
         self.triplet_stride = self.cfg.get("triplet_stride", 1)
         self.max_2d_residual = self.cfg.get("max_2d_residual", 2.0)
-        self.delay = self.cfg.get("delay", 5)  # Delay to the frontend
 
         self.max_depth = self.cfg.get("max_depth", 20.0)
         self.device = device
@@ -127,20 +126,6 @@ class LongTermLoopClosure:
 
         return ii_uniq, jj_uniq, max_scores
 
-    def is_runnable(self, i, j, delay: int = 4):
-        """Check if we can actually run the loop closure on the given edge.
-        This looks if the video is already far enough to close the loop, i.e. we have valid poses for both triplets.
-        NOTE: we use a delay here, so that the poses and disps are already optimized at least once
-        """
-        assert len(self.found) > 0, "Only check on valid loop edges, none were inserted in self.found!"
-        with self.video.get_lock():
-            cur_t = self.video.counter.value
-
-        if i + self.triplet_stride + delay <= cur_t and j + self.triplet_stride + delay <= cur_t:
-            return True
-        else:
-            return False
-
     # NOTE DPVO uses a Queue and a multiprocessing.Pool to execut the Levenberg-Marquardt optimization
     # for now we dont have a bottleneck from the Loop Closure and it rarely occurs, so this does not save much amortized costs
     def __call__(
@@ -181,10 +166,6 @@ class LongTermLoopClosure:
         # Pop all edges in the buffer until we find a succesful closure
         if not self.check_consecutive:
             while len(self.found) > 0:
-                # Wait for the main system to be ahead here, so we can triangulate with neighboring frames
-                # if not self.is_runnable(*self.found[0], delay=self.delay):
-                #     break
-
                 i, j = self.found.pop(0)
                 closed_loop, new_loop = self.attempt_loop_closure(i, j, lc_in_progress)
                 # If closed loop = True, then this edge actually got inserted into the pose graph
@@ -203,10 +184,6 @@ class LongTermLoopClosure:
                 # cands = self._repetition_check(self.found[self.num_repeat - 1][0])
                 cands = self._repetition_check(self.found[-1][0])
                 if cands is not None:
-                    # Wait for main system to be ahead so we can triangulate with neighboring frames
-                    # if not self.is_runnable(*cands, delay=self.delay):
-                    #     break
-
                     self.info(f"Attempting loop closure ...")
                     closed_loop, new_loop = self.attempt_loop_closure(*cands, lc_in_progress)
                 else:
@@ -277,6 +254,62 @@ class LongTermLoopClosure:
             lc_in_progress -= 1  # Mark that we are done running a loop closure
 
         return was_successful, new_loop
+
+    def pose_graph_optimization(self, r, t, s, i: int, j: int):
+        """Run Pose Graph Optimization on the current window of poses"""
+        # Rel. Pose from 3D Registration of (i, j)
+        far_rel_pose = make_pypose_Sim3(r, t, s)[None]
+
+        # What if we add fruther poses between the delay?
+        with self.video.get_lock():
+            cur_t = self.video.counter.value
+
+        # prev rel. poses for loops
+        Gi = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_ii])
+        Gj = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_jj])
+        Gij = Gj * Gi.Inv()
+        prev_sim3 = SE3_to_Sim3(Gij).data[0].cpu()  # Current state of the pose graph in SIM(3)
+
+        loop_ii = torch.cat((self.loop_ii, torch.tensor([i])))
+        loop_jj = torch.cat((self.loop_jj, torch.tensor([j])))
+
+        loop_ii_plus, loop_jj_plus = torch.zeros(0, dtype=torch.long), torch.zeros(0, dtype=torch.long)
+        for t in range(1, cur_t - i):
+            loop_ii_plus = torch.cat((loop_ii_plus, torch.tensor([i + t])))
+            loop_jj_plus = torch.cat((loop_jj_plus, torch.tensor([j + t])))
+        loop_ii_total = torch.cat((self.loop_ii, torch.tensor([i]), loop_ii_plus))
+        loop_jj_total = torch.cat((self.loop_jj, torch.tensor([j]), loop_jj_plus))
+        # Get all rel. poses so far
+        loop_poses = prev_sim3
+        # Assume the same rel. constraint for i and all frames between i and cur_t
+        for i in range(0, cur_t - i):
+            loop_poses = torch.cat((loop_poses, far_rel_pose))
+        loop_poses = pp.Sim3(loop_poses)  # All rel. poses in SIM(3)
+
+        self.loop_ii, self.loop_jj = loop_ii, loop_jj  # Memoize all loop edges without the plus for next closure
+
+        # Get current state of the pose graph in window
+        pred_poses = pp.SE3(self.video.poses[:cur_t]).Inv().cpu()
+        final_est = run_DPVO_PGO(pred_poses.data, loop_poses.data, loop_ii_total, loop_jj_total, fix_opt_window=False)
+
+        ### Old Code with just a single far_rel_pose and all the old loop rel. poses
+        # prev rel. poses for loops
+        # Gi = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_ii])
+        # Gj = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_jj])
+        # Gij = Gj * Gi.Inv()
+        # prev_sim3 = SE3_to_Sim3(Gij).data[0].cpu()  # Current state of the pose graph in SIM(3)
+
+        # loop_poses = pp.Sim3(torch.cat((prev_sim3, far_rel_pose)))  # All rel. poses
+        # loop_ii = torch.cat((self.loop_ii, torch.tensor([i])))
+        # loop_jj = torch.cat((self.loop_jj, torch.tensor([j])))
+
+        # with self.video.get_lock():
+        #     cur_t = self.video.counter.value
+        # pred_poses = pp.SE3(self.video.poses[:cur_t]).Inv().cpu()  # All poses in the window
+        # self.loop_ii, self.loop_jj = loop_ii, loop_jj  # Memoize all loop edges
+        # final_est = run_DPVO_PGO(pred_poses.data, loop_poses.data, loop_ii, loop_jj, fix_opt_window=False)
+
+        return final_est
 
     def close_loop(self, i, j):
         """Close a loop closure by using 3D registration based on RANSAC and
@@ -368,58 +401,8 @@ class LongTermLoopClosure:
                 f"Edge ({i}, {j})! RANSAC inliers: {num_inliers} with {round(ratio_inliers*100, 2)}% >= {self.perc_inliers*100}%"
             )
 
-        ### Pose-Graph Optimization (PGO)
-        # newest rel. pose from regristration
-        far_rel_pose = make_pypose_Sim3(r, t, s)[None]
-
-        # What if we add fruther poses between the delay?
-        with self.video.get_lock():
-            cur_t = self.video.counter.value
-
-        # prev rel. poses for loops
-        Gi = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_ii])
-        Gj = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_jj])
-        Gij = Gj * Gi.Inv()
-        prev_sim3 = SE3_to_Sim3(Gij).data[0].cpu()  # Current state of the pose graph in SIM(3)
-
-        loop_ii = torch.cat((self.loop_ii, torch.tensor([i])))
-        loop_jj = torch.cat((self.loop_jj, torch.tensor([j])))
-
-        loop_ii_plus, loop_jj_plus = torch.zeros(0, dtype=torch.long), torch.zeros(0, dtype=torch.long)
-        for t in range(1, cur_t - i):
-            loop_ii_plus = torch.cat((loop_ii_plus, torch.tensor([i + t])))
-            loop_jj_plus = torch.cat((loop_jj_plus, torch.tensor([j + t])))
-        loop_ii_total = torch.cat((self.loop_ii, torch.tensor([i]), loop_ii_plus))
-        loop_jj_total = torch.cat((self.loop_jj, torch.tensor([j]), loop_jj_plus))
-        # Get all rel. poses so far
-        loop_poses = prev_sim3
-        # Assume the same rel. constraint for i and all frames between i and cur_t
-        for i in range(0, cur_t - i):
-            loop_poses = torch.cat((loop_poses, far_rel_pose))
-        loop_poses = pp.Sim3(loop_poses)  # All rel. poses in SIM(3)
-
-        self.loop_ii, self.loop_jj = loop_ii, loop_jj  # Memoize all loop edges without the plus for next closure
-
-        # Get current state of the pose graph in window
-        pred_poses = pp.SE3(self.video.poses[:cur_t]).Inv().cpu()
-        final_est = run_DPVO_PGO(pred_poses.data, loop_poses.data, loop_ii_total, loop_jj_total, fix_opt_window=False)
-
-        ### Old Code with just a single far_rel_pose and all the old loop rel. poses
-        # prev rel. poses for loops
-        # Gi = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_ii])
-        # Gj = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_jj])
-        # Gij = Gj * Gi.Inv()
-        # prev_sim3 = SE3_to_Sim3(Gij).data[0].cpu()  # Current state of the pose graph in SIM(3)
-
-        # loop_poses = pp.Sim3(torch.cat((prev_sim3, far_rel_pose)))  # All rel. poses
-        # loop_ii = torch.cat((self.loop_ii, torch.tensor([i])))
-        # loop_jj = torch.cat((self.loop_jj, torch.tensor([j])))
-
-        # with self.video.get_lock():
-        #     cur_t = self.video.counter.value
-        # pred_poses = pp.SE3(self.video.poses[:cur_t]).Inv().cpu()  # All poses in the window
-        # self.loop_ii, self.loop_jj = loop_ii, loop_jj  # Memoize all loop edges
-        # final_est = run_DPVO_PGO(pred_poses.data, loop_poses.data, loop_ii, loop_jj, fix_opt_window=False)
+        # Perform the Pose Graph Optimization for Loop Closure to adjust the whole loop segment
+        final_est = self.pose_graph_optimization(r, t, s, i, j)
 
         self.info(f"Success! Closed loop between {i} and {j}")
         return final_est
@@ -437,13 +420,6 @@ class LongTermLoopClosure:
         """
         safe_i, _ = final_est.shape
         res, s = final_est.tensor().to(self.video.device).split([7, 1], dim=1)
-
-        # FIXME use segments to only correct drift in the latest segment, i.e. we only go back to either the first frame or last loop_ii - 1
-        # Reason: We usually have a strong map for each closure, but later closures of just one segment can suddenly distort the whole map
-        # all_segments = self.segment_manager.get_minimal_segments()
-        # Only fix drift from latest segment onward, i.e. we already corrected drift in older parts of the map before
-        # opt_from = all_segments[-1].start
-
         cur_t = self.video.counter.value
 
         # TODO delete in case we dont need the deltas
@@ -471,7 +447,6 @@ class LongTermLoopClosure:
             # overwrite the newest disp with the mean of cur_t - 1
             # self.video.normalize()
             self.video.dirty[:cur_t] = True  # Update visualization
-        # TODO Does the drift come from discrepency between self.video.counter.value and cur_t?
 
     # TODO do we really need this?
     def _rescale_deltas(self, s):

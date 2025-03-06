@@ -229,6 +229,8 @@ def run_DPVO_PGO(
     # NOTE Returns [cur_t, 8] SIM(3) poses
     final_est = perform_updates(pred_poses, loop_poses, loop_ii, loop_jj, **kwargs)
 
+    # NOTE we make sure that loop_ii will be up to the most recent frame, as we usually close loops as soon as they appear
+    # NOTE chen: DPVO actually has a + 1 here, but they index and progress in a different way than us
     safe_i = loop_ii.max().item()  # Only optimized until the most recent loop closure
 
     aa = SE3_to_Sim3(pred_poses.cpu())
@@ -237,11 +239,9 @@ def run_DPVO_PGO(
     # Update all poses with this optimized relative pose, so the loop get closed
     final_est = rel_delta * final_est
     return final_est[:safe_i]
-    # FIXME return the whole thing not only until safe_i
-    # TODO return the rel_delta and manually update poses after safe_i with it
-    # return final_est
 
 
+# TODO add a segments argument, which would allow to disconnect segments from the optimization by setting their gradients to 0
 def perform_updates(
     input_poses: torch.Tensor,
     dSloop: torch.Tensor,
@@ -270,6 +270,10 @@ def perform_updates(
     residual_history = []
 
     for itr in range(iters):
+        # TODO we might not want to update any poses from previous segments that were succesfully optimized already
+        # Example: Given Segment 1, Segment 2 and Segment 3. We have 2 loop closures (the 2nd being the one now ...)
+        # Segment 1 and 2 were already optimized with the first loop closure. We only want to correct the poses from 2 to 3
+        ipdb.set_trace()
         resid, (J_Ginv_i, J_Ginv_j, iii, jjj) = residual(Ginv, input_poses, dSloop, ii_loop, jj_loop, jacobian=True)
         residual_history.append(resid.square().mean().item())
         # print("#Residual", residual_history[-1])
