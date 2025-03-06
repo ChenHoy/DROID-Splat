@@ -182,8 +182,8 @@ class LongTermLoopClosure:
         if not self.check_consecutive:
             while len(self.found) > 0:
                 # Wait for the main system to be ahead here, so we can triangulate with neighboring frames
-                if not self.is_runnable(*self.found[0], delay=self.delay):
-                    break
+                # if not self.is_runnable(*self.found[0], delay=self.delay):
+                #     break
 
                 i, j = self.found.pop(0)
                 closed_loop, new_loop = self.attempt_loop_closure(i, j, lc_in_progress)
@@ -204,8 +204,8 @@ class LongTermLoopClosure:
                 cands = self._repetition_check(self.found[-1][0])
                 if cands is not None:
                     # Wait for main system to be ahead so we can triangulate with neighboring frames
-                    if not self.is_runnable(*cands, delay=self.delay):
-                        break
+                    # if not self.is_runnable(*cands, delay=self.delay):
+                    #     break
 
                     self.info(f"Attempting loop closure ...")
                     closed_loop, new_loop = self.attempt_loop_closure(*cands, lc_in_progress)
@@ -218,7 +218,7 @@ class LongTermLoopClosure:
                     break
 
                 # Delete half the window of non-robust detections
-                # del self.found[: self.num_repeat // 2]
+                del self.found[: self.num_repeat // 2]
 
         torch.cuda.empty_cache()
         gc.collect()
@@ -245,7 +245,7 @@ class LongTermLoopClosure:
         latest = self.found[-self.num_repeat :]
         (b, _), (i, j), _ = latest
 
-        self.info(f"Searching self.found: {self.found}\n with idx:{idx}")
+        # self.info(f"Searching self.found: {self.found}\n with idx:{idx}")
 
         # NOTE we add the tolerance, because on some scenes we will have a long streak of detections,
         # where just a single frame idx is off e.g. (1, 2, 4)
@@ -329,18 +329,19 @@ class LongTermLoopClosure:
         assert i_pts.shape == j_pts.shape, (i_pts.shape, j_pts.shape)
         i_pts, j_pts = asnumpy(i_pts.double()), asnumpy(j_pts.double())
 
-        # TODO Delete after tests
         ### Visualize the matches
-        if os.path.join(self.log_folder, "loop_closures") is not None:
+        if self.log_folder is not None:
             os.makedirs(os.path.join(self.log_folder, "loop_closures"), exist_ok=True)
             os.makedirs(os.path.join(self.log_folder, "loop_closures", "triangulation"), exist_ok=True)
-        # Plot the 2D triangulated matches
-        fname2d_i = os.path.join(self.log_folder, "loop_closures", "triangulation", f"lc_tri_{i}.png")
-        self.plot_triplet_matches(save=True, fname=fname2d_i, **i_matches)
-        fname2d_j = os.path.join(self.log_folder, "loop_closures", "triangulation", f"lc_tri_{j}.png")
-        self.plot_triplet_matches(save=True, fname=fname2d_j, **j_matches)
-        fname3d = os.path.join(self.log_folder, "loop_closures", f"lc_3d_{i}_{j}.png")
-        self.plot_matches(i_feat, j_feat, self.video.images[i], self.video.images[j], out, save=True, fname=fname3d)
+            # Plot the 2D triangulated matches
+            fname2d_i = os.path.join(self.log_folder, "loop_closures", "triangulation", f"lc_tri_{i}.png")
+            self.plot_triplet_matches(save=True, fname=fname2d_i, **i_matches)
+            fname2d_j = os.path.join(self.log_folder, "loop_closures", "triangulation", f"lc_tri_{j}.png")
+            self.plot_triplet_matches(save=True, fname=fname2d_j, **j_matches)
+            fname3d = os.path.join(self.log_folder, "loop_closures", f"lc_3d_{i}_{j}.png")
+            self.plot_matches(
+                i_feat, j_feat, self.video.images[i], self.video.images[j], out, save=True, fname=fname3d
+            )
 
         # Early exit
         num_matched_points = min(i_pts.shape[0], j_pts.shape[0])
@@ -368,54 +369,109 @@ class LongTermLoopClosure:
             )
 
         ### Pose-Graph Optimization (PGO)
-        # FIXME use segments to only correct drift in the latest segment, i.e. we only go back to either the first frame or last loop_ii - 1
-        # Reason: We usually have a strong map for each closure, but later closures of just one segment can suddenly distort the whole map
-        all_segments = self.segment_manager.get_minimal_segments()
-        # Only fix drift from latest segment onward, i.e. we already corrected drift in older parts of the map before
-        opt_from = all_segments[-1][0]
-
         # newest rel. pose from regristration
         far_rel_pose = make_pypose_Sim3(r, t, s)[None]
+
+        # What if we add fruther poses between the delay?
+        with self.video.get_lock():
+            cur_t = self.video.counter.value
+
         # prev rel. poses for loops
         Gi = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_ii])
         Gj = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_jj])
         Gij = Gj * Gi.Inv()
         prev_sim3 = SE3_to_Sim3(Gij).data[0].cpu()  # Current state of the pose graph in SIM(3)
-        loop_poses = pp.Sim3(torch.cat((prev_sim3, far_rel_pose)))  # All rel. poses
+
         loop_ii = torch.cat((self.loop_ii, torch.tensor([i])))
         loop_jj = torch.cat((self.loop_jj, torch.tensor([j])))
 
-        with self.video.get_lock():
-            cur_t = self.video.counter.value
+        loop_ii_plus, loop_jj_plus = torch.zeros(0, dtype=torch.long), torch.zeros(0, dtype=torch.long)
+        for t in range(1, cur_t - i):
+            loop_ii_plus = torch.cat((loop_ii_plus, torch.tensor([i + t])))
+            loop_jj_plus = torch.cat((loop_jj_plus, torch.tensor([j + t])))
+        loop_ii_total = torch.cat((self.loop_ii, torch.tensor([i]), loop_ii_plus))
+        loop_jj_total = torch.cat((self.loop_jj, torch.tensor([j]), loop_jj_plus))
+        # Get all rel. poses so far
+        loop_poses = prev_sim3
+        # Assume the same rel. constraint for i and all frames between i and cur_t
+        for i in range(0, cur_t - i):
+            loop_poses = torch.cat((loop_poses, far_rel_pose))
+        loop_poses = pp.Sim3(loop_poses)  # All rel. poses in SIM(3)
 
-        pred_poses = pp.SE3(self.video.poses[:cur_t]).Inv().cpu()  # All poses in the window
-        self.loop_ii, self.loop_jj = loop_ii, loop_jj  # Memoize all loop edges
+        self.loop_ii, self.loop_jj = loop_ii, loop_jj  # Memoize all loop edges without the plus for next closure
 
-        final_est = run_DPVO_PGO(pred_poses.data, loop_poses.data, loop_ii, loop_jj, fix_opt_window=True)
+        # Get current state of the pose graph in window
+        pred_poses = pp.SE3(self.video.poses[:cur_t]).Inv().cpu()
+        final_est = run_DPVO_PGO(pred_poses.data, loop_poses.data, loop_ii_total, loop_jj_total, fix_opt_window=False)
+
+        ### Old Code with just a single far_rel_pose and all the old loop rel. poses
+        # prev rel. poses for loops
+        # Gi = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_ii])
+        # Gj = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_jj])
+        # Gij = Gj * Gi.Inv()
+        # prev_sim3 = SE3_to_Sim3(Gij).data[0].cpu()  # Current state of the pose graph in SIM(3)
+
+        # loop_poses = pp.Sim3(torch.cat((prev_sim3, far_rel_pose)))  # All rel. poses
+        # loop_ii = torch.cat((self.loop_ii, torch.tensor([i])))
+        # loop_jj = torch.cat((self.loop_jj, torch.tensor([j])))
+
+        # with self.video.get_lock():
+        #     cur_t = self.video.counter.value
+        # pred_poses = pp.SE3(self.video.poses[:cur_t]).Inv().cpu()  # All poses in the window
+        # self.loop_ii, self.loop_jj = loop_ii, loop_jj  # Memoize all loop edges
+        # final_est = run_DPVO_PGO(pred_poses.data, loop_poses.data, loop_ii, loop_jj, fix_opt_window=False)
+
         self.info(f"Success! Closed loop between {i} and {j}")
         return final_est
 
+    # NOTE the scale s will be mostly consistent for frames [0: loop_jj], i.e. the segment before the loop starts
+    # The scale change then is usually a sequence across the loop
     def update_buffer(self, final_est: torch.Tensor):
-        """Update the video buffer by overwriting with the new scales and poses"""
+        """Update the video buffer by overwriting with the new scales and poses.
+
+        NOTE: compared to DPVO we might have a delay of a couple frames (~3)
+        The PGO only optimizes until the last loop_ii, i.e. the frames between [loop_ii, cur_t]
+        would have a different scale than the rest of the map if we update naively like DPVO
+        -> We scale the rest of the frames with the last scale s[-1] from the PGO optimization and adjust the newest disparity
+        The newest disparity is always constant and is the mean of the previous frame, which is adjusted here
+        """
         safe_i, _ = final_est.shape
         res, s = final_est.tensor().to(self.video.device).split([7, 1], dim=1)
 
+        # FIXME use segments to only correct drift in the latest segment, i.e. we only go back to either the first frame or last loop_ii - 1
+        # Reason: We usually have a strong map for each closure, but later closures of just one segment can suddenly distort the whole map
+        # all_segments = self.segment_manager.get_minimal_segments()
+        # Only fix drift from latest segment onward, i.e. we already corrected drift in older parts of the map before
+        # opt_from = all_segments[-1].start
+
         cur_t = self.video.counter.value
+
+        # TODO delete in case we dont need the deltas
         s1 = torch.ones(cur_t, device=self.video.device)
         s1[:safe_i] = s.squeeze()
 
         with self.video.get_lock():
             self.video.poses[:safe_i] = SE3(res).inv().data
-
             self.video.disps[:safe_i] /= s.view(safe_i, 1, 1)
             self.video.disps_up[:safe_i] /= s.view(safe_i, 1, 1)
+
             # TODO do we really ever need the deltas?
             self._rescale_deltas(s1)
 
             # normalize so we always have identity pose for the first frame
             self.video.poses[:cur_t] = (SE3(self.video.poses[:cur_t]) * SE3(self.video.poses[[0]]).inv()).data
             self.info("Feeding back the result to the video buffer ... done!")
+
+            # Overwrite the newest disparity with the mean of the previous frame to get scale of last frame
+            self.video.disps[cur_t] = self.video.disps[cur_t - 1].median()
+            # Overwrite newest interpolated pose to adjust to previous ones
+            dP = SE3(self.video.poses[cur_t - 1]) * SE3(self.video.poses[cur_t - 2]).inv()  # Get relative pose
+            self.video.poses[cur_t] = (dP * SE3(self.video.poses[cur_t - 1])).vec()
+
+            # overwrite the newest disp with the mean of cur_t - 1
+            # self.video.normalize()
             self.video.dirty[:cur_t] = True  # Update visualization
+        # TODO Does the drift come from discrepency between self.video.counter.value and cur_t?
 
     # TODO do we really need this?
     def _rescale_deltas(self, s):

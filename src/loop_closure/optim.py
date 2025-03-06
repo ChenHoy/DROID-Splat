@@ -218,7 +218,7 @@ def run_DPVO_PGO(
 
     args:
     ---
-    pred_poses: torch.Tensor [cur_t, 7] SE(3) abs. poses
+    pred_poses: torch.Tensor [cur_t, 7] Su(3) abs. poses
     loop_poses: torch.Tensor [num_prev_loops + 1, 7] SIM(3) rel. poses
         These are all previous loop edge relative poses and the current loop edge, where we estimated the rel. pose with 3D registration
     loop_ii: torch.Tensor [num_prev_loops] int64
@@ -232,11 +232,14 @@ def run_DPVO_PGO(
     safe_i = loop_ii.max().item()  # Only optimized until the most recent loop closure
 
     aa = SE3_to_Sim3(pred_poses.cpu())
-    # Get the relative pose, but only for the newester loop node (i)
+    # Get the relative pose, but only for the newest loop node (i)
     rel_delta = aa[[safe_i]] * final_est[[safe_i]].Inv()
     # Update all poses with this optimized relative pose, so the loop get closed
     final_est = rel_delta * final_est
     return final_est[:safe_i]
+    # FIXME return the whole thing not only until safe_i
+    # TODO return the rel_delta and manually update poses after safe_i with it
+    # return final_est
 
 
 def perform_updates(
