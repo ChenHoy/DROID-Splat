@@ -342,16 +342,16 @@ class SLAM:
             # Dont insert new frames during loop closure and wait for a stable map
             # FIXME somehow we now drift a lot even though the loops are corrected in the right way
             # TODO this is super odd, just the cool down and waiting produces drift after the loop edge ?! :/
-            # with loop_kwargs["lock"]:
-            #     if loop_kwargs["in_progress"] > 0:
-            #         self.frontend.info("Waiting for Loop Closure to finish ...")
-            #         cool_off = True
-            #     else:
-            #         cool_off = False
-            #     loop_kwargs["cond"].wait_for(lambda: loop_kwargs["in_progress"] < 1)
-            #     if cool_off:
-            #         sleep(0.5)  # Wait for backend to refine map
-            #         self.frontend.info("Loop Closure finished!")
+            with loop_kwargs["lock"]:
+                if loop_kwargs["in_progress"] > 0:
+                    self.frontend.info("Waiting for Loop Closure to finish ...")
+                    cool_off = True
+                else:
+                    cool_off = False
+                loop_kwargs["cond"].wait_for(lambda: loop_kwargs["in_progress"] < 1)
+                if cool_off:
+                    sleep(0.3)  # Wait for backend to refine map
+                    self.frontend.info("Loop Closure finished!")
 
             self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
 
@@ -401,13 +401,27 @@ class SLAM:
 
         self.info("Loop Detection thread started!")
         self.all_trigered += 1
+        delay = 1  # Delay for the loop detector and closure to avoid bad disps around loop edges
 
         # Run as long as Frontend tracking gives use new frames
         while self.tracking_finished < 1 and run:
             candidates = self.loop_detector()
             if candidates is not None:
+
+                # Put delay into detector, so we dont close loop at video.counter.value, because the newest frame might have bad disps
+                with self.video.get_lock():
+                    cur_t = self.video.counter.value
+                if candidates[0].max().item() >= cur_t - delay:
+                    sleep(0.2)
+
                 self.loop_detector.info("Sending loop candidates ...")
                 loop_queue.put(candidates)
+
+        # Run one last time in case we lag behind the end of the video
+        candidates = self.loop_detector()
+        if candidates is not None:
+            self.loop_detector.info("Sending loop candidates ...")
+            loop_queue.put(candidates)
 
         # Since Loop Closure and Detector share a queue, we should shut down AFTER all elements have been extracted
         if self.cfg.run_loop_closure:
@@ -488,6 +502,9 @@ class SLAM:
                     with mp_kwargs["lock"]:
                         mp_kwargs["in_progress"] -= 1  # Loop Closure + Refinement is done
                         mp_kwargs["cond"].notify()  # Notify tracking to continue
+            else:
+                with mp_kwargs["lock"]:
+                    mp_kwargs["cond"].notify()  # Notify tracking to continue
 
         self.loop_closer.delay = 0  # Reset the delay for rest
 
@@ -629,23 +646,17 @@ class SLAM:
             # Use vanilla Graph for Bundle adjustment
             self.backend(add_ii=add_ii, add_jj=add_jj)
 
+    # TODO there should be a limit on how big the backend can be even at refinement
+    # Either implement sliding window here or in the backend wrapper
     def final_backend_op(
         self, t_start=0, t_end=-1, steps: int = 6, add_ii=None, add_jj=None, n_repeat: int = 4
     ) -> None:
         """Make two final refinements over the whole global map. This explicitly calls the optimizer function,
         so this does not have a backend window limit, i.e. this actually runs over the whole map."""
         for i in range(n_repeat):
-            if self.backend.enable_loop:
-                # Use GO-SLAM's loop aware bundle adjustment
-                _, n_edges = self.backend.optimizer.loop_ba(
-                    t_start=t_start, t_end=t_end, steps=steps, add_ii=add_ii, add_jj=add_jj
-                )
-                msg = "Loop BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
-                self.backend.info(msg)
-        else:
             # Use vanilla Graph for Bundle adjustment
             _, n_edges = self.backend.optimizer.dense_ba(
-                t_start=t_start, t_end=t_end, steps=steps, add_ii=add_ii, add_jj=add_jj, remove=False
+                t_start=t_start, t_end=t_end, steps=steps, add_ii=add_ii, add_jj=add_jj
             )
             msg = "Full BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
             self.backend.info(msg)
@@ -708,8 +719,6 @@ class SLAM:
             ### Actual Backend call
             is_free.wait()  # Check if Backend is not already run in case we performed a LoopClosure
             is_free.clear()
-            # NOTE Especially on driving outdoor scenes normalization turns out to be crucial
-            self.video.normalize()
             self.backend_op(add_ii=loop_ii, add_jj=loop_jj)
             is_free.set()
 
