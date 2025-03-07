@@ -16,5 +16,5 @@ cam:
   H_edge: 0
   W_edge: 0
   H_out: 192
-  W_out: 560
+  W_out: 608
   camera_model: "pinhole"
