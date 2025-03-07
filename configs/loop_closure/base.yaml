@@ -11,17 +11,16 @@ min_num_inliers: 10 # At least have 10 keypoints for matching
 
 ### 3D Matching 
 triplet_stride: 1 # Stride for triplet triangulation
-max_2d_residual: 3.0 # Max. 2D residual [px] for 2d keypoint matching and 3d backprojection
+max_2d_residual: 2.0 # Max. 2D residual [px] for 2d keypoint matching and 3d backprojection
 # RANSAC
-perc_inliers: 0.2 # Inlier percentage for RANSAC
+perc_inliers: 0.3 # Inlier percentage for RANSAC
 # RANSAC uses the 3D distance between points here
 # NOTE on KITTI, we often have good candidates with 15% points < 0.8m
-ransac_thresh: 1.0 # The threshold depends on the scene scale!
-ransac_iters: 500
-max_depth: 70.0 # Only use 3D keypoints < max_depth 
-nms: 10 # Suppression for redundant matches (The smaller, the closer loops are allowed to be)
+ransac_thresh: 0.5 # The threshold depends on the scene scale!
+ransac_iters: 600
+max_depth: 40.0 # Only use 3D keypoints < max_depth 
+nms: 15 # Suppression for redundant matches (The smaller, the closer loops are allowed to be)
 
 # Loop Closure edge management
 check_consecutive: True # Check for consecutive frames
-n_repeat: 2 # Loop closures are only valid, if they have k consecutive detections
-delay: 3 # Delay to frontend, i.e. we let this many keyframe in advanced be optimized before closing based on that state 
+n_repeat: 3 # Loop closures are only valid, if they have k consecutive detections

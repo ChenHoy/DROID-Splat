@@ -155,7 +155,10 @@ class Frontend:
         # Better: use constant speed assumption and extrapolate
         # (usually gives a boost of 1-4mm in ATE RMSE)
         dP = SE3(self.video.poses[self.t1 - 1]) * SE3(self.video.poses[self.t1 - 2]).inv()  # Get relative pose
-        self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
+        # self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
+        # Do update in log space
+        damping = 0.5  # motion damping
+        self.video.poses[self.t1] = (SE3.exp(damping * dP.log()) * SE3(self.video.poses[self.t1 - 1])).vec()
 
         self.video.disps[self.t1] = self.video.disps[self.t1 - 1].mean()
 

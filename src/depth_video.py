@@ -416,10 +416,14 @@ class DepthVideo:
         confidence_up = cvx_upsample(self.confidence[ix].unsqueeze(-1), mask)  # [b, h, w, 1]
         self.confidence_up[ix] = confidence_up.squeeze()  # [b, h, w]
 
-    def normalize(self):
+    def normalize(self, index: Optional[int] = None):
         """normalize depth and poses"""
         with self.get_lock():
-            cur_ix = self.counter.value
+            if index is None:
+                cur_ix = self.counter.value
+            else:
+                cur_ix = index
+
             s = self.disps[:cur_ix].mean()
             self.disps[:cur_ix] /= s
 

@@ -30,7 +30,11 @@ class BackendWrapper(torch.nn.Module):
         self.net = slam.net
         self.video = slam.video
 
-        self.enable_loop = cfg.tracking.backend.get("use_loop_closure", True)
+        self.enable_loop = cfg.tracking.backend.get("use_loop_closure", False)
+        self.sparse_opt = cfg.tracking.backend.get("use_sparse_opt", False)
+
+        assert not (self.enable_loop and self.sparse_opt), "Cannot use both loop closure and sparse optimization!"
+
         # When to start optimizing globally
         self.frontend_window = cfg.tracking.frontend.window
         # Dont consider the state of frontend, but start optimizing after warmup frames
@@ -58,6 +62,7 @@ class BackendWrapper(torch.nn.Module):
         local_graph: Optional[FactorGraph] = None,
         add_ii: Optional[torch.Tensor] = None,
         add_jj: Optional[torch.Tensor] = None,
+        segments: Optional[TrajectorySegmentManager] = None,
     ):
         """Run the backend optimization over the whole map."""
 
@@ -77,6 +82,20 @@ class BackendWrapper(torch.nn.Module):
         if self.enable_loop:
             _, n_edges = self.optimizer.loop_ba(
                 t_start, t_end, self.steps, self.iters, False, local_graph=local_graph, add_ii=add_ii, add_jj=add_jj
+            )
+            msg = "Loop BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
+        elif self.sparse_opt:
+            assert segments is not None, "Need to provide segments for sparse optimization!"
+            _, n_edges = self.optimizer.sparse_segment_ba(
+                cur_t - 1,
+                segments,
+                self.max_window,
+                steps=self.steps,
+                iters=self.iters,
+                motion_only=False,
+                local_graph=local_graph,
+                add_ii=add_ii,
+                add_jj=add_jj,
             )
             msg = "Loop BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
         else:

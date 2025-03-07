@@ -24,7 +24,7 @@ from lietorch import SE3
 import dpvo_backends
 import pypose as pp
 from .patch_projective import transform as patch_transform
-from ..utils import indices_to_tuple, TrajectorySegmentManager
+from ..utils import indices_to_tuple, TrajectorySegmentManager, TrajectorySegment
 from .patch_projective import iproj as patch_iproj
 from .optim import SE3_to_Sim3, make_pypose_Sim3, ransac_umeyama, run_DPVO_PGO
 
@@ -171,7 +171,6 @@ class LongTermLoopClosure:
                 # If closed loop = True, then this edge actually got inserted into the pose graph
                 if closed_loop:
                     performed_lc = True
-                    self.segment_manager.insert_edge(*new_loop)
                     break
 
         else:
@@ -190,7 +189,6 @@ class LongTermLoopClosure:
                     closed_loop = False
 
                 if closed_loop:
-                    self.segment_manager.insert_edge(*new_loop)
                     performed_lc = True
                     break
 
@@ -255,12 +253,13 @@ class LongTermLoopClosure:
 
         return was_successful, new_loop
 
-    def pose_graph_optimization(self, r, t, s, i: int, j: int):
+    def pose_graph_optimization(
+        self, r, t, s, i: int, j: int, segments_to_fix: Optional[List[TrajectorySegment]] = None
+    ):
         """Run Pose Graph Optimization on the current window of poses"""
         # Rel. Pose from 3D Registration of (i, j)
         far_rel_pose = make_pypose_Sim3(r, t, s)[None]
 
-        # What if we add fruther poses between the delay?
         with self.video.get_lock():
             cur_t = self.video.counter.value
 
@@ -290,7 +289,14 @@ class LongTermLoopClosure:
 
         # Get current state of the pose graph in window
         pred_poses = pp.SE3(self.video.poses[:cur_t]).Inv().cpu()
-        final_est = run_DPVO_PGO(pred_poses.data, loop_poses.data, loop_ii_total, loop_jj_total, fix_opt_window=False)
+        final_est = run_DPVO_PGO(
+            pred_poses.data,
+            loop_poses.data,
+            loop_ii_total,
+            loop_jj_total,
+            fix_opt_window=False,
+            segments_to_fix=segments_to_fix,
+        )
 
         ### Old Code with just a single far_rel_pose and all the old loop rel. poses
         # prev rel. poses for loops
@@ -311,7 +317,7 @@ class LongTermLoopClosure:
 
         return final_est
 
-    def close_loop(self, i, j):
+    def close_loop(self, i, j, fix_segments: bool = True):
         """Close a loop closure by using 3D registration based on RANSAC and
         Pose Graph Optimization (PGO) to refine the poses.
 
@@ -401,8 +407,31 @@ class LongTermLoopClosure:
                 f"Edge ({i}, {j})! RANSAC inliers: {num_inliers} with {round(ratio_inliers*100, 2)}% >= {self.perc_inliers*100}%"
             )
 
+        self.segment_manager.insert_edge(i, j)
+        # Insert edge into the segment manager, so we can form segments based on the loops
+        with self.video.get_lock():
+            self.segment_manager.advance_counter(self.video.counter.value)
+        # We will always have >= 2 segments, because we have at least one loop closure
+        # in any case, the latest segment will likely be after the current loop edge
+        # and the second last segment will be the loop one, which we want to correct
+        if fix_segments:
+            segments = self.segment_manager.get_minimal_segments()
+            segments_to_fix = []
+            # Fix all segments except the last two
+            for seg in segments[:-2]:
+                t0, t1 = seg.start, seg.end
+                # Subtract to get the right indices, since counting starts at 1 in PGO
+                # NOTE given a segment [t0, t1], we want to still optimize the loop edge directly at t1
+                if t1 == -1:
+                    t1 = self.video.counter.value - 2
+                else:
+                    t1 -= 2
+                segments_to_fix.append((t0, t1))
+        else:
+            segments_to_fix = None
+
         # Perform the Pose Graph Optimization for Loop Closure to adjust the whole loop segment
-        final_est = self.pose_graph_optimization(r, t, s, i, j)
+        final_est = self.pose_graph_optimization(r, t, s, i, j, segments_to_fix=segments_to_fix)
 
         self.info(f"Success! Closed loop between {i} and {j}")
         return final_est
