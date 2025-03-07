@@ -212,7 +212,7 @@ def residual(Ginv, input_poses, dSloop, ii, jj, jacobian=False):
 # NOTE DPVO actually runs this in separate Process Pool asynchronously
 # Since we rarely run a loop closure and we let the other threads wait for this to finish
 # or system stability, we just run this synchronously and eat the small amortized cost
-def run_DPVO_PGO(
+def run_PGO(
     pred_poses: torch.Tensor, loop_poses: torch.Tensor, loop_ii: torch.Tensor, loop_jj: torch.Tensor, **kwargs
 ):
     """Run a PoseGraph Optimiztion on a window of poses given certain loop edges.
@@ -228,7 +228,6 @@ def run_DPVO_PGO(
     loop_jj: torch.Tensor [num_prev_loops] int64
         The j indices of the loop edges
     """
-    # NOTE Returns [cur_t, 8] SIM(3) poses
     final_est = perform_updates(pred_poses, loop_poses, loop_ii, loop_jj, **kwargs)
 
     # NOTE we make sure that loop_ii will be up to the most recent frame, as we usually close loops as soon as they appear
@@ -240,7 +239,6 @@ def run_DPVO_PGO(
     rel_delta = aa[[safe_i]] * final_est[[safe_i]].Inv()
 
     # Update all poses with this optimized relative pose, so the loop get closed
-    # FIXME when we fix certain segments, do we really still have to apply the relative pose to them?
     final_est = rel_delta * final_est
     return final_est[:safe_i]
 
@@ -289,11 +287,10 @@ def perform_updates(
 
         resid, (J_Ginv_i, J_Ginv_j, iii, jjj) = residual(Ginv, input_poses, dSloop, ii_loop, jj_loop, jacobian=True)
 
-        # TODO we might not want to update any poses from previous segments that were succesfully optimized already
-        # Example: Given Segment 1, Segment 2 and Segment 3. We have 2 loop closures (the 2nd being the one now ...)
-        # Segment 1 and 2 were already optimized with the first loop closure. We only want to correct the poses from 2 to 3
-        # FIXME this might be a problem, because are not actually correcting the loop segment to fit the other segments
-        # but instead we optimize for a transform that makes all previous segments align with the current loop?
+        # We fix segments of previous loop closures to keep the map intact
+        # i.e. we only want to drift-correct the current and previous segment to align the new loop edge (i, j)
+        # Go over all given segments and create a fixed interval [t0, t1] out of them
+        # NOTE make sure the segments are connected, or else we will have a bigger super interval with poses outside the segments fixed
         if segments_to_fix is not None:
             t0, t1 = 999, 0
             for segment in segments_to_fix:
@@ -303,10 +300,8 @@ def perform_updates(
             t0, t1 = -1, -1
 
         residual_history.append(resid.square().mean().item())
-        # print("#Residual", residual_history[-1])
 
         (delta_pose,) = dpvo_backends.solve_system_fixed(J_Ginv_i, J_Ginv_j, iii, jjj, resid, ep, lmbda, freen, t0, t1)
-        # (delta_pose,) = dpvo_backends.solve_system(J_Ginv_i, J_Ginv_j, iii, jjj, resid, ep, lmbda, freen)
         assert Ginv.shape == delta_pose.shape
 
         Ginv_tmp = Ginv + delta_pose  # Update in exponential space
@@ -323,120 +318,3 @@ def perform_updates(
             break
 
     return pp.Exp(Ginv).Inv()  # Map back to group in c2w
-
-
-#### Functions for parsing to LLM
-# FIXME delete after we are done
-
-
-def concise_residual(Ginv, input_poses, dSloop, ii, jj, jacobian=False):
-    """
-    Given a set of poses and loop closures, compute the residual of the loop closure constraints.
-    """
-
-    def batch_jacobian(func, x):
-        def _func_sum(*x):
-            return func(*x).sum(dim=0)
-
-        _, b, c = torch.autograd.functional.jacobian(_func_sum, x, vectorize=True)
-        return rearrange(torch.stack((b, c)), "N O B I -> N B O I", N=2)
-
-    def _residual(C, Gi, Gj):
-        assert parse_shape(C, "N _") == parse_shape(Gi, "N _") == parse_shape(Gj, "N _")
-        out = C @ pp.Exp(Gi) @ pp.Exp(Gj).Inv()
-        return out.Log().tensor()
-
-    device = Ginv.device
-    assert parse_shape(input_poses, "_ d") == dict(d=7)
-    # NOTE Ginv = SE3_to_Sim3(input_poses).Inv().Log()
-    pred_inv_poses = SE3_to_Sim3(input_poses).Inv()
-
-    # free variables
-    n, _ = pred_inv_poses.shape
-    kk = torch.arange(1, n, device=device)
-    ll = kk - 1
-
-    # constants
-    Ti = pred_inv_poses[kk]
-    Tj = pred_inv_poses[ll]
-    dSij = Tj @ Ti.Inv()
-
-    constants = torch.cat((dSij, dSloop), dim=0)
-    iii = torch.cat((kk, ii))
-    jjj = torch.cat((ll, jj))
-    resid = _residual(constants, Ginv[iii], Ginv[jjj])
-
-    if not jacobian:
-        return resid
-
-    J_Ginv_i, J_Ginv_j = batch_jacobian(_residual, (constants, Ginv[iii], Ginv[jjj]))
-    return resid, (J_Ginv_i, J_Ginv_j, iii, jjj)
-
-
-def concise_pose_graph_optimization(
-    pose_graph,
-    new_loop_edge,
-    rel_pose_ij,
-    past_loop_ii,
-    past_loop_jj,
-    iters: int = 30,
-    ep: float = 0.0,
-    lmbda: float = 1e-6,
-):
-    """Perform Pose Graph Optimization on a pose graph, where a new loop was detected at (i, j) and we
-    had previous loop closures at (past_loop_ii, past_loop_jj). We also have the relative pose from 3D registration
-    of the new loop closure. This function will optimize the poses in the window [0, i] and close the loop at i.
-    """
-    ### Gather all necessary data
-    i, j = new_loop_edge
-    r, t, s = rel_pose_ij
-    # Rel. Pose from 3D Registration of (i, j)
-    far_rel_pose = make_pypose_Sim3(r, t, s)[None]
-
-    cur_t = pose_graph.counter.value
-
-    # prev rel. poses for loops
-    Gi = pp.SE3(pose_graph.poses.view(1, pose_graph.buffer_size, 7)[:, past_loop_ii])
-    Gj = pp.SE3(pose_graph.poses.view(1, pose_graph.buffer_size, 7)[:, past_loop_jj])
-    Gij = Gj * Gi.Inv()
-    prev_sim3 = SE3_to_Sim3(Gij).data[0].cpu()  # Current state of the pose graph in SIM(3)
-    loop_poses = pp.Sim3(torch.cat((prev_sim3, far_rel_pose))).data  # All rel. poses
-
-    loop_ii, loop_jj = torch.cat(past_loop_ii, torch.tensor([i])), torch.cat(past_loop_jj, torch.tensor([j]))
-
-    # Get current state of the pose graph in window
-    pred_poses = pp.SE3(pose_graph.poses[:cur_t]).Inv().cpu().data
-
-    dSloop = loop_poses
-    residual_history = []
-    freen = -1
-    Ginv = SE3_to_Sim3(pred_poses).Inv().Log()  # Use Lie algebra for updates
-    ### Actual Levenberg-Marquardt optimization
-    for itr in range(iters):
-
-        resid, (J_Ginv_i, J_Ginv_j, iii, jjj) = concise_residual(
-            Ginv, pred_poses, loop_poses, loop_ii, loop_jj, jacobian=True
-        )
-        residual_history.append(resid.square().mean().item())
-        (delta_pose,) = dpvo_backends.solve_system(J_Ginv_i, J_Ginv_j, iii, jjj, resid, ep, lmbda, freen)
-        assert Ginv.shape == delta_pose.shape
-
-        Ginv_tmp = Ginv + delta_pose  # Update in exponential space
-
-        new_resid = concise_residual(Ginv_tmp, pred_poses, dSloop, loop_ii, loop_jj)
-        # Old school Levenberg-Marquart update rule for step size
-        if new_resid.square().mean() < residual_history[-1]:
-            Ginv = Ginv_tmp
-            lmbda /= 2
-        else:
-            lmbda *= 2
-
-        # Convergence criteria
-        if (residual_history[-1] < 1e-5) and (itr >= 4) and ((residual_history[-5] / residual_history[-1]) < 1.5):
-            break
-
-    final_est = pp.Exp(Ginv).Inv()  # Map back to group in c2w
-    safe_i = loop_ii.max().item()  # Only optimized until the most recent loop closure
-    prev_poses = SE3_to_Sim3(pred_poses.cpu())
-    rel_delta = pred_poses[[safe_i]] * final_est[[safe_i]].Inv()  # Get rel. transform at latest loop i
-    result = (rel_delta * final_est)[:safe_i]

@@ -26,7 +26,7 @@ import pypose as pp
 from .patch_projective import transform as patch_transform
 from ..utils import indices_to_tuple, TrajectorySegmentManager, TrajectorySegment
 from .patch_projective import iproj as patch_iproj
-from .optim import SE3_to_Sim3, make_pypose_Sim3, ransac_umeyama, run_DPVO_PGO
+from .optim import SE3_to_Sim3, make_pypose_Sim3, ransac_umeyama, run_PGO
 
 
 def get_matching_keypoints(kp1, kp2, idxs):
@@ -37,7 +37,7 @@ def get_matching_keypoints(kp1, kp2, idxs):
 
 class LongTermLoopClosure:
     """
-    Classical Loop Closure as is done in DPVO-SLAM. We make some modifications to work with out system:
+    Classical Loop Closure as is done in DPVO-SLAM and classic SLAM frameworks. We make some modifications to work with out system:
     - We dont use a temporary directory to build up an ImageCache structure, i.e. we dont read/write images to disk.
     Instead, we use the same DepthVideo buffer to index images directly
     - We use the sparser patch style optimization kernel for keypoints only during 3D keypoint triangulation
@@ -54,6 +54,10 @@ class LongTermLoopClosure:
     - Simply queue up candidates from the detector and only then attempt closures
     - Memoize candidates and past loop closures in this class and simply filter the incoming candidates
     - Run the Loop Closure in its own separate Process with while loop, like all other modules
+    - Dont include all previous poses and loop constraint in our PGO, instead we use all loop edges to
+    divide our map into different segments. Previously optimized segments usually are very accurate and get potentially
+    distorted with every new loop closure (observable on KITTI). We therefore fix previous segments and only correct drift
+    on the most recent 2 segments.
     """
 
     def __init__(
@@ -289,7 +293,7 @@ class LongTermLoopClosure:
 
         # Get current state of the pose graph in window
         pred_poses = pp.SE3(self.video.poses[:cur_t]).Inv().cpu()
-        final_est = run_DPVO_PGO(
+        final_est = run_PGO(
             pred_poses.data,
             loop_poses.data,
             loop_ii_total,
@@ -297,23 +301,6 @@ class LongTermLoopClosure:
             fix_opt_window=False,
             segments_to_fix=segments_to_fix,
         )
-
-        ### Old Code with just a single far_rel_pose and all the old loop rel. poses
-        # prev rel. poses for loops
-        # Gi = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_ii])
-        # Gj = pp.SE3(self.video.poses.view(1, self.video.buffer_size, 7)[:, self.loop_jj])
-        # Gij = Gj * Gi.Inv()
-        # prev_sim3 = SE3_to_Sim3(Gij).data[0].cpu()  # Current state of the pose graph in SIM(3)
-
-        # loop_poses = pp.Sim3(torch.cat((prev_sim3, far_rel_pose)))  # All rel. poses
-        # loop_ii = torch.cat((self.loop_ii, torch.tensor([i])))
-        # loop_jj = torch.cat((self.loop_jj, torch.tensor([j])))
-
-        # with self.video.get_lock():
-        #     cur_t = self.video.counter.value
-        # pred_poses = pp.SE3(self.video.poses[:cur_t]).Inv().cpu()  # All poses in the window
-        # self.loop_ii, self.loop_jj = loop_ii, loop_jj  # Memoize all loop edges
-        # final_est = run_DPVO_PGO(pred_poses.data, loop_poses.data, loop_ii, loop_jj, fix_opt_window=False)
 
         return final_est
 
@@ -452,6 +439,7 @@ class LongTermLoopClosure:
         cur_t = self.video.counter.value
 
         # TODO delete in case we dont need the deltas
+        # FIXME Deltas I think are needed for rescaling the Gaussian Mapper
         s1 = torch.ones(cur_t, device=self.video.device)
         s1[:safe_i] = s.squeeze()
 
