@@ -5,7 +5,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_scatter import scatter_mean
 
+from .geom.graph_utils import graph_to_edge_list, keyframe_indicies
 from .modules import ConvGRU, CorrBlock, BasicEncoder, GradientClip
+import .geom.projective_ops as pops
 
 
 def cvx_upsample(data, mask):
@@ -145,3 +147,70 @@ class DroidNet(nn.Module):
         self.fnet = BasicEncoder(out_dim=128, norm_fn="instance")
         self.cnet = BasicEncoder(out_dim=256, norm_fn="none")
         self.update = UpdateModule()
+
+    def extract_features(self, images):
+        """run feeature extraction networks"""
+
+        # normalize images
+        images = images[:, :, [2, 1, 0]] / 255.0
+        mean = torch.as_tensor([0.485, 0.456, 0.406], device=images.device)
+        std = torch.as_tensor([0.229, 0.224, 0.225], device=images.device)
+        images = images.sub_(mean[:, None, None]).div_(std[:, None, None])
+
+        fmaps = self.fnet(images)
+        net = self.cnet(images)
+
+        net, inp = net.split([128, 128], dim=2)
+        net = torch.tanh(net)
+        inp = torch.relu(inp)
+        return fmaps, net, inp
+
+    def forward(self, Gs, images, disps, intrinsics, graph=None, num_steps=12, fixedp=2):
+        """Estimates SE3 or Sim3 between pair of frames"""
+
+        u = keyframe_indicies(graph)
+        ii, jj, kk = graph_to_edge_list(graph)
+
+        ii = ii.to(device=images.device, dtype=torch.long)
+        jj = jj.to(device=images.device, dtype=torch.long)
+
+        fmaps, net, inp = self.extract_features(images)
+        net, inp = net[:, ii], inp[:, ii]
+        corr_fn = CorrBlock(fmaps[:, ii], fmaps[:, jj], num_levels=4, radius=3)
+
+        ht, wd = images.shape[-2:]
+        coords0 = pops.coords_grid(ht // 8, wd // 8, device=images.device)
+
+        coords1, _ = pops.projective_transform(Gs, disps, intrinsics, ii, jj)
+        target = coords1.clone()
+
+        Gs_list, disp_list, residual_list = [], [], []
+        for step in range(num_steps):
+            Gs = Gs.detach()
+            disps = disps.detach()
+            coords1 = coords1.detach()
+            target = target.detach()
+
+            # extract motion features
+            corr = corr_fn(coords1)
+            resd = target - coords1
+            flow = coords1 - coords0
+
+            motion = torch.cat([flow, resd], dim=-1)
+            motion = motion.permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
+
+            net, delta, weight, eta, upmask = self.update(net, inp, corr, motion, ii, jj)
+
+            target = coords1 + delta
+
+            for i in range(2):
+                Gs, disps = BA(target, weight, eta, Gs, disps, intrinsics, ii, jj, fixedp=2)
+
+            coords1, valid_mask = pops.projective_transform(Gs, disps, intrinsics, ii, jj)
+            residual = target - coords1
+
+            Gs_list.append(Gs)
+            disp_list.append(upsample_disp(disps, upmask))
+            residual_list.append(valid_mask * residual)
+
+        return Gs_list, disp_list, residual_list
