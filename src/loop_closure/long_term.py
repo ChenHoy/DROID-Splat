@@ -204,32 +204,42 @@ class LongTermLoopClosure:
 
         return performed_lc, new_loop
 
-    # def _repetition_check(self, idx: int):
-    #     """Check that we've retrieved self.num_repeat consecutive frames as candidates"""
-    #     if len(self.found) < self.num_repeat:
-    #         return None
+    def _repetition_check_fifo(self, idx: int):
+        """Check that we've retrieved self.num_repeat consecutive frames as candidates FIFO style"""
+        if len(self.found) < self.num_repeat:
+            return None
 
-    #     latest = self.found[: self.num_repeat]
-    #     (i, j) = latest[self.num_repeat // 2]
-    #     (b, _) = latest[0]
-    #     if (1 + idx - b) == self.num_repeat:
-    #         return (i, max(j, 1))  # max(j,1) is to avoid centering the triplet on 0
-    #     else:
-    #         return None
+        latest = self.found[: self.num_repeat]
+        (i2, j2) = latest[self.num_repeat // 2]
+        (i1, j1) = latest[0]
+        if (1 + idx - i1) == self.num_repeat:
+            return (i2, max(j2, 1))  # max(j,1) is to avoid centering the triplet on 0
+        else:
+            return None
 
-    def _repetition_check(self, idx: int, tolerance: int = 2):
-        """Check that we've retrieved <num_repeat> consecutive frames"""
+    def _repetition_check(self, idx: int, tolerance: int = 2, return_idx: int = 2):
+        """Check that we've retrieved num_repeat consecutive (within a tolerance) frames LIFO style.
+
+        NOTE we experimented with which edge usually produces the best results and found
+        """
         if len(self.found) < self.num_repeat:
             return
-        latest = self.found[-self.num_repeat :]
-        (b, _), (i, j), _ = latest
 
-        # self.info(f"Searching self.found: {self.found}\n with idx:{idx}")
+        # FIXME this unpacking depends on self.num_repeat
+        latest = self.found[-self.num_repeat :]
+        (i1, j1), (i2, j2), (i3, j3) = latest
 
         # NOTE we add the tolerance, because on some scenes we will have a long streak of detections,
         # where just a single frame idx is off e.g. (1, 2, 4)
-        if abs((1 + idx - b) - self.num_repeat) <= tolerance:
-            return (i, max(j, 1))  # max(j,1) is to avoid centering the triplet on 0
+        if abs((1 + idx - i1) - self.num_repeat) <= tolerance:
+            if return_idx == 1:
+                return (i1, max(j1, 1))
+            elif return_idx == 2:
+                return (i2, max(j2, 1))
+            elif return_idx == 3:
+                return (i3, max(j3, 1))
+            else:
+                raise ValueError(f"Invalid return index {return_idx}")
 
     def attempt_loop_closure(
         self, i: int, j: int, lc_in_progress: torch.Tensor
@@ -280,11 +290,17 @@ class LongTermLoopClosure:
         for t in range(1, cur_t - i):
             loop_ii_plus = torch.cat((loop_ii_plus, torch.tensor([i + t])))
             loop_jj_plus = torch.cat((loop_jj_plus, torch.tensor([j + t])))
+        # Add i-1 and j-1 to the loop edges too, since we take the middle edge of a triplet in our detections
+        # loop_ii_total = torch.cat((self.loop_ii, torch.tensor([i - 1]), torch.tensor([i]), loop_ii_plus))
+        # loop_jj_total = torch.cat((self.loop_jj, torch.tensor([j - 1]), torch.tensor([j]), loop_jj_plus))
         loop_ii_total = torch.cat((self.loop_ii, torch.tensor([i]), loop_ii_plus))
         loop_jj_total = torch.cat((self.loop_jj, torch.tensor([j]), loop_jj_plus))
+
         # Get all rel. poses so far
         loop_poses = prev_sim3
         # Assume the same rel. constraint for i and all frames between i and cur_t
+        # Plus 1 frame before the loop edge (we detect triplets usually and i is in the middle)
+        # for i in range(0, cur_t - i + 1):
         for i in range(0, cur_t - i):
             loop_poses = torch.cat((loop_poses, far_rel_pose))
         loop_poses = pp.Sim3(loop_poses)  # All rel. poses in SIM(3)
@@ -304,7 +320,7 @@ class LongTermLoopClosure:
 
         return final_est
 
-    def close_loop(self, i, j, fix_segments: bool = True):
+    def close_loop(self, i, j, fix_segments: bool = True, free_segments: int = 2):
         """Close a loop closure by using 3D registration based on RANSAC and
         Pose Graph Optimization (PGO) to refine the poses.
 
@@ -315,6 +331,8 @@ class LongTermLoopClosure:
         We always optimize over all poses self.video.poses[:self.video.counter.value], i.e.
         this updates all poses and disparities in the window [0, self.video.counter.value] when a loop is closed.
         """
+        assert free_segments >= 2, "We always have at least 2 segments when optimizing"
+
         ### 3D Keypoint Estimation
         i_pts, i_feat, i_matches = self.estimate_3d_keypoints_dpvo(
             i, stride=self.triplet_stride, max_residual=self.max_2d_residual, return_matches=True
@@ -401,18 +419,19 @@ class LongTermLoopClosure:
         # We will always have >= 2 segments, because we have at least one loop closure
         # in any case, the latest segment will likely be after the current loop edge
         # and the second last segment will be the loop one, which we want to correct
-        if fix_segments:
-            segments = self.segment_manager.get_minimal_segments()
+        segments = self.segment_manager.get_minimal_segments()
+        # TODO how many segments should be free?
+        if fix_segments and len(segments) > free_segments:
             segments_to_fix = []
             # Fix all segments except the last two
-            for seg in segments[:-2]:
+            for seg in segments[:-free_segments]:
                 t0, t1 = seg.start, seg.end
                 # Subtract to get the right indices, since counting starts at 1 in PGO
                 # NOTE given a segment [t0, t1], we want to still optimize the loop edge directly at t1
                 if t1 == -1:
-                    t1 = self.video.counter.value - 2
+                    t1 = self.video.counter.value - 1
                 else:
-                    t1 -= 2
+                    t1 -= 1
                 segments_to_fix.append((t0, t1))
         else:
             segments_to_fix = None
@@ -445,8 +464,16 @@ class LongTermLoopClosure:
 
         with self.video.get_lock():
             self.video.poses[:safe_i] = SE3(res).inv().data
-            self.video.disps[:safe_i] /= s.view(safe_i, 1, 1)
-            self.video.disps_up[:safe_i] /= s.view(safe_i, 1, 1)
+
+            # HACK Dont ruin the absolute scale in rgbd mode
+            if not self.video.mode == "rgbd":
+                self.video.disps[:safe_i] /= s.view(safe_i, 1, 1)
+                self.video.disps_up[:safe_i] /= s.view(safe_i, 1, 1)
+            # NOTE I have the feeling, that we are already good even without scaling the prior
+            # In case we are in prgbd mode, where the prior is scaled as well -> This works actually better
+            # if self.video.optimize_scales:
+            #     self.video.disps_sens[:safe_i] /= s.view(safe_i, 1, 1)
+            #     self.video.disps_sens_up[:safe_i] /= s.view(safe_i, 1, 1)
 
             # TODO do we really ever need the deltas?
             self._rescale_deltas(s1)
@@ -461,7 +488,6 @@ class LongTermLoopClosure:
             dP = SE3(self.video.poses[cur_t - 1]) * SE3(self.video.poses[cur_t - 2]).inv()  # Get relative pose
             self.video.poses[cur_t] = (dP * SE3(self.video.poses[cur_t - 1])).vec()
 
-            # overwrite the newest disp with the mean of cur_t - 1
             # self.video.normalize()
             self.video.dirty[:cur_t] = True  # Update visualization
 

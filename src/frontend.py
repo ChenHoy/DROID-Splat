@@ -93,7 +93,7 @@ class Frontend:
         used_mem = 1 - (free_mem / total_mem)
         return used_mem, free_mem
 
-    def __update(self):
+    def __update(self, pose_interpolation: str = "linear"):
         """add edges, perform update"""
 
         self.t1 += 1
@@ -150,15 +150,19 @@ class Frontend:
                 gc.collect()
 
         ### Set pose & disp for next iteration
-        # Naive strategy for initializing next pose as previous pose in DROID-SLAM
-        # self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
-        # Better: use constant speed assumption and extrapolate
-        # (usually gives a boost of 1-4mm in ATE RMSE)
         dP = SE3(self.video.poses[self.t1 - 1]) * SE3(self.video.poses[self.t1 - 2]).inv()  # Get relative pose
-        # self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
-        # Do update in log space
-        damping = 0.5  # motion damping
-        self.video.poses[self.t1] = (SE3.exp(damping * dP.log()) * SE3(self.video.poses[self.t1 - 1])).vec()
+        # Vanilla linear interpolation (constant speed assumption and extrapolate)
+        # (usually gives a boost of 1-4mm in ATE RMSE)
+        if pose_interpolation == "linear":
+            self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
+        # Damped Linear from DPVO
+        elif pose_interpolation == "damped":
+            # NOTE this interpolation makes a big change on KITTI/03
+            damping = 0.5  # motion damping
+            self.video.poses[self.t1] = (SE3.exp(damping * dP.log()) * SE3(self.video.poses[self.t1 - 1])).vec()
+        # Naive strategy for initializing next pose as previous pose in DROID-SLAM
+        else:
+            self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
 
         self.video.disps[self.t1] = self.video.disps[self.t1 - 1].mean()
 

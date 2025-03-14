@@ -571,7 +571,8 @@ class KITTI(BaseDataset):
         super(KITTI, self).__init__(cfg, device)
 
         sequence = Path(self.input_folder).name
-        self.use_lidar = cfg.mode == "rgbd"
+        # TODO make this an extra flag
+        self.use_lidar = False  # cfg.mode == "rgbd"
 
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_2/*.png")))
         # We assume all images have the same size
@@ -593,7 +594,10 @@ class KITTI(BaseDataset):
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
         else:
-            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "velodyne", "*.bin")))
+            # TODO make it optional to use the actual point cloud bins
+            # self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "velodyne", "*.bin")))
+            # These are the projected depths as numpy arrays for faster inference
+            self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", "lidar", "*.npy")))
 
         if self.depth_paths is not None:
             if self.t_stop is not None:

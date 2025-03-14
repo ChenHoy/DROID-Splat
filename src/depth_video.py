@@ -89,6 +89,7 @@ class DepthVideo:
         # Scale and shift parameters for ambiguous monocular depth
         # Optimze the scales and shifts for Pseudo-RGBD mode
         self.optimize_scales = cfg.mode == "prgbd" and cfg.tracking.frontend.optimize_scales
+        self.mode = cfg.mode
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
 

@@ -132,6 +132,7 @@ class SLAM:
             )
         else:
             self.loop_closer = None
+            self.viz_loop_queue = None
 
         # Run the Gaussian Mapper to optimize the map into a set of 3D Gaussians
         if cfg.run_mapping_gui and cfg.run_mapping:
@@ -245,11 +246,6 @@ class SLAM:
         if self.cfg.run_mapping_gui:
             assert self.cfg.run_mapping, colored(
                 """If you want to use the Mapping GUI, you also need to run the Mapping process!""",
-                "red",
-            )
-        if self.cfg.run_loop_detection and not self.cfg.run_loop_closure:
-            assert self.cfg.run_backend, colored(
-                "If detecting loops without a classical loop closure, we add the edges into our global BA backend graph!",
                 "red",
             )
 
@@ -506,70 +502,71 @@ class SLAM:
                 with mp_kwargs["lock"]:
                     mp_kwargs["cond"].notify()  # Notify tracking to continue
 
-        self.loop_closer.delay = 0  # Reset the delay for rest
+        if run:
+            self.loop_closer.delay = 0  # Reset the delay for rest
 
-        ### Check for final loops after tracking finished in case the LoopDetector still found some edges
-        self.loop_closer.info("Checking for leftover loop candidates from queue ...")
-        if not mp_kwargs["queue_in"].empty():
-            loop_ii, loop_jj, scores = self.get_potential_loop_update(mp_kwargs["queue_in"])
-            # Perform PGO over map until loop_ii.max() if candidates exist
-            did_loop_closure, confirmed_loop_edge = self.loop_closer(
-                loop_ii, loop_jj, scores, mp_kwargs["in_progress"]
-            )
-            if confirmed_loop_edge is not None:
-                with self.video.get_lock():
-                    segment_manager.advance_counter(self.video.counter.value)
-                # Update map segments
-                segment_manager.insert_edge(*confirmed_loop_edge)
-                print(segment_manager)
+            ### Check for final loops after tracking finished in case the LoopDetector still found some edges
+            self.loop_closer.info("Checking for leftover loop candidates from queue ...")
+            if not mp_kwargs["queue_in"].empty():
+                loop_ii, loop_jj, scores = self.get_potential_loop_update(mp_kwargs["queue_in"])
+                # Perform PGO over map until loop_ii.max() if candidates exist
+                did_loop_closure, confirmed_loop_edge = self.loop_closer(
+                    loop_ii, loop_jj, scores, mp_kwargs["in_progress"]
+                )
+                if confirmed_loop_edge is not None:
+                    with self.video.get_lock():
+                        segment_manager.advance_counter(self.video.counter.value)
+                    # Update map segments
+                    segment_manager.insert_edge(*confirmed_loop_edge)
+                    print(segment_manager)
 
-            # We actually closed a loop
-            if did_loop_closure and self.backend is not None:
-                with self.video.get_lock():
-                    segment_manager.advance_counter(self.video.counter.value)
-                # Update map segments
-                segment_manager.insert_edge(*confirmed_loop_edge)
-                print(segment_manager)
-                all_loop_edges.append(confirmed_loop_edge)
-                # Send the loop candidates to the Backend thread, so we can consider them in our Optimization
-                mp_kwargs["queue_out"].put(confirmed_loop_edge)
+                # We actually closed a loop
+                if did_loop_closure and self.backend is not None:
+                    with self.video.get_lock():
+                        segment_manager.advance_counter(self.video.counter.value)
+                    # Update map segments
+                    segment_manager.insert_edge(*confirmed_loop_edge)
+                    print(segment_manager)
+                    all_loop_edges.append(confirmed_loop_edge)
+                    # Send the loop candidates to the Backend thread, so we can consider them in our Optimization
+                    mp_kwargs["queue_out"].put(confirmed_loop_edge)
 
-                all_ii, all_jj = tuple_to_tensor(all_loop_edges)
-                all_ii, all_jj = all_ii.to(self.device), all_jj.to(self.device)
-                # Refine inconsistencies in the map after a loop closure
-                refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=None, all_jj=None)
+                    all_ii, all_jj = tuple_to_tensor(all_loop_edges)
+                    all_ii, all_jj = all_ii.to(self.device), all_jj.to(self.device)
+                    # Refine inconsistencies in the map after a loop closure
+                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=None, all_jj=None)
 
-        ### Check for some rest edge candidates in the LoopCloser in case we have a delay
-        self.loop_closer.info("Checking for rest loop in self.found ...")
-        while len(self.loop_closer.found) > 0:
-            i, j = self.loop_closer.found.pop()
-            # Perform PGO over map until loop_ii.max() if candidates exist
-            did_loop_closure, confirmed_loop_edge = self.loop_closer.attempt_loop_closure(
-                i, j, mp_kwargs["in_progress"]
-            )
-            # Always optimize the map after a loop closure
-            if did_loop_closure and self.backend is not None:
-                with self.video.get_lock():
-                    segment_manager.advance_counter(self.video.counter.value)
-                # Update map segments
-                segment_manager.insert_edge(*confirmed_loop_edge)
-                print(segment_manager)
-                all_loop_edges.append((i, j))
-                # Send the loop candidates to the Backend thread, so we can consider them in our Optimization
-                mp_kwargs["queue_out"].put(confirmed_loop_edge)
+            ### Check for some rest edge candidates in the LoopCloser in case we have a delay
+            self.loop_closer.info("Checking for rest loop in self.found ...")
+            while len(self.loop_closer.found) > 0:
+                i, j = self.loop_closer.found.pop()
+                # Perform PGO over map until loop_ii.max() if candidates exist
+                did_loop_closure, confirmed_loop_edge = self.loop_closer.attempt_loop_closure(
+                    i, j, mp_kwargs["in_progress"]
+                )
+                # Always optimize the map after a loop closure
+                if did_loop_closure and self.backend is not None:
+                    with self.video.get_lock():
+                        segment_manager.advance_counter(self.video.counter.value)
+                    # Update map segments
+                    segment_manager.insert_edge(*confirmed_loop_edge)
+                    print(segment_manager)
+                    all_loop_edges.append((i, j))
+                    # Send the loop candidates to the Backend thread, so we can consider them in our Optimization
+                    mp_kwargs["queue_out"].put(confirmed_loop_edge)
 
-                all_ii, all_jj = tuple_to_tensor(all_loop_edges)
-                all_ii, all_jj = all_ii.to(self.device), all_jj.to(self.device)
-                # Refine inconsistencies in the map after a loop closure
-                refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=None, all_jj=None)
-                break
+                    all_ii, all_jj = tuple_to_tensor(all_loop_edges)
+                    all_ii, all_jj = all_ii.to(self.device), all_jj.to(self.device)
+                    # Refine inconsistencies in the map after a loop closure
+                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=None, all_jj=None)
+                    break
 
-        self.loop_closer.info(f"Closed {len(self.loop_closer.prev_loop_closes)} loops!")
+            self.loop_closer.info(f"Closed {len(self.loop_closer.prev_loop_closes)} loops!")
 
-        # Free memory
-        del self.loop_closer
-        torch.cuda.empty_cache()
-        gc.collect()
+            # Free memory
+            del self.loop_closer
+            torch.cuda.empty_cache()
+            gc.collect()
 
         self.loop_closure_finished += 1
         self.all_finished += 1
@@ -649,7 +646,7 @@ class SLAM:
     # TODO there should be a limit on how big the backend can be even at refinement
     # Either implement sliding window here or in the backend wrapper
     def final_backend_op(
-        self, t_start=0, t_end=-1, steps: int = 6, add_ii=None, add_jj=None, n_repeat: int = 4
+        self, t_start=0, t_end=-1, steps: int = 6, add_ii=None, add_jj=None, n_repeat: int = 2
     ) -> None:
         """Make two final refinements over the whole global map. This explicitly calls the optimizer function,
         so this does not have a backend window limit, i.e. this actually runs over the whole map."""
@@ -717,6 +714,7 @@ class SLAM:
             #     loop_ii, loop_jj = loop_ii.to(self.device), loop_jj.to(self.device)
 
             ### Actual Backend call
+            # NOTE chen: scenes which only translate forward benefit from only using the backend as refinement like the DROID-demo does
             is_free.wait()  # Check if Backend is not already run in case we performed a LoopClosure
             is_free.clear()
             self.backend_op(add_ii=loop_ii, add_jj=loop_jj)
@@ -1303,7 +1301,6 @@ class SLAM:
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
             # mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
-            mp.Process(target=self.show_loop, args=(0, self.viz_loop_queue, True), name="Loop Visualizer"),
             mp.Process(
                 target=self.tracking,
                 args=(

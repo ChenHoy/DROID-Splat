@@ -22,7 +22,7 @@ class BackendWrapper(torch.nn.Module):
     Wrapper class for Backend optimization
     """
 
-    def __init__(self, cfg: DictConfig, slam, empty_cache: bool = True):
+    def __init__(self, cfg: DictConfig, slam, empty_cache: bool = False):
         super(BackendWrapper, self).__init__()
 
         self.cfg = cfg
