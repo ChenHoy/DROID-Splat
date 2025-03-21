@@ -907,7 +907,7 @@ class GaussianModel:
 
         if kfIdx is not None:
             print(f"Computing scale based on {kfIdx}")
-            select = torch.zeros(points.shape[0], dtype=torch.bool)
+            select = torch.zeros(points.shape[0], dtype=torch.bool, device=self.device)
             for idx in kfIdx:
                 # Sanity check if this index actually exists
                 if not (self.unique_kfIDs == idx).any():
