@@ -7,13 +7,13 @@ threshold: 0.6 # Threshold for frame distance, i.e. candidate pairs should have 
 # NOTE a problem for long-term outdoor slam for us, is that we can only run on a lower resolution without memory
 detector_window: 5 # DPVO: 15
 score_threshold: 30.0 # DPVO: 40.0
-min_num_inliers: 10 # At least have 10 keypoints for matching
+min_num_inliers: 5 # At least have 10 keypoints for matching
 
 ### 3D Matching 
 triplet_stride: 1 # Stride for triplet triangulation
 max_2d_residual: 2.0 # Max. 2D residual [px] for 2d keypoint matching and 3d backprojection
 # RANSAC
-perc_inliers: 0.3 # Inlier percentage for RANSAC
+perc_inliers: 0.25 # Inlier percentage for RANSAC
 # RANSAC uses the 3D distance between points here
 # NOTE on KITTI, we often have good candidates with 15% points < 0.8m
 ransac_thresh: 0.4 # The threshold depends on the scene scale!

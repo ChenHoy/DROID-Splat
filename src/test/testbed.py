@@ -23,7 +23,7 @@ class SlamTestbed(SLAM):
 
         self.loop_detector = LoopDetector(self.cfg.loop_closure, self.video, device=self.device)
         # Initialize network during worker process, since torch.hub models need to, see https://github.com/Lightning-AI/pytorch-lightning/issues/17637
-        self.loop_detector.net = self.loop_detector.load_eigen()
+        # self.loop_detector.net = self.loop_detector.load_eigen()
         self.lc_closure = LongTermLoopClosure(self.cfg.loop_closure, self.video, device=self.device)
 
     def test_tracking(self, stream, backend_freq: int = 10) -> None:
@@ -48,9 +48,10 @@ class SlamTestbed(SLAM):
                     self.backend()
 
                 # Run Loop Closure
-                candidates = self.loop_detector.check()
+                candidates = self.loop_detector()
                 if candidates is not None:
                     self.lc_closure(*candidates)
+                    ipdb.set_trace()
 
     def test_rescale(
         self, stream, backend_freq: int = 2, render_freq: int = 5, test_until: Optional[int] = None
@@ -95,15 +96,17 @@ class SlamTestbed(SLAM):
         """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
 
         processes = []
-        # if self.cfg.run_visualization:
-        #     processes.append(
-        #         mp.Process(target=self.visualizing, args=(1, self.cfg.run_visualization), name="Visualizing"),
-        #     )
-        # self.num_running_thread[0] += len(processes)
-        # for p in processes:
-        #     p.start()
+        if self.cfg.run_visualization:
+            processes.append(
+                mp.Process(target=self.visualizing, args=(1, self.cfg.run_visualization), name="Visualizing"),
+            )
+        self.num_running_thread[0] += len(processes)
+        for p in processes:
+            p.start()
 
-        backend_freq = 5  # Run backend every 5 frontends
+        backend_freq = 10  # Run backend every 5 frontends
+
+        self.loop_detector.net = self.loop_detector.load_eigen()
 
         # Check new loop closure
         self.test_tracking(stream, backend_freq=backend_freq)

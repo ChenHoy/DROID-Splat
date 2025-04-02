@@ -118,31 +118,31 @@ if os.name == "nt":
 #     cmdclass={"build_ext": BuildExtension},
 # )
 
-# setup(
-#     name="dpvo_backends",
-#     ext_modules=[
-#         CUDAExtension(
-#             "dpvo_backends",
-#             include_dirs=[os.path.join(ROOT, "thirdparty/eigen")],
-#             sources=["src/lib/dpvo_ba.cpp", "src/lib/dpvo_ba_cuda.cu", "src/lib/block_e.cu"],
-#             extra_compile_args={
-#                 "cxx": ["-O3"],
-#                 "nvcc": [
-#                     "-O3",
-#                     "-gencode=arch=compute_60,code=sm_60",
-#                     "-gencode=arch=compute_61,code=sm_61",
-#                     "-gencode=arch=compute_70,code=sm_70",
-#                     "-gencode=arch=compute_75,code=sm_75",
-#                     "-gencode=arch=compute_80,code=sm_80",
-#                     "-gencode=arch=compute_86,code=sm_86",
-#                 ],
-#             },
-#         ),
-#     ],
-#     cmdclass={"build_ext": BuildExtension},
-# )
+setup(
+    name="dpvo_backends",
+    ext_modules=[
+        CUDAExtension(
+            "dpvo_backends",
+            include_dirs=[os.path.join(ROOT, "thirdparty/eigen")],
+            sources=["src/lib/dpvo_ba.cpp", "src/lib/dpvo_ba_cuda.cu", "src/lib/block_e.cu"],
+            extra_compile_args={
+                "cxx": ["-O3"],
+                "nvcc": [
+                    "-O3",
+                    "-gencode=arch=compute_60,code=sm_60",
+                    "-gencode=arch=compute_61,code=sm_61",
+                    "-gencode=arch=compute_70,code=sm_70",
+                    "-gencode=arch=compute_75,code=sm_75",
+                    "-gencode=arch=compute_80,code=sm_80",
+                    "-gencode=arch=compute_86,code=sm_86",
+                ],
+            },
+        ),
+    ],
+    cmdclass={"build_ext": BuildExtension},
+)
 
-# We tried to build the lidar_utils similarly, but this somehow does not work with the OpenCV package :/ 
-# OpenCV can be better used with cmake, simply run: 
+# We tried to build the lidar_utils similarly, but this somehow does not work with the OpenCV package :/
+# OpenCV can be better used with cmake, simply run:
 # ```cmake -DCMAKE_INSTALL_PREFIX=../src ../src/lib/kitti_depthmap```
 # from the /build directoy and follow with ```make``` and ```make install```

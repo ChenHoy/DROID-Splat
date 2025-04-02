@@ -941,6 +941,18 @@ class SLAM:
                 cv2.imshow("Uncertainty", uncertainty_img[..., ::-1])
                 cv2.waitKey(1)
 
+            if self.plot_motion_probability:
+                # Plot the uncertainty on top
+                with self.video.get_lock():
+                    t_cur = max(0, self.video.counter.value - 1)
+                    if self.cfg.tracking.get("upsample", False):
+                        mot_prob_cur = self.video.motion_prob_up[t_cur].clone()
+                    else:
+                        mot_prob_cur = self.video.motion_prob[t_cur].clone()
+                mot_prob_img = uncertainty2rgb(uncertanity_cur)[0]
+                cv2.imshow("Uncertainty", mot_prob_img[..., ::-1])
+                cv2.waitKey(1)
+
         self.all_finished += 1
         self.info("Show stream Done!")
 
@@ -1300,7 +1312,7 @@ class SLAM:
 
         processes = [
             # NOTE The OpenCV thread always needs to be 0 to work somehow
-            # mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
+            mp.Process(target=self.show_stream, args=(0, self.input_pipe, self.cfg.show_stream), name="OpenCV Stream"),
             mp.Process(
                 target=self.tracking,
                 args=(
