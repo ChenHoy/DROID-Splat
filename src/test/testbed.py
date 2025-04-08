@@ -288,12 +288,6 @@ class SlamTestbed(SLAM):
                 timestamp, image, depth, intrinsic, gt_pose = frame
                 static_mask = None
 
-            # Control when to start and when to stop the SLAM system from outside
-            if timestamp < self.t_start:
-                continue
-            if self.t_stop is not None and timestamp > self.t_stop:
-                break
-
             # Frontend insert new frames
             self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
 
@@ -355,12 +349,6 @@ class SlamTestbed(SLAM):
                 timestamp, image, depth, intrinsic, gt_pose = frame
                 static_mask = None
 
-            # Control when to start and when to stop the SLAM system from outside
-            if timestamp < self.t_start:
-                continue
-            if self.t_stop is not None and timestamp > self.t_stop:
-                break
-
             # Frontend insert new frames
             self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
 
@@ -369,6 +357,7 @@ class SlamTestbed(SLAM):
                 and self.frontend.optimizer.t1 % backend_freq == 0
                 and self.cfg.run_backend
             ):
+                ipdb.set_trace()
                 self.backend()
 
     def test_rendering(self, stream, render_freq: int = 10, test_until: Optional[int] = None) -> None:
@@ -385,11 +374,6 @@ class SlamTestbed(SLAM):
                 timestamp, image, depth, intrinsic, gt_pose = frame
                 static_mask = None
 
-            # Control when to start and when to stop the SLAM system from outside
-            if timestamp < self.t_start:
-                continue
-            if self.t_stop is not None and timestamp > self.t_stop:
-                break
             # HACK If config was not set, overwrite here
             if test_until is not None and timestamp > test_until:
                 break
@@ -491,12 +475,6 @@ class SlamTestbed(SLAM):
                 timestamp, image, depth, intrinsic, gt_pose = frame
                 static_mask = None
 
-            # Control when to start and when to stop the SLAM system from outside
-            if timestamp < self.t_start:
-                continue
-            if self.t_stop is not None and timestamp > self.t_stop:
-                break
-
             # Frontend insert new frames
             self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
 
@@ -519,22 +497,22 @@ class SlamTestbed(SLAM):
     def run(self, stream):
         """Test the system by running any function dependent on the input stream directly so we can set breakpoints for inspection."""
 
-        processes = []
-        if self.cfg.run_visualization:
-            processes.append(
-                mp.Process(target=self.visualizing, args=(1, self.cfg.run_visualization), name="Visualizing"),
-            )
-        if self.use_mapping_gui:
-            processes.append(mp.Process(target=self.mapping_gui, args=(2, self.use_mapping_gui), name="Mapping GUI"))
-        self.num_running_thread[0] += len(processes)
-        for p in processes:
-            p.start()
+        # processes = []
+        # if self.cfg.run_visualization:
+        #     processes.append(
+        #         mp.Process(target=self.visualizing, args=(1, self.cfg.run_visualization), name="Visualizing"),
+        #     )
+        # if self.use_mapping_gui:
+        #     processes.append(mp.Process(target=self.mapping_gui, args=(2, self.use_mapping_gui), name="Mapping GUI"))
+        # self.num_running_thread[0] += len(processes)
+        # for p in processes:
+        #     p.start()
 
         render_freq = 10  # Run rendering every k frontends
         backend_freq = 5  # Run backend every 5 frontends
 
         # self.run_tracking_then_check(stream, backend_freq=backend_freq, check_at=200) # Check how much Rendering can overfit, when initialized correctly
-        # self.test_tracking(stream, backend_freq=backend_freq) # Check how tracking works sequentially
+        self.test_tracking(stream, backend_freq=backend_freq)  # Check how tracking works sequentially
         # self.test_rendering(stream, render_freq=render_freq) # Check how Renderer works on top of Tracker sequentially
         # Check the add_nonkeyframe functionality and trajectory interpolation in GaussianMapper
         # self.test_nonkeyframes_mapping(stream)
@@ -545,5 +523,5 @@ class SlamTestbed(SLAM):
         # )
 
         # Check if reanchoring/rescaling works correctly
-        self.test_rescale(stream, backend_freq=backend_freq, render_freq=render_freq)
-        self.terminate(processes, stream, None)
+        # self.test_rescale(stream, backend_freq=backend_freq, render_freq=render_freq)
+        # self.terminate(processes, stream, None)

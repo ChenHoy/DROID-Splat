@@ -543,8 +543,6 @@ class DepthVideo:
             else:
                 disps_sens = self.disps_sens
 
-            # FIXME chen: This sometimes causes a malloc error :/
-            # I am not sure how to fix this
             droid_backends.ba(
                 self.poses,
                 self.disps,
@@ -564,6 +562,7 @@ class DepthVideo:
                 motion_only,
                 self.opt_intr,
             )
+
             self.disps.clamp_(min=1e-3)  # Always make sure that Disparities are non-negative!!!
             # Reassigning intrinsics after optimization
             if self.opt_intr:
