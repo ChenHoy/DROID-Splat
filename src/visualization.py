@@ -440,7 +440,7 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
 
     # Thresholds for visualization filtering
     droid_visualization.mv_filter_thresh = 0.005
-    droid_visualization.mv_filter_count = 4
+    droid_visualization.mv_filter_count = 3
     droid_visualization.uncertainty_filter_on = True
     droid_visualization.unc_filter_thresh = 0.2
 
@@ -517,7 +517,7 @@ def droid_visualization(video, save_root: str = "results", device="cuda:0"):
         disps = torch.index_select(video.disps, 0, dirty_index)
         # convert poses to 4x4 matrix
         Ps = SE3(poses).inv().matrix().cpu().numpy()
-        images = torch.index_select(video.images, 0, dirty_index)
+        images = torch.index_select(video.images, 0, dirty_index) / 255.0
         images = images.cpu()[:, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].permute(0, 2, 3, 1)
         points = droid_backends.iproj(SE3(poses).inv().data, disps, video.intrinsics[0]).cpu()
 
