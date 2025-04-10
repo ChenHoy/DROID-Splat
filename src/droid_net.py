@@ -7,7 +7,7 @@ from torch_scatter import scatter_mean
 
 from .geom.graph_utils import graph_to_edge_list, keyframe_indicies
 from .modules import ConvGRU, CorrBlock, BasicEncoder, GradientClip
-import .geom.projective_ops as pops
+from .geom import projective_ops as pops
 
 
 def cvx_upsample(data, mask):

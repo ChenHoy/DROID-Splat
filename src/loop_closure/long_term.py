@@ -16,7 +16,6 @@ import torch.nn.functional as F
 from torch_scatter import scatter_max
 from einops import asnumpy, rearrange, repeat
 
-import droid_backends
 from ..geom import projective_ops as pops
 from ..depth_video import DepthVideo
 from lietorch import SE3
@@ -334,15 +333,13 @@ class LongTermLoopClosure:
         assert free_segments >= 2, "We always have at least 2 segments when optimizing"
 
         ### 3D Keypoint Estimation
+        # NOTE Pure DROID-SLAM kernel achieves slighly different results here
         i_pts, i_feat, i_matches = self.estimate_3d_keypoints_dpvo(
             i, stride=self.triplet_stride, max_residual=self.max_2d_residual, return_matches=True
         )
         j_pts, j_feat, j_matches = self.estimate_3d_keypoints_dpvo(
             j, stride=self.triplet_stride, max_residual=self.max_2d_residual, return_matches=True
         )
-        # NOTE Pure DROID-SLAM kernel achieves slighly different results here
-        # i_pts_droid, i_feat_droid = self.estimate_3d_keypoints_droid(i, stride=self.triplet_stride, max_residual=self.max_2d_residual)
-        # j_pts_droid, j_feat_droid = self.estimate_3d_keypoints_droid(j, stride=self.triplet_stride, max_residual=self.max_2d_residual)
 
         _, _, iz = i_pts.mT
         _, _, jz = j_pts.mT
@@ -630,141 +627,6 @@ class LongTermLoopClosure:
                 "descriptors": desc1[:, mask],
                 "image_size": image_size,
             }
-
-    # TODO delete if proven to be unnecessary
-    def estimate_3d_keypoints_droid(self, i: int, stride: int = 1, max_residual: float = 5.0) -> Dict:
-        """Use matched 2D keypoints for triangulation and return 3D points"""
-
-        # Load triplet [i-1, i, i+1]
-        # Safeguard against invalid indices
-        lower = max(i - stride, 0)
-        upper = min(i + stride, self.video.counter.value)
-        selected = [lower, i, upper]
-        images = self.video.images[selected].float() / 255.0
-
-        fl = self.detect_keypoints(images)
-
-        # Form trajectories from 2D keypoint matches
-        trajectories = torch.full((2048, 3), -1, device=self.device, dtype=torch.long)
-        trajectories[:, 1] = torch.arange(2048)
-
-        out1 = self.matcher({"image0": fl[0], "image1": fl[1]})
-        # idxs = out["matches"][0]
-        i0, i1 = out1["matches"][0].mT
-        trajectories[i1, 0] = i0
-
-        out2 = self.matcher({"image0": fl[2], "image1": fl[1]})
-        i2, i1 = out2["matches"][0].mT
-        trajectories[i1, 2] = i2
-
-        ### What do the keypoints look like?
-        # self.plot_keypoints(fl, images)
-        # self.plot_triplet_matches(fl, images, out1, out2)
-
-        trajectories = trajectories[torch.randperm(2048)]
-        trajectories = trajectories[trajectories.min(dim=1).values >= 0]
-
-        a, b, c = trajectories.mT
-        n, _ = trajectories.shape
-        kps0, kps1 = fl[0]["keypoints"][:, a], fl[1]["keypoints"][:, b]
-        kps2 = fl[2]["keypoints"][:, c]
-
-        desc1 = fl[1]["descriptors"][:, b]
-        image_size = fl[1]["image_size"]
-
-        ii = torch.ones(2, device=self.device, dtype=torch.long)
-        jj = torch.zeros(2, device=self.device, dtype=torch.long)
-        kk = torch.arange(n).cuda().repeat(2)  # Index collapsed 2*N keypoints
-        jj[1] = 2
-
-        # Make copies for mini graph
-        # Use neg. disparity for each non-keypoint so we will get the right invalid mask back
-        disps = -1.0 * torch.ones_like(self.video.disps_up[selected].clone())
-        # use mean or median for initialization as we do in frontend)
-        init_disp = self.video.disps_up[i].median()
-        disps[1, kps1[0, :, 1].int(), kps1[0, :, 0].int()] = init_disp
-
-        # DVPO: [B, 2*N, 2] for keypoints
-        # target = rearrange(torch.stack((kps0, kps2)), "ot 1 n uv -> 1 (ot n) uv", uv=2, n=n, ot=2)
-        bs, _, h, w = images.shape
-        weight = torch.zeros(bs - 1, 2, h, w, device=self.device)
-        target = torch.zeros(bs - 1, h, w, 2, device=self.device)
-        # -> Use kps1 to index the disps and then filter out the non-keypoints
-        target[0, kps1[0, :, 1].int(), kps1[0, :, 0].int()] = kps0
-        target[1, kps1[0, :, 1].int(), kps1[0, :, 0].int()] = kps2
-        # TODO which points need to be weighted?
-        # We have relative outgoing trajectories from kps1 to kps2 and kps0
-        # Therefore, we simply need to weight kps1 for each edge ij and ji?
-        weight[..., kps1[0, :, 1].int(), kps1[0, :, 0].int()] = 1.0
-        target = target.permute(0, 3, 1, 2)  # Ours: [B, 2, H, W]
-        poses = self.video.poses[selected].clone()
-        intrinsics = self.video.intrinsics[selected].clone() * self.video.scale_factor
-
-        coords, valid_mask = pops.general_projective_transform(
-            poses=SE3(poses)[None, ...],  # [1, B]
-            depths=disps[None, ...],  # [B, H, W]
-            intrinsics=intrinsics[None, ...],  # [B, 4]
-            ii=ii,  # N
-            jj=jj,  # N
-            model_id=self.video.model_id,
-            jacobian=False,
-            return_depth=False,
-        )
-        residual = (coords[0] - target.permute(0, 2, 3, 1)).norm(dim=-1).squeeze(0)
-        residual[~valid_mask[0].squeeze().bool()] = 0
-
-        # Structure-only BA
-        lmbda = 1e-3 * torch.ones_like(disps, device=self.device)  # [B, H, W]
-        disps[disps < 0] = 0  # set invalid disparities to 0
-
-        droid_backends.ba(
-            poses,  # [N, 7]
-            disps,  # [N, H, W]
-            intrinsics[0],  # [4]
-            torch.zeros_like(disps, device=disps.device),  # disps_sens
-            target.contiguous(),  # [B, 2, H, W]
-            weight,  # [B, 2, H, W]
-            lmbda,  # [B2, H, W]
-            ii,
-            jj,
-            0,  # t-1
-            3,  # t1
-            6,  # iters
-            self.video.model_id,
-            1e-4,  # lm
-            0.1,  # ep
-            False,  # motion_only
-            True,  # Structure Only
-            False,  # opt_intr
-        )
-
-        coords, _ = pops.general_projective_transform(
-            poses=SE3(poses)[None, ...],  # [1, B]
-            depths=disps[None, ...],  # [B, H, W]
-            intrinsics=intrinsics[None, ...],  # [B, 4]
-            ii=ii,  # N
-            jj=jj,  # N
-            model_id=self.video.model_id,
-            jacobian=False,
-            return_depth=False,
-        )
-        residual = (coords[0] - target.permute(0, 2, 3, 1)).norm(dim=-1).squeeze(0)
-        residual[~valid_mask[0].squeeze().bool()] = 0
-        # Collapse [B, 2, H, W] -> [B*N]
-        kp_res = residual[:, kps1[0, :, 1].int(), kps1[0, :, 0].int()].flatten()
-        # Since we only want to keep N correspondences,
-        # only use pixels where both outgoing trajectories are below 2px
-        mask = scatter_max(kp_res, kk)[0] < max_residual
-
-        # Get 3D keypoint pointcloud
-        points = droid_backends.iproj(SE3(poses).inv().data, disps, intrinsics[0])
-        kp_3d = points[1, kps1[0, :, 1].int(), kps1[0, :, 0].int()]
-
-        return kp_3d[mask], {
-            "keypoints": kps1[:, mask],
-            "descriptors": desc1[:, mask],
-            "image_size": image_size,
-        }
 
     def plot_keypoints(self, fl: List, images: torch.Tensor) -> None:
         """Plot all 2D keypoints for the image triplet and visualize"""

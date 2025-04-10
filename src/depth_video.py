@@ -577,7 +577,6 @@ class DepthVideo:
                 lm,
                 ep,
                 motion_only,
-                False,  # Structure Only BA
                 self.opt_intr,
             )
             self.disps.clamp_(min=1e-3)  # Always make sure that Disparities are non-negative!!!
@@ -692,7 +691,6 @@ class DepthVideo:
                     lm,
                     ep,
                     True,
-                    False,
                     False,
                 )
                 # Joint Depth and Scale Adjustment(JDSA)

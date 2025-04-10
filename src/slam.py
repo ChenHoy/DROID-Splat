@@ -305,6 +305,36 @@ class SLAM:
     ) -> None:
         """Main driver of framework by looping over the input stream"""
 
+        def wait_for_loop_closure(loop_kwargs: Dict) -> None:
+            # Dont insert new frames during loop closure and wait for a stable map
+            with loop_kwargs["lock"]:
+                if loop_kwargs["in_progress"] > 0:
+                    self.frontend.info("Waiting for Loop Closure to finish ...")
+                    cool_off = True
+                else:
+                    cool_off = False
+                loop_kwargs["cond"].wait_for(lambda: loop_kwargs["in_progress"] < 1)
+                if cool_off:
+                    sleep(0.3)  # Wait for backend to refine map
+                    self.frontend.info("Loop Closure finished!")
+
+        def maybe_notify_other_threads_to_start() -> None:
+            # Check to notify other threads that they can start
+            if self.cfg.run_backend and self.frontend.count > self.backend_warmup and self.backend_can_start < 1:
+                self.backend.info("Backend warmup over!")
+                self.backend_can_start += 1
+            if self.cfg.run_mapping and self.frontend.count > self.mapping_warmup and self.mapping_can_start < 1:
+                self.gaussian_mapper.info("Mapper warmup over!")
+                self.mapping_can_start += 1
+
+        def synchronize_with_other_threads(sema_backend: mp.Semaphore, sema_mapping: mp.Semaphore) -> None:
+            # Synchronize other parallel threads
+            if self.frontend.count % self.backend_freq == 0 and self.frontend.count > (self.backend_warmup + 1):
+                sema_backend.release()  # Signal Backend that it can run again
+            if self.frontend.count % self.mapping_freq == 0 and self.frontend.count > (self.mapping_warmup + 1):
+                sema_mapping.release()  # Signal Mapping that it can run again
+                self.mapping_done -= 1  # Reset flag for next Mapping call
+
         self.info("Frontend tracking thread started!")
         self.all_trigered += 1
 
@@ -335,38 +365,13 @@ class SLAM:
                 with lock_mapping:
                     cond_mapping.wait_for(lambda: self.mapping_done > 0)
 
-            # Dont insert new frames during loop closure and wait for a stable map
-            # FIXME somehow we now drift a lot even though the loops are corrected in the right way
-            # TODO this is super odd, just the cool down and waiting produces drift after the loop edge ?! :/
-            with loop_kwargs["lock"]:
-                if loop_kwargs["in_progress"] > 0:
-                    self.frontend.info("Waiting for Loop Closure to finish ...")
-                    cool_off = True
-                else:
-                    cool_off = False
-                loop_kwargs["cond"].wait_for(lambda: loop_kwargs["in_progress"] < 1)
-                if cool_off:
-                    sleep(0.3)  # Wait for backend to refine map
-                    self.frontend.info("Loop Closure finished!")
-
+            wait_for_loop_closure(loop_kwargs)  # Dont insert new frames before this got closed
             self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
 
-            # Check to notify other threads that they can start
-            if self.cfg.run_backend and self.frontend.count > self.backend_warmup and self.backend_can_start < 1:
-                self.backend.info("Backend warmup over!")
-                self.backend_can_start += 1
-            if self.cfg.run_mapping and self.frontend.count > self.mapping_warmup and self.mapping_can_start < 1:
-                self.gaussian_mapper.info("Mapper warmup over!")
-                self.mapping_can_start += 1
-
+            maybe_notify_other_threads_to_start()
             # Check if we actually inserted a new frame and optimized
             if self.frontend.count > old_count:
-                # Synchronize other parallel threads
-                if self.frontend.count % self.backend_freq == 0 and self.frontend.count > (self.backend_warmup + 1):
-                    sema_backend.release()  # Signal Backend that it can run again
-                if self.frontend.count % self.mapping_freq == 0 and self.frontend.count > (self.mapping_warmup + 1):
-                    sema_mapping.release()  # Signal Mapping that it can run again
-                    self.mapping_done -= 1  # Reset flag for next Mapping call
+                synchronize_with_other_threads(sema_backend, sema_mapping)
 
         self.info(f"Ran Frontend {self.frontend.count} times!")
         del self.frontend
@@ -413,22 +418,23 @@ class SLAM:
                 self.loop_detector.info("Sending loop candidates ...")
                 loop_queue.put(candidates)
 
-        # Run one last time in case we lag behind the end of the video
-        candidates = self.loop_detector()
-        if candidates is not None:
-            self.loop_detector.info("Sending loop candidates ...")
-            loop_queue.put(candidates)
+        if run:
+            # Run one last time in case we lag behind the end of the video
+            candidates = self.loop_detector()
+            if candidates is not None:
+                self.loop_detector.info("Sending loop candidates ...")
+                loop_queue.put(candidates)
 
-        # Since Loop Closure and Detector share a queue, we should shut down AFTER all elements have been extracted
-        if self.cfg.run_loop_closure:
-            self.loop_detector.info("Waiting for Loop Closure to finish ...")
-            while self.loop_closure_finished < 1:
-                pass
+            # Since Loop Closure and Detector share a queue, we should shut down AFTER all elements have been extracted
+            if self.cfg.run_loop_closure:
+                self.loop_detector.info("Waiting for Loop Closure to finish ...")
+                while self.loop_closure_finished < 1:
+                    pass
 
-        # Free memory
-        del self.loop_detector
-        torch.cuda.empty_cache()
-        gc.collect()
+            # Free memory
+            del self.loop_detector
+            torch.cuda.empty_cache()
+            gc.collect()
 
         self.loop_detection_finished += 1
         self.all_finished += 1
@@ -473,26 +479,31 @@ class SLAM:
 
         ##### Run as long as Frontend tracking gives use new frames
         while self.tracking_finished < 1 and run:
+
+            # Check if we found a potential loop
             loop_ii, loop_jj, scores = self.get_potential_loop_update(mp_kwargs["queue_in"])
             # Perform PGO over map until loop_ii.max() if candidates exist
             did_loop_closure, confirmed_loop_edge = self.loop_closer(
                 loop_ii, loop_jj, scores, mp_kwargs["in_progress"]
             )
 
-            # We actually closed a loop
+            # We actually closed a loop in the 3D map
             if did_loop_closure:
+                # FIXME evaluate the segment based BA
                 all_loop_edges.append(confirmed_loop_edge)
                 # Update map segments
                 with self.video.get_lock():
                     segment_manager.advance_counter(self.video.counter.value)
                 segment_manager.insert_edge(*confirmed_loop_edge)
                 print(segment_manager)
+
                 if self.backend is not None:
                     # Send the loop candidates to the Backend thread, so we can consider them in our Optimization
                     mp_kwargs["queue_out"].put(confirmed_loop_edge)
                     all_ii, all_jj = tuple_to_tensor(all_loop_edges)
                     all_ii, all_jj = all_ii.to(self.device), all_jj.to(self.device)
                     # Refine inconsistencies in the map after a loop closure
+                    # TODO use the loop edges in the backend! Is this better?
                     refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=None, all_jj=None)
                 else:
                     with mp_kwargs["lock"]:
@@ -635,8 +646,8 @@ class SLAM:
         """Simple wrapper to call backend depending on which method we want to use. Reason being, that we also use the
         frontend factor graph for GO-SLAM's loop aware Bundle Adjustment.
         """
+        # Use GO-SLAM's loop closure bundle adjustment (This will also consider edges with very small motion, but only in a loop window)
         if self.backend.enable_loop:
-            # Use GO-SLAM's loop closure bundle adjustment (This will also consider edges with very small motion, but only in a loop window)
             # TODO how does GO-SLAM actually build the graph for this optimization? I dont think they use the frontend graph like we do
             self.backend(local_graph=self.frontend.optimizer.graph, add_ii=add_ii, add_jj=add_jj)
         else:
@@ -684,6 +695,7 @@ class SLAM:
         loop_edges, loop_ii, loop_jj = [], None, None
         segment_manager = TrajectorySegmentManager()
 
+        ### Online Loop
         while self.tracking_finished < 1 and run:
             if self.backend_can_start < 1:
                 continue
@@ -709,6 +721,8 @@ class SLAM:
                     for i, j in new_edges:
                         segment_manager.insert_edge(i, j)
                     print(segment_manager)
+
+            # TODO add loop_edges to backend op
             # if len(loop_edges) > 0:
             #     loop_ii, loop_jj = tuple_to_tensor(loop_edges)
             #     loop_ii, loop_jj = loop_ii.to(self.device), loop_jj.to(self.device)
@@ -751,6 +765,8 @@ class SLAM:
                         for i, j in new_edges:
                             segment_manager.insert_edge(i, j)
                         print(segment_manager)
+
+                # TODO add loop edges to backend op all the time
                 # if len(loop_edges) > 0:
                 #     loop_ii, loop_jj = tuple_to_tensor(loop_edges)
                 #     loop_ii, loop_jj = loop_ii.to(self.device), loop_jj.to(self.device)
