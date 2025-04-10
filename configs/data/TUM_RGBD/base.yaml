@@ -1,4 +1,4 @@
-dataset: 'tumrgbd'
+dataset: "tumrgbd"
 input_folder: /media/data/tum_rgbd/benchmark_rgbd/fr1_room
 
 png_depth_scale: 5000.0 #for depth image in png format
