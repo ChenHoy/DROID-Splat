@@ -163,6 +163,9 @@ class SLAM:
         ### Multi-threading stuff
         # Objects for communicating between processes
         self.input_pipe = mp.Queue()  # Communicate data from Stream -> main thread
+        # TODO use an EXPLICIT lock to guard frontend and backend video buffer
+        # NOTE this will take away from our parallel implementation
+        self.ba_lock = mp.Lock()  # Block the bundle adjustment optimization explicitly
         self.lock_mapping = mp.Lock()
         self.cond_mapping = mp.Condition(lock=self.lock_mapping)
         self.mp_mapping_kwargs = {
@@ -302,6 +305,7 @@ class SLAM:
         sema_mapping: mp.Semaphore,
         loop_kwargs: Dict,
         input_queue: mp.Queue,
+        ba_lock: mp.Lock = None,
     ) -> None:
         """Main driver of framework by looping over the input stream"""
 
@@ -366,7 +370,7 @@ class SLAM:
                     cond_mapping.wait_for(lambda: self.mapping_done > 0)
 
             wait_for_loop_closure(loop_kwargs)  # Dont insert new frames before this got closed
-            self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask, lock=ba_lock)
 
             maybe_notify_other_threads_to_start()
             # Check if we actually inserted a new frame and optimized
@@ -388,7 +392,7 @@ class SLAM:
             sema_backend.release()
             sema_mapping.release()
 
-    def loop_detection(self, rank: int, loop_queue: mp.Queue, run: bool = False) -> None:
+    def loop_detection(self, rank: int, loop_kwargs: Dict, run: bool = False) -> None:
         """Run a loop detector in parallel, which either measures optical flow between the current frame
         and all past frames or visual similarity by comparing feature descriptors.
         When two frames could be the same, we add a bidirectional edge to the backend optimization graph.
@@ -403,6 +407,10 @@ class SLAM:
         self.info("Loop Detection thread started!")
         self.all_trigered += 1
         delay = 1  # Delay for the loop detector and closure to avoid bad disps around loop edges
+        if self.cfg.run_loop_closure:
+            loop_queue = loop_kwargs["queue_in"]
+        else:
+            loop_queue = loop_kwargs["queue_out"]
 
         # Run as long as Frontend tracking gives use new frames
         while self.tracking_finished < 1 and run:
@@ -416,19 +424,33 @@ class SLAM:
                     sleep(0.2)
 
                 self.loop_detector.info("Sending loop candidates ...")
-                loop_queue.put(candidates)
+                if self.cfg.run_loop_closure:
+                    loop_queue.put(candidates)  # Put everything just in there
+                else:
+                    ii, jj = candidates[0], candidates[1]
+                    new_edges = [(i.item(), j.item()) for i, j in zip(ii, jj)]
+                    loop_queue.put(new_edges)  # Put edges (i, j) in the queue for backend
 
         if run:
             # Run one last time in case we lag behind the end of the video
             candidates = self.loop_detector()
             if candidates is not None:
                 self.loop_detector.info("Sending loop candidates ...")
-                loop_queue.put(candidates)
+                if self.cfg.run_loop_closure:
+                    loop_queue.put(candidates)  # Put everything just in there
+                else:
+                    ii, jj = candidates[0], candidates[1]
+                    new_edges = [(i.item(), j.item()) for i, j in zip(ii, jj)]
+                    loop_queue.put(new_edges)  # Put edges (i, j) in the queue for backend
 
-            # Since Loop Closure and Detector share a queue, we should shut down AFTER all elements have been extracted
+            # Since we share a queue with other Processes, we should shutdown after the elements were extracted
             if self.cfg.run_loop_closure:
                 self.loop_detector.info("Waiting for Loop Closure to finish ...")
                 while self.loop_closure_finished < 1:
+                    pass
+            else:
+                self.loop_detector.info("Waiting for Backend to finish ...")
+                while self.backend_finished < 1:
                     pass
 
             # Free memory
@@ -503,8 +525,8 @@ class SLAM:
                     all_ii, all_jj = tuple_to_tensor(all_loop_edges)
                     all_ii, all_jj = all_ii.to(self.device), all_jj.to(self.device)
                     # Refine inconsistencies in the map after a loop closure
-                    # TODO use the loop edges in the backend! Is this better?
-                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=None, all_jj=None)
+                    # TODO how much better is this with the loop edges added?
+                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=all_ii, all_jj=all_jj)
                 else:
                     with mp_kwargs["lock"]:
                         mp_kwargs["in_progress"] -= 1  # Loop Closure + Refinement is done
@@ -545,7 +567,7 @@ class SLAM:
                     all_ii, all_jj = tuple_to_tensor(all_loop_edges)
                     all_ii, all_jj = all_ii.to(self.device), all_jj.to(self.device)
                     # Refine inconsistencies in the map after a loop closure
-                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=None, all_jj=None)
+                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=all_ii, all_jj=all_jj)
 
             ### Check for some rest edge candidates in the LoopCloser in case we have a delay
             self.loop_closer.info("Checking for rest loop in self.found ...")
@@ -569,7 +591,7 @@ class SLAM:
                     all_ii, all_jj = tuple_to_tensor(all_loop_edges)
                     all_ii, all_jj = all_ii.to(self.device), all_jj.to(self.device)
                     # Refine inconsistencies in the map after a loop closure
-                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=None, all_jj=None)
+                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=all_ii, all_jj=all_jj)
                     break
 
             self.loop_closer.info(f"Closed {len(self.loop_closer.prev_loop_closes)} loops!")
@@ -642,29 +664,39 @@ class SLAM:
 
         return loop_ii, loop_jj, scores
 
-    def backend_op(self, add_ii: Optional[torch.Tensor] = None, add_jj: Optional[torch.Tensor] = None) -> None:
+    def backend_op(
+        self,
+        add_ii: Optional[torch.Tensor] = None,
+        add_jj: Optional[torch.Tensor] = None,
+        lock: Optional[mp.Lock] = None,
+    ) -> None:
         """Simple wrapper to call backend depending on which method we want to use. Reason being, that we also use the
         frontend factor graph for GO-SLAM's loop aware Bundle Adjustment.
         """
         # Use GO-SLAM's loop closure bundle adjustment (This will also consider edges with very small motion, but only in a loop window)
         if self.backend.enable_loop:
             # TODO how does GO-SLAM actually build the graph for this optimization? I dont think they use the frontend graph like we do
-            self.backend(local_graph=self.frontend.optimizer.graph, add_ii=add_ii, add_jj=add_jj)
+            self.backend(local_graph=self.frontend.optimizer.graph, add_ii=add_ii, add_jj=add_jj, lock=lock)
         else:
             # Use vanilla Graph for Bundle adjustment
-            self.backend(add_ii=add_ii, add_jj=add_jj)
+            self.backend(add_ii=add_ii, add_jj=add_jj, lock=lock)
 
-    # TODO there should be a limit on how big the backend can be even at refinement
-    # Either implement sliding window here or in the backend wrapper
     def final_backend_op(
-        self, t_start=0, t_end=-1, steps: int = 6, add_ii=None, add_jj=None, n_repeat: int = 2
+        self,
+        t_start=0,
+        t_end=-1,
+        steps: int = 6,
+        add_ii=None,
+        add_jj=None,
+        n_repeat: int = 2,
+        lock: Optional[mp.Lock] = None,
     ) -> None:
         """Make two final refinements over the whole global map. This explicitly calls the optimizer function,
         so this does not have a backend window limit, i.e. this actually runs over the whole map."""
         for i in range(n_repeat):
             # Use vanilla Graph for Bundle adjustment
             _, n_edges = self.backend.optimizer.dense_ba(
-                t_start=t_start, t_end=t_end, steps=steps, add_ii=add_ii, add_jj=add_jj
+                t_start=t_start, t_end=t_end, steps=steps, add_ii=add_ii, add_jj=add_jj, lock=lock
             )
             msg = "Full BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
             self.backend.info(msg)
@@ -674,6 +706,7 @@ class SLAM:
     def global_ba(
         self,
         rank: int,
+        ba_lock: mp.Lock,
         sema_backend: mp.Semaphore,
         is_free: mp.Event,
         loop_kwargs: Optional[mp.Queue] = None,
@@ -683,6 +716,9 @@ class SLAM:
         def maybe_add_edges(queue_in: mp.Queue, edges: List):
             if not queue_in.empty():
                 add_edges = get_all_queue(queue_in)
+                # Flatten list of list if needed
+                if isinstance(add_edges[0], list):
+                    add_edges = [item for sublist in add_edges for item in sublist]
                 edges.extend(add_edges)
             else:
                 add_edges = None
@@ -712,7 +748,7 @@ class SLAM:
                 continue
 
             # Explicitly consider loop edges in the backend optimization
-            if self.cfg.run_loop_closure:
+            if self.cfg.run_loop_closure or self.cfg.run_loop_detection:
                 with self.video.get_lock():
                     segment_manager.advance_counter(self.video.counter.value)
                 loop_edges, new_edges = maybe_add_edges(loop_kwargs["queue_out"], loop_edges)
@@ -722,16 +758,15 @@ class SLAM:
                         segment_manager.insert_edge(i, j)
                     print(segment_manager)
 
-            # TODO add loop_edges to backend op
-            # if len(loop_edges) > 0:
-            #     loop_ii, loop_jj = tuple_to_tensor(loop_edges)
-            #     loop_ii, loop_jj = loop_ii.to(self.device), loop_jj.to(self.device)
+            if len(loop_edges) > 0:
+                loop_ii, loop_jj = tuple_to_tensor(loop_edges)
+                loop_ii, loop_jj = loop_ii.to(self.device), loop_jj.to(self.device)
 
             ### Actual Backend call
             # NOTE chen: scenes which only translate forward benefit from only using the backend as refinement like the DROID-demo does
             is_free.wait()  # Check if Backend is not already run in case we performed a LoopClosure
             is_free.clear()
-            self.backend_op(add_ii=loop_ii, add_jj=loop_jj)
+            self.backend_op(add_ii=loop_ii, add_jj=loop_jj, lock=ba_lock)
             is_free.set()
 
         sleep(self.sleep_time)  # Let other threads finish their last optimization
@@ -757,7 +792,7 @@ class SLAM:
                 self.backend.info(msg)
 
                 # Explicitly consider loop edges in the backend optimization
-                if self.cfg.run_loop_closure:
+                if self.cfg.run_loop_closure or self.cfg.run_loop_detection:
                     with self.video.get_lock():
                         segment_manager.advance_counter(self.video.counter.value)
                     loop_edges, new_edges = maybe_add_edges(loop_kwargs["queue_out"], loop_edges)
@@ -766,14 +801,13 @@ class SLAM:
                             segment_manager.insert_edge(i, j)
                         print(segment_manager)
 
-                # TODO add loop edges to backend op all the time
-                # if len(loop_edges) > 0:
-                #     loop_ii, loop_jj = tuple_to_tensor(loop_edges)
-                #     loop_ii, loop_jj = loop_ii.to(self.device), loop_jj.to(self.device)
+                if len(loop_edges) > 0:
+                    loop_ii, loop_jj = tuple_to_tensor(loop_edges)
+                    loop_ii, loop_jj = loop_ii.to(self.device), loop_jj.to(self.device)
 
                 is_free.wait()
                 is_free.clear()
-                self.final_backend_op(t_start=0, t_end=t_end, add_ii=loop_ii, add_jj=loop_jj)
+                self.final_backend_op(t_start=0, t_end=t_end, add_ii=loop_ii, add_jj=loop_jj, lock=ba_lock)
                 is_free.set()
 
                 del self.backend
@@ -957,18 +991,6 @@ class SLAM:
                 cv2.imshow("Uncertainty", uncertainty_img[..., ::-1])
                 cv2.waitKey(1)
 
-            if self.plot_motion_probability:
-                # Plot the uncertainty on top
-                with self.video.get_lock():
-                    t_cur = max(0, self.video.counter.value - 1)
-                    if self.cfg.tracking.get("upsample", False):
-                        mot_prob_cur = self.video.motion_prob_up[t_cur].clone()
-                    else:
-                        mot_prob_cur = self.video.motion_prob[t_cur].clone()
-                mot_prob_img = uncertainty2rgb(uncertanity_cur)[0]
-                cv2.imshow("Uncertainty", mot_prob_img[..., ::-1])
-                cv2.waitKey(1)
-
         self.all_finished += 1
         self.info("Show stream Done!")
 
@@ -1068,9 +1090,20 @@ class SLAM:
         # Evo expects floats for timestamps
         kf_tstamps = [float(i) for i in kf_tstamps]
         tstamps = [float(i) for i in tstamps]
+        # Official paper plots in KITTI are usually xy mode
+        if "KITTI" in stream.input_folder:
+            plot_mode = "xz"
+        else:
+            plot_mode = "xy"
+
         if stream.poses is not None:
             kf_result_ate, all_result_ate = eval_utils.do_odometry_evaluation(
-                eval_path, tstamps=tstamps, kf_tstamps=kf_tstamps, monocular=monocular, **eval_traj
+                eval_path,
+                tstamps=tstamps,
+                kf_tstamps=kf_tstamps,
+                monocular=monocular,
+                plot_mode=plot_mode,
+                **eval_traj,
             )
             self.info("(Keyframes only) ATE: {}".format(kf_result_ate), logger=log)
             self.info("(All) ATE: {}".format(all_result_ate), logger=log)
@@ -1340,17 +1373,26 @@ class SLAM:
                     self.sema_mapping,
                     self.mp_loop_kwargs,
                     self.input_pipe,
+                    self.ba_lock,
                 ),
                 name="Frontend Tracking",
             ),
             mp.Process(
                 target=self.global_ba,
-                args=(2, self.sema_backend, self.backend_is_free, self.mp_loop_kwargs, self.cfg.run_backend),
+                args=(
+                    2,
+                    self.ba_lock,
+                    self.sema_backend,
+                    self.backend_is_free,
+                    self.mp_loop_kwargs,
+                    self.cfg.run_backend,
+                ),
                 name="Backend",
             ),
+            # TODO give just all loop kwargs to loop_detection, so we have access to both queues
             mp.Process(
                 target=self.loop_detection,
-                args=(3, self.mp_loop_kwargs["queue_in"], self.cfg.run_loop_detection),
+                args=(3, self.mp_loop_kwargs, self.cfg.run_loop_detection),
                 name="Loop Detector",
             ),
             mp.Process(

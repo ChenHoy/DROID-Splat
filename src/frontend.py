@@ -1,10 +1,12 @@
 import gc
 from copy import deepcopy
+from typing import Optional
 from termcolor import colored
 import ipdb
 from time import gmtime, strftime, time
 
 import torch
+import torch.multiprocessing as mp
 from lietorch import SE3
 
 from .factor_graph import FactorGraph
@@ -35,11 +37,13 @@ class FrontendWrapper(torch.nn.Module):
         print(colored("[Frontend] " + msg, "yellow"))
 
     @torch.no_grad()
-    def forward(self, timestamp, image, depth, intrinsic, gt_pose=None, static_mask=None):
+    def forward(
+        self, timestamp, image, depth, intrinsic, gt_pose=None, static_mask=None, lock: Optional[mp.Lock] = None
+    ):
         """Add new keyframes according to apparent motion and run a local bundle adjustment optimization.
         If there is not enough motion between the new frame and the last inserted keyframe, we dont do anything."""
         self.motion_filter.track(timestamp, image, depth, intrinsic, gt_pose=gt_pose, static_mask=static_mask)
-        self.optimizer()  # Local Bundle Adjustment
+        self.optimizer(lock=lock)  # Local Bundle Adjustment
         self.count = self.optimizer.count  # Synchronize counts of wrapper and actual Frontend
 
 
@@ -93,7 +97,7 @@ class Frontend:
         used_mem = 1 - (free_mem / total_mem)
         return used_mem, free_mem
 
-    def __update(self, pose_interpolation: str = "linear"):
+    def __update(self, pose_interpolation: str = "linear", lock: Optional[mp.Lock] = None):
         """add edges, perform update"""
 
         self.t1 += 1
@@ -119,7 +123,7 @@ class Frontend:
 
         # Frontend Bundle Adjustment to optimize the current local window
         for itr in range(self.steps1):
-            self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True)
+            self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True, lock=lock)
 
         # Check distance
         d = self.video.distance([self.t1 - 3], [self.t1 - 2], beta=self.beta, bidirectional=True)
@@ -140,7 +144,7 @@ class Frontend:
 
             ### 2nd update
             for itr in range(self.steps2):
-                self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True)
+                self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True, lock=lock)
 
         # Manually free memory here as this builds up over time
         if self.release_cache:
@@ -207,7 +211,7 @@ class Frontend:
 
         self.graph.rm_factors(self.graph.ii < self.warmup - 4, store=True)
 
-    def __call__(self):
+    def __call__(self, lock: Optional[mp.Lock] = None):
         """main update"""
 
         # Initialize
@@ -227,7 +231,7 @@ class Frontend:
 
         # Update
         elif self.is_initialized and self.t1 < self.video.counter.value:
-            self.__update()
+            self.__update(lock=lock)
 
         else:
             pass

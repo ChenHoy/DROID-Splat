@@ -2,9 +2,10 @@ import ipdb
 from termcolor import colored
 from copy import deepcopy
 from typing import Optional, List
+import gc
 
 import torch
-from torch.multiprocessing import Value
+import torch.multiprocessing as mp
 import lietorch
 import droid_backends
 
@@ -36,8 +37,8 @@ class DepthVideo:
             raise Exception("Camera model not implemented! Choose either pinhole or mei model.")
         self.opt_intr = cfg.opt_intr
 
-        self.ready = Value("i", 0)
-        self.counter = Value("i", 0)
+        self.ready = mp.Value("i", 0)
+        self.counter = mp.Value("i", 0)
 
         ht = cfg.data.cam.H_out
         self.ht = ht
@@ -536,18 +537,33 @@ class DepthVideo:
 
         return d
 
-    def ba(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, motion_only=False):
+    def ba(
+        self,
+        target,
+        weight,
+        eta,
+        ii,
+        jj,
+        t0=1,
+        t1=None,
+        iters=2,
+        lm=1e-4,
+        ep=0.1,
+        motion_only=False,
+        lock: Optional[mp.Lock] = None,
+    ):
         """Wrapper for dense bundle adjustment. This is used both in Frontend and Backend."""
+        # Use an external lock if wanted
+        if lock is None:
+            lock = self.get_lock()
+        intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same -> Use 0 index
 
-        intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same
-
+        # Use mp.Value of video for indexing as in previous implementations
         with self.get_lock():
-
             # Store the uncertainty maps for source frames, that will get updated
             confidence, idx = self.reduce_confidence(weight, ii)
             # Uncertainties are for [x, y] directions -> Take norm to get single scalar
             self.confidence[idx] = torch.norm(confidence, dim=1)
-
             # [t0, t1] window of bundle adjustment optimization
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
@@ -558,13 +574,15 @@ class DepthVideo:
             else:
                 disps_sens = self.disps_sens
 
-            # FIXME chen: This sometimes causes a malloc error :/
-            # NOTE errors are not due to the Renderer, but when running frontend and backend in parallel sometimes
+        # Use actual mp.Lock for securing BA if given
+        with lock:
+
+            # Running frontend and backend in parallel can sometimes trigger a malloc error
             droid_backends.ba(
                 self.poses,
                 self.disps,
                 self.intrinsics[intrinsic_common_id],
-                disps_sens,
+                self.disps_sens,
                 target,
                 weight,
                 eta,
@@ -579,6 +597,7 @@ class DepthVideo:
                 motion_only,
                 self.opt_intr,
             )
+
             self.disps.clamp_(min=1e-3)  # Always make sure that Disparities are non-negative!!!
             # Reassigning intrinsics after optimization
             if self.opt_intr:
@@ -643,36 +662,39 @@ class DepthVideo:
         ep=0.1,
         alpha: float = 5e-3,
         linear_align_prior: bool = True,
+        lock: Optional[mp.Lock] = None,
     ):
         """Bundle adjustment over structure with a scalable prior.
 
         We keep the poses fixed, since this would create an unnecessary ambiguity and can make the system unstable!
         We optimize scale and shift parameters on top of the scene disparity.
         """
+        if lock is None:
+            lock = self.get_lock()
 
         with self.get_lock():
             # Store the uncertainty maps for source frames, that will get updated
             confidence, idx = self.reduce_confidence(weight, ii)
             # Uncertainties are for [x, y] directions -> Take norm to get single scalar
             self.confidence[idx] = torch.norm(confidence, dim=1)
-
             # [t0, t1] window of bundle adjustment optimization
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
-
             # Precondition
             # NOTE if priors have huge variances (like a generative diffusion model), dont use this!
             if linear_align_prior:
                 # NOTE chen: this gives only slightly improved tracking if the prior scales dont have large variance
                 self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
 
-            # Block coordinate descent optimization
-            for i in range(iters):
-                # Sanity check for non-negative disparities
-                self.disps.clamp_(min=1e-3)
-                self.disps_sens.clamp_(min=1e-3)
-                self.disps_sens_up.clamp_(min=1e-3)
+        # Block coordinate descent optimization
+        for i in range(iters):
+            # Sanity check for non-negative disparities
+            self.disps.clamp_(min=1e-3)
+            self.disps_sens.clamp_(min=1e-3)
+            self.disps_sens_up.clamp_(min=1e-3)
 
+            # Safgeguard the CUDA kernel
+            with lock:
                 # Motion only Bundle Adjustment (MoBA)
                 droid_backends.ba(
                     self.poses,
@@ -693,30 +715,30 @@ class DepthVideo:
                     True,
                     False,
                 )
-                # Joint Depth and Scale Adjustment(JDSA)
-                bundle_adjustment(
-                    target,
-                    weight,
-                    eta,
-                    self.poses,
-                    self.disps,
-                    self.intrinsics,
-                    ii,
-                    jj,
-                    t0,
-                    t1,
-                    self.disps_sens,
-                    self.scales,
-                    self.shifts,
-                    iters=1,
-                    lm=lm,
-                    ep=ep,
-                    scale_prior=True,
-                    structure_only=True,
-                    alpha=alpha,
-                )
-                self.mapping_dirty[t0:t1] = True
+            # Joint Depth and Scale Adjustment(JDSA)
+            bundle_adjustment(
+                target,
+                weight,
+                eta,
+                self.poses,
+                self.disps,
+                self.intrinsics,
+                ii,
+                jj,
+                t0,
+                t1,
+                self.disps_sens,
+                self.scales,
+                self.shifts,
+                iters=1,
+                lm=lm,
+                ep=ep,
+                scale_prior=True,
+                structure_only=True,
+                alpha=alpha,
+            )
+            self.mapping_dirty[t0:t1] = True
 
-                # After optimizing the prior, we need to update the disps_sens and reset the scales
-                # only then can we use global BA and intrinsics optimization with the CUDA kernel later in backend
-                self.reset_prior()
+            # After optimizing the prior, we need to update the disps_sens and reset the scales
+            # only then can we use global BA and intrinsics optimization with the CUDA kernel later in backend
+            self.reset_prior()

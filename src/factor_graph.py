@@ -6,6 +6,7 @@ from copy import deepcopy
 import numpy as np
 
 import torch
+import torch.multiprocessing as mp
 from .modules import CorrBlock, AltCorrBlock
 from .geom import projective_ops as pops
 
@@ -238,7 +239,6 @@ class FactorGraph:
 
         self.add_factors(ii[keep], jj[keep])
 
-    # TODO test this
     def add_neighbors(self, ii, jj, radius: int = 3) -> None:
         """Given edges (i, j), add the neighboring edges within radius r.
         Background: When we detect a loop edge (i, j), we have similar edges with low motion in (i-1, j-1), ...
@@ -249,16 +249,15 @@ class FactorGraph:
         add_i, add_j = [], []
         for i, j in zip(ii, jj):
             for r in range(1, radius + 1):
+
                 if i - r >= 0 and j - r >= 0:
-                    if (i - r) not in add_i:
+                    if (i - r) not in add_i and (j - r) not in add_j:
                         add_i.append(i - r)
-                    if (j - r) not in add_j:
                         add_j.append(j - r)
 
                 if i + r < cur_t and j + r < cur_t:
-                    if (i + r) not in add_i:
+                    if (i + r) not in add_i and (j + r) not in add_j:
                         add_i.append(i + r)
-                    if (j + r) not in add_j:
                         add_j.append(j + r)
 
         self.add_factors(torch.tensor(add_i, device=self.device), torch.tensor(add_j, device=self.device))
@@ -605,7 +604,17 @@ class FactorGraph:
         return weight
 
     @torch.cuda.amp.autocast(enabled=True)
-    def update(self, t0=None, t1=None, iters=4, use_inactive=False, lm=1e-4, ep=0.1, motion_only=False):
+    def update(
+        self,
+        t0=None,
+        t1=None,
+        iters=4,
+        use_inactive=False,
+        lm=1e-4,
+        ep=0.1,
+        motion_only=False,
+        lock: Optional[mp.Lock] = None,
+    ):
         """run update operator on factor graph"""
 
         # motion features
@@ -622,7 +631,7 @@ class FactorGraph:
         # NOTE chen: if we have an external static mask, we could use it here to set the weight to 0 for these pixels!
         # NOTE chen: interestingly this can worsen performance as well, i.e. the system sometimes can have very helpful pixels on objects
         # it might make sense to just not use external masks, since the system was trained end-to-end with its own weighting mechanism
-        weight = self.remove_dynamic_pixels(weight, self.ii)
+        # weight = self.remove_dynamic_pixels(weight, self.ii)
 
         if t0 is None:
             t0 = max(1, self.ii.min().item() + 1)
@@ -639,7 +648,6 @@ class FactorGraph:
             self.damping[torch.unique(self.ii, sorted=True)] = damping
 
             if use_inactive:
-                # TODO why is this not configurable and is 3 a good value?
                 m = (self.ii_inac >= t0 - 3) & (self.jj_inac >= t0 - 3)
                 ii = torch.cat([self.ii_inac[m], self.ii], dim=0)
                 jj = torch.cat([self.jj_inac[m], self.jj], dim=0)
@@ -657,7 +665,7 @@ class FactorGraph:
             weight = weight.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
 
             if motion_only:
-                self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, True)
+                self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, True, lock=lock)
             else:
                 if self.scale_priors:
                     # Use pure Python BA implementation with scale correction for priors
@@ -665,7 +673,7 @@ class FactorGraph:
                     self.video.ba_prior(target, weight, damping, ii, jj, t0=t0, t1=t1, iters=iters + 2, lm=lm, ep=ep)
 
                 else:
-                    self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False)
+                    self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False, lock=lock)
 
             if self.upsample:
                 self.video.upsample(torch.unique(self.ii, sorted=True), upmask)
@@ -674,7 +682,16 @@ class FactorGraph:
 
     @torch.cuda.amp.autocast(enabled=False)
     def update_lowmem(
-        self, t0=None, t1=None, iters=8, steps=2, max_t=None, lm: float = 5e-5, ep: float = 5e-2, motion_only=False
+        self,
+        t0=None,
+        t1=None,
+        iters=8,
+        steps=2,
+        max_t=None,
+        lm: float = 5e-5,
+        ep: float = 5e-2,
+        motion_only=False,
+        lock: Optional[mp.Lock] = None,
     ):
         """run update operator on factor graph - reduced memory implementation"""
         with self.video.get_lock():
@@ -746,9 +763,4 @@ class FactorGraph:
 
             # dense bundle adjustment, fix the first keyframe, while optimize within [1, t]
             # FIXME this somehow collides with Frontend
-            self.video.ba(target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep, motion_only)
-
-    @torch.cuda.amp.autocast(enabled=True)
-    def update_fast(self, t0=None, t1=None, iters=2, steps=8, motion_only=False):
-        """run update operator on factor graph similar to dense lowmemory, but without using the AltCorr kernel"""
-        raise NotImplementedError("This function is implemented in GO-SLAM, but never used!")
+            self.video.ba(target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep, motion_only, lock=lock)
