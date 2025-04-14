@@ -98,7 +98,7 @@ def run_slam(cfg):
         yaml.dump(OmegaConf.to_container(cfg), f, default_flow_style=False)
 
     setup_seed(43)
-    torch.multiprocessing.set_start_method("spawn")
+    torch.multiprocessing.set_start_method("spawn", force=True)
     # Save state for reproducibility
     backup_source_code(os.path.join(output_folder, "code"))
 
