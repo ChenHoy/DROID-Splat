@@ -1,0 +1,27 @@
+defaults:
+  - /tracking/base@_here_
+
+buffer: 512
+warmup: 8
+beta: 0.7  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
+# Running mapping and higher resolutions requires either more Memory or other tricks
+upsample: False # Without upsampling memory management is suddenly possible
+
+motion_filter:
+  thresh: 3.0  # add as keyframe if avg flow >
+
+backend:
+  warmup: 25
+  thresh: 60.0  # only consider edge with avg flow < 
+  window: 300 # Dont optimize more keyframes to avoid OOM
+  radius: 3
+  max_factor_mult: 5
+  nms: 2 
+
+  use_loop_closure: False
+  # NOTE make sure that loop window is not bigger than the general window of the backend
+  loop_window: 25 # Default GO-SLAM: 25
+  loop_thresh: 50.0 # You want this one to be big, so we add enough edges for loops
+  loop_radius: 1 # Default GO-SLAM: 1
+  loop_nms: 12 # Default GO-SLAM: 12
+  loop_max_factor_mult: 8
