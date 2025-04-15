@@ -716,8 +716,9 @@ class SLAM:
         def maybe_add_edges(queue_in: mp.Queue, edges: List):
             if not queue_in.empty():
                 add_edges = get_all_queue(queue_in)
-                # Flatten list of list if needed
-                if isinstance(add_edges[0], list):
+                # We get List[List[Tuple]] from edge detector directly and List[List] from Loop Closure
+                # Flatten either into List[List] or List[Tuple]
+                if isinstance(add_edges[0], list) and not isinstance(add_edges[0][0], int):
                     add_edges = [item for sublist in add_edges for item in sublist]
                 edges.extend(add_edges)
             else:

@@ -135,6 +135,7 @@ def evaluate_evo(
     save_dir: str,
     label: str,
     monocular: bool = False,
+    plot_mode: str = "xz",  # KITTI: xy
 ) -> Dict:
     """Evaluate the odometry using the evo package. This expect a list/ an array of poses in c2w convention, i.e. you have
     to invert the direct outputs from DROID-SLAM convention.
@@ -181,7 +182,12 @@ def evaluate_evo(
     with open(os.path.join(save_dir, "stats_{}.json".format(str(label))), "w", encoding="utf-8") as f:
         json.dump(ape_stats, f, indent=4)
 
-    plot_mode = PlotMode.xz
+    if plot_mode == "xz":
+        plot_mode = PlotMode.xz
+    elif plot_mode == "xy":
+        plot_mode = PlotMode.xy
+    else:
+        plot_mode = PlotMode.yz
     fig = plt.figure()
     ax = prepare_axis(fig, plot_mode)
     ax.set_title(f"ATE RMSE: {rmse}")
@@ -262,6 +268,7 @@ def eval_ate(
     timestamps: List | np.ndarray,
     save_dir: str,
     monocular: bool = False,
+    plot_mode: str = "xz",
 ):
     """
     Evaluate the absolute trajectory error by comparing the estimated camera odometry with a groundtruth reference.
@@ -287,6 +294,7 @@ def eval_ate(
         save_dir=save_dir,
         label="final",
         monocular=monocular,
+        plot_mode=plot_mode,
     )
     return ate
 
@@ -431,13 +439,16 @@ def do_odometry_evaluation(
     tstamps: List[int],
     kf_tstamps: List[int],
     monocular: bool,
+    plot_mode: str = "xz",
 ):
     """Perform evaluation both on keyframe trajectory and the whole trajectory."""
     ### Get the numbers for keyframes only
     kf_eval_path = os.path.join(eval_path, "odometry", "keyframes")
     mkdir_p(kf_eval_path)
 
-    kf_result_ate = eval_ate(est_c2w_kf_lie, gt_c2w_kf_lie, kf_tstamps, save_dir=kf_eval_path, monocular=monocular)
+    kf_result_ate = eval_ate(
+        est_c2w_kf_lie, gt_c2w_kf_lie, kf_tstamps, save_dir=kf_eval_path, monocular=monocular, plot_mode=plot_mode
+    )
     kf_trajectory_df = pd.DataFrame([kf_result_ate])
     kf_trajectory_df.to_csv(os.path.join(kf_eval_path, "kf_trajectory_results.csv"), index=False)
     # NOTE chen: you can use this file to directly visualize the trajectory using evo
@@ -447,7 +458,9 @@ def do_odometry_evaluation(
     all_eval_path = os.path.join(eval_path, "odometry", "all")
     mkdir_p(all_eval_path)
 
-    all_result_ate = eval_ate(est_c2w_all_lie, gt_c2w_all_lie, tstamps, save_dir=all_eval_path, monocular=monocular)
+    all_result_ate = eval_ate(
+        est_c2w_all_lie, gt_c2w_all_lie, tstamps, save_dir=all_eval_path, monocular=monocular, plot_mode=plot_mode
+    )
     all_trajectory_df = pd.DataFrame([all_result_ate])
     all_trajectory_df.to_csv(os.path.join(all_eval_path, "all_trajectory_results.csv"), index=False)
     # NOTE chen: you can use this file to directly visualize the trajectory using evo

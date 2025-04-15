@@ -193,7 +193,10 @@ class Backend:
         motion_only: bool,
         lock: Optional[mp.Lock] = None,
     ):
-        with self.video.get_lock():
+        if lock is None:
+            lock = self.video.get_lock()
+
+        with lock:
             # NOTE chen: computing the scale of a scene is not straight-forward, we simply take the mean disparity as proxy
             scales_before = self.video.disps[t_start:t_end].mean(dim=[1, 2]).clone()
             poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
@@ -253,14 +256,11 @@ class Backend:
         # Filter out low confidence edges
         graph.filter_edges()
 
-        # if add_ii is not None and add_jj is not None:
-        #     valid = torch.logical_or(add_ii < cur_t - self.frontend_window, add_jj < cur_t - self.frontend_window)
-        #     if valid.sum() > 0:
-        #         graph.add_factors(add_ii[valid], add_jj[valid])
-        #         # NOTE we get much better results when also including the neighbors of loop edges for more constraints
-        #         graph.add_neighbors(add_ii[valid], add_jj[valid], radius=3)
+        if add_ii is not None and add_jj is not None:
+            graph.add_factors(add_ii, add_jj)
+            # NOTE we get much better results when also including the neighbors of loop edges for more constraints
+            graph.add_neighbors(add_ii, add_jj, radius=3)
 
-        print(f"Running BA on [{t_start}, {t_end}] ...")
         self.perform_ba(graph, t_start, t_end, steps, iters, motion_only, lock=lock)
         self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
 

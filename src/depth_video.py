@@ -2,6 +2,8 @@ import ipdb
 from termcolor import colored
 from copy import deepcopy
 from typing import Optional, List
+import os
+import datetime
 import gc
 
 import torch
@@ -558,8 +560,10 @@ class DepthVideo:
             lock = self.get_lock()
         intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same -> Use 0 index
 
-        # Use mp.Value of video for indexing as in previous implementations
-        with self.get_lock():
+        # Use actual mp.Lock for securing BA if given
+        with lock:
+            torch.cuda.synchronize()
+
             # Store the uncertainty maps for source frames, that will get updated
             confidence, idx = self.reduce_confidence(weight, ii)
             # Uncertainties are for [x, y] directions -> Take norm to get single scalar
@@ -573,9 +577,6 @@ class DepthVideo:
                 disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
             else:
                 disps_sens = self.disps_sens
-
-        # Use actual mp.Lock for securing BA if given
-        with lock:
 
             # Running frontend and backend in parallel can sometimes trigger a malloc error
             droid_backends.ba(
@@ -602,6 +603,8 @@ class DepthVideo:
             # Reassigning intrinsics after optimization
             if self.opt_intr:
                 self.intrinsics[: self.counter.value] = self.intrinsics[intrinsic_common_id]
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
 
             self.mapping_dirty[t0:t1] = True
 

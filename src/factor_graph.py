@@ -255,7 +255,7 @@ class FactorGraph:
                         add_i.append(i - r)
                         add_j.append(j - r)
 
-                if i + r < cur_t and j + r < cur_t:
+                if i + r < cur_t - 1 and j + r < cur_t - 1:
                     if (i + r) not in add_i and (j + r) not in add_j:
                         add_i.append(i + r)
                         add_j.append(j + r)
@@ -694,6 +694,9 @@ class FactorGraph:
         lock: Optional[mp.Lock] = None,
     ):
         """run update operator on factor graph - reduced memory implementation"""
+        if lock is None:
+            lock = self.video.get_lock()
+
         with self.video.get_lock():
             cur_t = self.video.counter.value
 
@@ -731,20 +734,21 @@ class FactorGraph:
                 # edge ii == jj means stereo pair, corr1: [B, N, (2r+1)^2 * num_levels, H, W]
                 corr1 = corr_op(coords1[:, v], rig * iis, rig * jjs + (iis == jjs).long())
 
-                with torch.cuda.amp.autocast(enabled=True):
-                    # [B, N, C, H, W], [B, N, H, W, 2],[B, N, H, W, 2], [B, s, H, W], [B, s, 8*9*9, H, W]
-                    net, delta, weight, damping, upmask = self.update_op(
-                        self.net[:, v], self.video.inps[None, iis], corr1, motion[:, v], iis, jjs
-                    )
-                    # weight = self.remove_dynamic_pixels(weight, iis)
+                with lock:
+                    with torch.cuda.amp.autocast(enabled=True):
+                        # [B, N, C, H, W], [B, N, H, W, 2],[B, N, H, W, 2], [B, s, H, W], [B, s, 8*9*9, H, W]
+                        net, delta, weight, damping, upmask = self.update_op(
+                            self.net[:, v], self.video.inps[None, iis], corr1, motion[:, v], iis, jjs
+                        )
+                        # weight = self.remove_dynamic_pixels(weight, iis)
 
-                    if self.upsample:
-                        self.video.upsample(torch.unique(iis, sorted=True), upmask)
+                        if self.upsample:
+                            self.video.upsample(torch.unique(iis, sorted=True), upmask)
 
-                self.net[:, v] = net
-                self.target[:, v] = coords1[:, v] + delta.float()
-                self.weight[:, v] = weight.float()
-                self.damping[torch.unique(iis, sorted=True)] = damping
+                    self.net[:, v] = net
+                    self.target[:, v] = coords1[:, v] + delta.float()
+                    self.weight[:, v] = weight.float()
+                    self.damping[torch.unique(iis, sorted=True)] = damping
 
             # Free memory manually
             del corr1
