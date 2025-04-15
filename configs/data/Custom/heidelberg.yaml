@@ -1,0 +1,19 @@
+dataset: "folder"
+input_folder: /media/data/Hannover/static/triumphe
+
+### original camera parameters
+cam:
+  H: 1920
+  W: 1080
+  H_out: 568 # 640 
+  W_out: 272 # 360
+  H_edge: 0
+  W_edge: 0 
+  # We calibrate the camera once in prgbd mode without any scale optimization, which roughly gets the right parameters
+  # NOTE the scale depends on the metric scale of the monocular depth prediction
+  fx: 1812.0416 # heuristic: 1296.0
+  fy: 1816.2024 # heuristic: 1296.0
+  cx: 390.0984 # heuristic: 540
+  cy: 1028.512 # heuristic: 960
+  calibration_txt: ''
+  camera_model: "pinhole"
