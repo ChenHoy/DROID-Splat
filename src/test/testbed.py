@@ -26,9 +26,37 @@ class SlamTestbed(SLAM):
         # self.loop_detector.net = self.loop_detector.load_eigen()
         self.lc_closure = LongTermLoopClosure(self.cfg.loop_closure, self.video, device=self.device)
 
+    def get_points(self, index: torch.Tensor, mv_filter_thresh: float = 0.1, mv_filter_count=2):
+
+        import droid_backends
+        from lietorch import SE3
+
+        s = self.video.scale_factor
+        poses = torch.index_select(self.video.poses, 0, index)
+        disps = torch.index_select(self.video.disps, 0, index)
+        # convert poses to 4x4 matrix
+        Ps = SE3(poses).inv().matrix().cpu().numpy()
+        images = torch.index_select(self.video.images, 0, index)
+        images = images.cpu()[:, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].permute(0, 2, 3, 1)
+        points = droid_backends.iproj(SE3(poses).inv().data, disps, self.video.intrinsics[0]).cpu()
+
+        thresh = mv_filter_thresh * torch.ones_like(disps.mean(dim=[1, 2]))
+        count = droid_backends.depth_filter(
+            self.video.poses, self.video.disps, self.video.intrinsics[0], index, thresh
+        )
+        count, disps = count.cpu(), disps.cpu()
+        # Only keep points that are consistent across multiple views and not too close by
+        masks = (count >= mv_filter_count) & (disps > 0.5 * disps.mean(dim=[1, 2], keepdim=True))
+        idx = index[0]
+        mask = masks[idx].reshape(-1)
+        pts = points[idx].reshape(-1, 3)[mask].numpy()
+        clr = images[idx].reshape(-1, 3)[mask].numpy()
+        ipdb.set_trace()
+        pass
+
     def test_tracking(self, stream, backend_freq: int = 10) -> None:
         """Test tracking in a sequential manner."""
-        assert self.cfg.run_backend, "Need to run backend for this test to make sense!"
+        # assert self.cfg.run_backend, "Need to run backend for this test to make sense!"
 
         for frame in tqdm(stream):
             frontend_old_count = self.frontend.optimizer.t1  # How many times did the frontend actually run?
@@ -44,14 +72,16 @@ class SlamTestbed(SLAM):
 
             # If new keyframe got inserted
             if self.frontend.optimizer.is_initialized and frontend_old_count != self.frontend.optimizer.t1:
-                if self.frontend.optimizer.t1 % backend_freq == 0 and self.cfg.run_backend:
-                    self.backend()
+                # if self.frontend.optimizer.t1 % backend_freq == 0 and self.cfg.run_backend:
+                #     self.backend()
+                test_index = torch.arange(8, device=self.video.device)
+                self.get_points(test_index)
+                ipdb.set_trace()
 
                 # Run Loop Closure
                 candidates = self.loop_detector()
                 if candidates is not None:
                     self.lc_closure(*candidates)
-                    ipdb.set_trace()
 
     def test_rescale(
         self, stream, backend_freq: int = 2, render_freq: int = 5, test_until: Optional[int] = None
