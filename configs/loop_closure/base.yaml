@@ -1,7 +1,19 @@
+## Feature detector 
+method: eigen
+### Available trained models are: 
+# ResNet18 (with output dim 256 or 512)
+# ResNet50 (output dim 128, 256, 512 or 2048), 
+# ResNet101 (output dim 128, 256, 512 or 2048)
+# VGG16 (output dim 512)
+model: ResNet50
+fc_output_dim: 2048
+k_nearest: 10 # Only look at the topk nearest neighbors in the database to speed up the search
+
+## Thresholds for considering loops
+threshold: 0.6 # Threshold for frame distance, i.e. candidate pairs should have distance < threshold
 min_temporal_distance: 10 # Keyframes should be at least this far apart for a valid loop closure candidate
 max_orientation_difference: 25.0 # Rotation difference in degrees (avg over rpy axis) of the estimated keyframe poses
 # This is used for e.g. motion between frames or feature distance
-threshold: 0.6 # Threshold for frame distance, i.e. candidate pairs should have distance < threshold
 
 # 2D Keypoint Detector
 # NOTE a problem for long-term outdoor slam for us, is that we can only run on a lower resolution without memory

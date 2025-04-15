@@ -12,6 +12,6 @@ cam:
   cy: 242.683609
   H_edge: 8
   W_edge: 16
-  H_out: 240
-  W_out: 320
+  H_out: 240 # 240 (GO-SLAM) / 320
+  W_out: 360 # 320 (GO-SLAM) / 432
   camera_model: "pinhole"

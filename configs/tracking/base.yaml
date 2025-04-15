@@ -33,7 +33,7 @@ backend:
   window: 200 # Dont optimize more keyframes to avoid OOM
   thresh: 50.0 # Add edges between frames within this distance
   max_factor_mult: 16
-  radius: 3
+  radius: 2
   nms: 2
 
   use_loop_closure: False

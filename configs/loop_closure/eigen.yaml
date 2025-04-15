@@ -2,7 +2,6 @@ defaults:
   - /loop_closure/base@_here_
 
 method: eigen
-
 ### Available trained models are: 
 # ResNet18 (with output dim 256 or 512)
 # ResNet50 (output dim 128, 256, 512 or 2048), 
