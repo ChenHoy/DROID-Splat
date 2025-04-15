@@ -461,6 +461,7 @@ class DAVIS(BaseDataset):
         super(DAVIS, self).__init__(cfg, device)
         self.sequence = cfg.data.scene
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, self.sequence, "*.jpg")))
+        self.n_img = len(self.color_paths)
 
         self.has_dyn_masks = True
         self.mask_path = self.input_folder.replace("JPEGImages", "Annotations")
