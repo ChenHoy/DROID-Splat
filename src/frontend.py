@@ -101,6 +101,8 @@ class Frontend:
         """add edges, perform update"""
 
         self.t1 += 1
+        if lock is None:
+            lock = self.video.get_lock()
 
         # Remove old factors if we already computed a correlation volume
         if self.graph.corr is not None:
@@ -114,12 +116,13 @@ class Frontend:
 
         # Condition video.disps based on external sensor data if given before optimizing
         # Dont do this with monocular depth, as every new prior has a yet to be determined scale
-        if not self.video.cfg.mode == "prgbd" and not self.video.optimize_scales:
-            self.video.disps[self.t1 - 1] = torch.where(
-                self.video.disps_sens[self.t1 - 1] > 0,
-                self.video.disps_sens[self.t1 - 1],
-                self.video.disps[self.t1 - 1],
-            )
+        with lock:
+            if not self.video.cfg.mode == "prgbd" and not self.video.optimize_scales:
+                self.video.disps[self.t1 - 1] = torch.where(
+                    self.video.disps_sens[self.t1 - 1] > 0,
+                    self.video.disps_sens[self.t1 - 1],
+                    self.video.disps[self.t1 - 1],
+                )
 
         # Frontend Bundle Adjustment to optimize the current local window
         for itr in range(self.steps1):
@@ -154,26 +157,27 @@ class Frontend:
                 gc.collect()
 
         ### Set pose & disp for next iteration
-        dP = SE3(self.video.poses[self.t1 - 1]) * SE3(self.video.poses[self.t1 - 2]).inv()  # Get relative pose
-        # Vanilla linear interpolation (constant speed assumption and extrapolate)
-        # (usually gives a boost of 1-4mm in ATE RMSE)
-        if pose_interpolation == "linear":
-            self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
-        # Damped Linear from DPVO
-        elif pose_interpolation == "damped":
-            # NOTE this interpolation makes a big change on KITTI/03
-            damping = 0.5  # motion damping
-            self.video.poses[self.t1] = (SE3.exp(damping * dP.log()) * SE3(self.video.poses[self.t1 - 1])).vec()
-        # Naive strategy for initializing next pose as previous pose in DROID-SLAM
-        else:
-            self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
+        with lock:
+            dP = SE3(self.video.poses[self.t1 - 1]) * SE3(self.video.poses[self.t1 - 2]).inv()  # Get relative pose
+            # Vanilla linear interpolation (constant speed assumption and extrapolate)
+            # (usually gives a boost of 1-4mm in ATE RMSE)
+            if pose_interpolation == "linear":
+                self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
+            # Damped Linear from DPVO
+            elif pose_interpolation == "damped":
+                # NOTE this interpolation makes a big change on KITTI/03
+                damping = 0.5  # motion damping
+                self.video.poses[self.t1] = (SE3.exp(damping * dP.log()) * SE3(self.video.poses[self.t1 - 1])).vec()
+            # Naive strategy for initializing next pose as previous pose in DROID-SLAM
+            else:
+                self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
 
-        self.video.disps[self.t1] = self.video.disps[self.t1 - 1].mean()
+            self.video.disps[self.t1] = self.video.disps[self.t1 - 1].mean()
 
-        ### update visualization
-        # NOTE chen: Sanity check, because this was sometimes []
-        if self.graph.ii.numel() > 0:
-            self.video.dirty[self.graph.ii.min() : self.t1] = True
+            ### update visualization
+            # NOTE chen: Sanity check, because this was sometimes []
+            if self.graph.ii.numel() > 0:
+                self.video.dirty[self.graph.ii.min() : self.t1] = True
 
         self.count += 1
 
