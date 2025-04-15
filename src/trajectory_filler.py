@@ -2,6 +2,7 @@ from typing import Tuple, List, Optional
 from tqdm import tqdm
 from termcolor import colored
 import ipdb
+import gc
 
 import torch
 import lietorch
@@ -103,12 +104,13 @@ class PoseTrajectoryFiller:
         # Remove the non-keyframes again from the video buffer
         self.video.remove(torch.arange(N, N + M))
 
+        torch.cuda.empty_cache()
+        gc.collect()
+
         return [Gs]
 
-    # TODO handle corner cases!
-    # ii) self.mode == "prgbd" and self.frontend.optimize_scales = True -> We have unscaled priors at non-keyframes!
     @torch.no_grad()
-    def __call__(self, image_stream, batch_size: int = 32, return_tstamps: bool = False):
+    def __call__(self, image_stream, batch_size: int = 8, return_tstamps: bool = False):
         """fill in poses of non-keyframe images in batch mode. This works by first linear interpolating the
         poses in between the keyframes, then computing the optical flow between these frames and doing a
         motion only BA refinement.
@@ -133,6 +135,8 @@ class PoseTrajectoryFiller:
         timestamps, images, depths, intrinsics, masks = [], [], [], [], []
         # store all camera poses and timestamps
         pose_list, all_timestamps = [], []
+
+        self.video.opt_intr = False  # Force turn-off intrinsics optimization
 
         for frame in tqdm(image_stream):
             if self.cfg.with_dyn and image_stream.has_dyn_masks:
@@ -163,9 +167,11 @@ class PoseTrajectoryFiller:
 
             if len(timestamps) == batch_size:
 
-                # FIXME in prgbd mode together with scale_optimization, we will have the wrong prior here and non-keyframes!
-                # TODO either use no depths or interpolate a memoized scale
                 depths = depths if len(depths) > 0 else None
+                # We do not have scale-accurate depth for interpolated non-keyframes, just simply use none here
+                if self.cfg.mode == "prgbd" and self.cfg.tracking.frontend.optimize_scales:
+                    depths = None
+
                 masks = masks if len(masks) > 0 else None
                 pose_list += self.__fill(timestamps, images, depths, intrinsics, static_masks=masks)
                 timestamps, images, depths, intrinsics, masks = [], [], [], [], []
@@ -173,6 +179,10 @@ class PoseTrajectoryFiller:
         # Take care of last rest batch < batch_size
         if len(timestamps) > 0:
             depths = depths if len(depths) > 0 else None
+            # We do not have scale-accurate depth for interpolated non-keyframes, just simply use none
+            if self.cfg.mode == "prgbd" and self.cfg.tracking.frontend.optimize_scales:
+                depths = None
+
             pose_list += self.__fill(timestamps, images, depths, intrinsics)
 
         if return_tstamps:
