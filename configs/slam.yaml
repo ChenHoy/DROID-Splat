@@ -1,7 +1,7 @@
 defaults:
  - _self_
  - mapping: wild.yaml
- - tracking: base.yaml
+ - tracking: tum.yaml
  - loop_closure: eigen.yaml
  - data: TUM_RGBD/base.yaml
 
@@ -10,7 +10,7 @@ hydra:
     dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}_${mode}
   job:
     chdir: False
-    name: droidsplat # Change this to your experiment run name, e.g. the dataset you run on or the run of a configuration
+    name: test # Change this to your experiment run name, e.g. the dataset you run on or the run of a configuration
 
 device: "cuda:0"
 sync_method: strict
@@ -27,11 +27,11 @@ sleep_delay: 0.45 # Sleep timer to cool off the system sometimes
 run_frontend: True # This should always be True!
 run_backend: True # Global optimization
 run_loop_detection: False # Loop closure detection
-run_mapping: True # Rendering 
+run_mapping: False # Rendering 
 
 ## Visualizations / GUIs
 run_visualization: False
-run_mapping_gui: True
+run_mapping_gui: False
 show_stream: False
 # plot_uncertainty: True # To show the uncertainty of the pose graph optimization
 
@@ -46,7 +46,7 @@ save_rendered_predictions: True
 ## Frequencies for synchronizing the different main parts of the pipeline
 # In an optimal setup, the Frontend would be the bottlenck, which can run at ~20-30FPS
 # Mapping takes ~5-7 iters/s, i.e. with a well tuned system each Render update hits <= 0.4fps
-backend_every: 10 # Run global bundle adjustment only every k Frontend updates
+backend_every: 8 # Run global bundle adjustment only every k Frontend updates
 # NOTE this is a trade-off between accuracy and speed, we can also add more compute to refinement!
 mapper_every: 15 # Run Renderer every k Frontend updates
 

@@ -10,7 +10,3 @@ backend:
   thresh: 60.0
   radius: 2
   nms: 2
-
-
-frontend:
-  radius: 5

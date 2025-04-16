@@ -2,8 +2,10 @@ import glob
 import os
 import ipdb
 from omegaconf import DictConfig
+from collections import namedtuple
+from time import time
 from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple, List, Dict
 
 import cv2
 import numpy as np
@@ -247,9 +249,8 @@ class BaseDataset(Dataset):
         outsize = (H_out_with_edge, W_out_with_edge)
 
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
-        # bgr -> rgb, [0, 1]
-
-        color_data = torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
+        # bgr -> rgb
+        color_data = torch.from_numpy(color_data).permute(2, 0, 1)[[2, 1, 0], :, :]
         color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
 
         depth_data = self.depthloader(index)
@@ -569,7 +570,22 @@ class TotalRecon(BaseDataset):
 class KITTI(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(KITTI, self).__init__(cfg, device)
+
+        sequence = Path(self.input_folder).name
+        # TODO make this an extra flag
+        self.use_lidar = False  # cfg.mode == "rgbd"
+
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, "image_2/*.png")))
+        # We assume all images have the same size
+        self.H, self.W = cv2.imread(self.color_paths[0]).shape[:2]
+
+        # Get the calibration data and transforms for lidar alignment
+        # see reference https://github.com/PRBonn/PIN_SLAM/blob/main/dataset/dataloaders/kitti.py
+        self.calibration = self.read_calib_file(os.path.join(self.input_folder, "calib.txt"))
+        self.calib_data = self._load_calib()  # load all calib first
+        self.fx, self.fy = self.calib_data["K_cam2"][0, 0], self.calib_data["K_cam2"][1, 1]
+        self.cx, self.cy = self.calib_data["K_cam2"][0, 2], self.calib_data["K_cam2"][1, 2]
+
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
         # For Pseudo RGBD, we use monocular depth predictions in another folder
@@ -579,7 +595,9 @@ class KITTI(BaseDataset):
                 len(self.depth_paths) == self.n_img
             ), f"Number of depth maps {len(self.depth_paths)} does not match number of images {self.n_img}"
         else:
-            self.depth_paths = None
+            raise NotImplementedError(
+                "Do not support LIDAR right now, as this requires a further densification method. DROID-SLAM does not work well with sparse data"
+            )
 
         if self.depth_paths is not None:
             if self.t_stop is not None:
@@ -592,8 +610,103 @@ class KITTI(BaseDataset):
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
 
-        # TODO read the actual poses from the dataset
-        self.poses = None
+        self.pose_path = os.path.join(self.input_folder, "../../poses", f"{sequence}.txt")
+        # We only have groundtruth poses for sequences 00 to 10, i.e. 11 training sequences
+        # The other sequences are part of the online test evaluation for the benchmark.
+        if os.path.exists(self.pose_path):
+            self.poses = self.load_poses(self.pose_path)
+            if self.t_stop is not None:
+                self.poses = self.poses[self.t_start : self.t_stop]
+            self.poses = self.poses[:: self.stride]
+        else:
+            self.poses = None
+
+    @staticmethod
+    def read_calib_file(file_path: str) -> dict:
+        calib_dict = {}
+        with open(file_path, "r") as calib_file:
+            for line in calib_file.readlines():
+                tokens = line.split(" ")
+                if tokens[0] == "calib_time:":
+                    continue
+                # Only read with float data
+                if len(tokens) > 0:
+                    values = [float(token) for token in tokens[1:]]
+                    values = np.array(values, dtype=np.float32)
+
+                    # The format in KITTI's file is <key>: <f1> <f2> <f3> ...\n -> Remove the ':'
+                    key = tokens[0][:-1]
+                    calib_dict[key] = values
+        return calib_dict
+
+    # from pykitti
+    def _load_calib(self) -> Dict:
+        """Load and compute intrinsic and extrinsic calibration parameters."""
+        # We'll build the calibration parameters as a dictionary, then
+        # convert it to a namedtuple to prevent it from being modified later
+        data = {}
+
+        filedata = self.calibration
+
+        # Create 3x4 projection matrices
+        P_rect_00 = np.reshape(filedata["P0"], (3, 4))
+        P_rect_10 = np.reshape(filedata["P1"], (3, 4))
+        P_rect_20 = np.reshape(filedata["P2"], (3, 4))
+        P_rect_30 = np.reshape(filedata["P3"], (3, 4))
+
+        data["P_rect_00"] = P_rect_00
+        data["P_rect_10"] = P_rect_10
+        data["P_rect_20"] = P_rect_20
+        data["P_rect_30"] = P_rect_30
+
+        # Compute the rectified extrinsics from cam0 to camN
+        T1 = np.eye(4)
+        T1[0, 3] = P_rect_10[0, 3] / P_rect_10[0, 0]
+        T2 = np.eye(4)
+        T2[0, 3] = P_rect_20[0, 3] / P_rect_20[0, 0]
+        T3 = np.eye(4)
+        T3[0, 3] = P_rect_30[0, 3] / P_rect_30[0, 0]
+
+        # Compute the velodyne to rectified camera coordinate transforms
+        data["T_cam0_velo"] = np.reshape(filedata["Tr"], (3, 4))
+        data["T_cam0_velo"] = np.vstack([data["T_cam0_velo"], [0, 0, 0, 1]])
+        data["T_cam1_velo"] = T1.dot(data["T_cam0_velo"])
+        data["T_cam2_velo"] = T2.dot(data["T_cam0_velo"])
+        data["T_cam3_velo"] = T3.dot(data["T_cam0_velo"])
+
+        # Compute the camera intrinsics
+        data["K_cam0"] = P_rect_00[0:3, 0:3]
+        data["K_cam1"] = P_rect_10[0:3, 0:3]
+        data["K_cam2"] = P_rect_20[0:3, 0:3]
+        data["K_cam3"] = P_rect_30[0:3, 0:3]
+
+        # Compute the stereo baselines in meters by projecting the origin of
+        # each camera frame into the velodyne frame and computing the distances
+        # between them
+        p_cam = np.array([0, 0, 0, 1])
+        p_velo0 = np.linalg.inv(data["T_cam0_velo"]).dot(p_cam)
+        p_velo1 = np.linalg.inv(data["T_cam1_velo"]).dot(p_cam)
+        p_velo2 = np.linalg.inv(data["T_cam2_velo"]).dot(p_cam)
+        p_velo3 = np.linalg.inv(data["T_cam3_velo"]).dot(p_cam)
+
+        data["b_gray"] = np.linalg.norm(p_velo1 - p_velo0)  # gray baseline
+        data["b_rgb"] = np.linalg.norm(p_velo3 - p_velo2)  # rgb baseline
+
+        return data
+
+    def load_poses(self, path: str):
+        """KITTI stores 4x4 homogeneous matrices as 12 entry rows."""
+        poses = []
+        with open(path, "r") as f:
+            lines = f.readlines()
+
+        for i in range(len(lines)):
+            line = list(map(float, lines[i].split()))
+            c2w = np.eye(4)
+            c2w[:3, :] = np.array(line).reshape(3, 4)
+            poses.append(c2w)
+
+        return poses
 
 
 class Azure(BaseDataset):
@@ -1054,18 +1167,14 @@ class EuRoC(BaseDataset):
         )
 
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
-        color_data = (
-            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
-        )  # bgr -> rgb, [0, 1]
+        color_data = torch.from_numpy(color_data).permute(2, 0, 1)[[2, 1, 0], :, :]  # bgr -> rgb
         color_data = color_data.unsqueeze(dim=0)  # [1, 3, h, w]
 
         if self.stereo:
             right_color_path = self.right_color_paths[index]
             right_color_data = self.load_right_image(right_color_path)
             right_color_data = cv2.resize(right_color_data, (W_out_with_edge, H_out_with_edge))
-            right_color_data = (
-                torch.from_numpy(right_color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
-            )  # bgr -> rgb, [0, 1]
+            right_color_data = torch.from_numpy(right_color_data).permute(2, 0, 1)[[2, 1, 0], :, :]  # bgr -> rgb
             right_color_data = right_color_data.unsqueeze(dim=0)  # [1, 3, h, w]
             color_data = torch.cat([color_data, right_color_data], dim=0)
 

@@ -49,10 +49,11 @@ class DepthVideo:
         c = 1 if not self.stereo else 2
         self.scale_factor = 8
         s = self.scale_factor
-        buffer = cfg.tracking.buffer
+        self.buffer_size = cfg.tracking.buffer
         # Whether we upsample the predictions or not
         self.upsampled = cfg.tracking.upsample
 
+        buffer = cfg.tracking.buffer
         ### state attributes -> Raw map ###
         self.timestamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
         # List for keeping track of updated frames for visualization
@@ -60,7 +61,8 @@ class DepthVideo:
         # List for keeping track of updated frames for Map Renderer
         self.mapping_dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
 
-        self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float).share_memory_()
+        # NOTE chen: simply storing images in original uint8 and only normalizing them when needed SAVES a SHITTON of memory
+        self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.uint8).share_memory_()
         self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
         self.poses = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
         self.poses_gt = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
@@ -84,6 +86,7 @@ class DepthVideo:
         # Scale and shift parameters for ambiguous monocular depth
         # Optimze the scales and shifts for Pseudo-RGBD mode
         self.optimize_scales = cfg.mode == "prgbd" and cfg.tracking.frontend.optimize_scales
+        self.mode = cfg.mode
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
 
@@ -186,7 +189,7 @@ class DepthVideo:
         be a priority.
         """
         self.timestamp[index] = torch.zeros_like(self.timestamp[index], dtype=torch.float, device=self.device)
-        self.images[index] = torch.zeros_like(self.images[index], dtype=torch.float, device=self.device)
+        self.images[index] = torch.zeros_like(self.images[index], dtype=torch.uint8, device=self.device)
         self.intrinsics[index] = torch.zeros_like(self.intrinsics[index], dtype=torch.float, device=self.device)
 
         zero_poses = torch.zeros_like(self.poses[index], dtype=torch.float, device=self.device)
@@ -304,13 +307,13 @@ class DepthVideo:
         s = self.scale_factor
         with self.get_lock():
             if self.upsampled:
-                image = self.images[index].clone().contiguous().to(device)  # [H, W, 3]
+                image = self.images[index].clone().float().contiguous().to(device) / 255.0  # [H, W, 3]
                 static_mask = self.static_masks[index].clone().to(device)  # [H, W]
                 intrinsics = self.intrinsics[0].clone().contiguous().to(device) * s  # [4]
                 disp_prior = self.disps_sens_up[index].contiguous().clone().to(device)  # [H, W]
             else:
                 # Color is always stored in the original resolution, downsample here to match
-                image = self.images[index, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].clone()
+                image = self.images[index, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].float().clone() / 255.0
                 image = image.contiguous().to(device)  # [C, H // s, W // s]
                 static_mask = self.static_masks[index, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
                 static_mask = static_mask.contiguous().to(device)  # [H // s, W // s]
