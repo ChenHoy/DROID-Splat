@@ -177,7 +177,7 @@ class LoopDetector:
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             with self.video.get_lock():
                 image = self.video.images[idx]
-            image = self.normalize(image.unsqueeze(0))
+            image = self.normalize(image.unsqueeze(0) / 255.0)
             features = self.net(image)
         return features.cpu()
 
@@ -300,7 +300,7 @@ class LoopDetector:
         def inference(images1, images2, iterations, net, padder, direction="forward"):
             # RAFT expects images with 255 range
             if images1.max() <= 1.0:
-                images1, images2 = 255 * images1, 255 * images2
+                images1, images2 = images1, images2
             images1, images2 = padder.pad(images1, images2)  # Pads both images to same size
 
             # NOTE ii is here usually temporally ahead of jj, i.e. we compute the flow from jj to ii
