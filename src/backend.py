@@ -201,7 +201,7 @@ class Backend:
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)
             # NOTE this can improve results when we have actual loop closure, but also worsen them
-            # graph.add_neighbors(add_ii, add_jj, radius=3)
+            graph.add_neighbors(add_ii, add_jj, radius=3)
 
         self.perform_ba(graph, t_start, t_end, steps, iters, motion_only)
         self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization

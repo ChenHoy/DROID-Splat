@@ -3,12 +3,6 @@ defaults:
 
 beta: 0.5
 
-motion_filter:
-  thresh: 4.0  # Consider new keyframe with motion >
-
-frontend:
-  max_age: 20
-
 backend: 
   warmup: 25
   window: 150
