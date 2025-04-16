@@ -86,7 +86,7 @@ My Dataset
 │   ├── frame_0002.png
 │   ├── frame_0003.png
 |   ...
-│   └── frame_1000.npy
+│   └── frame_1000.png
 └── raw.mp4
 ```
 
