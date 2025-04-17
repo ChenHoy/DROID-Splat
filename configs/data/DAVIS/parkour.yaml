@@ -1,0 +1,10 @@
+defaults:
+  # NOTE we need to use an absolute path here, because otherwise it will not be cfg.data in the Dict
+  - /data/DAVIS/base@_here_
+
+# Results from calibration in prgbd mode with intrinsics optimization
+cam:
+  fx: 947.9643
+  fy: 1477.0818
+  cx: 947.03177
+  cy: 774.7146
