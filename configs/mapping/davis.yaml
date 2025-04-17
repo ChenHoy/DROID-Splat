@@ -1,0 +1,81 @@
+defaults:
+  - /mapping/base@_here_
+
+warmup: 5 # Wait until tracking gets to this frame
+delay: 2 # Delay between tracking and mapping (This should be >= 2)
+
+# Online Optimization
+online_opt:
+  ## Local sliding optimization window
+  iters: 100 # Optimization iterations for selected views
+  n_last_frames: 5 # Always optimize the last n frames on top of the new ones
+  n_rand_frames: 15 # Optimize random global frames on top
+
+  ## Strategy for adding / pruning Gaussians
+  prune_every: 2 # Covisibility and opacity based pruning
+  pruning:
+    use_covisibility: True
+    covisibility:
+      mode: "new" # ["abs", "new"] How to prune: either check for covisible frames everywhere or just in the last n frames
+      visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
+
+  # How often to prune and densify gaussians during optimization
+  prune_densify_every: 25 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
+  prune_densify_until: 55 # dont do this after this iteration
+
+  ## Densification parameters
+  densify:
+    # Vanilla 3DGS splitting and densification strategy
+    vanilla:
+      max_grad: 0.001 # Gaussians with gradients above this are split (smaller -> denser)
+      extent: 10  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
+      min_opacity: 0.05 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
+      max_screen_size: 30 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
+    
+  # How to Filter the Tracking Map before feeding into Mapper
+  filter: # Parameter for filtering incoming points from the SLAM system
+    multiview: True # Only initialize Gaussians that are consistent in multiple views
+    mv_count_th: 2 # Pixels need to be consistent within bin_thresh distance across these k views
+    bin_th: 0.1 # Distance between points for binning, this depends on the scene scale, so be careful!
+    min_disp_th: 0.05  # Relative to distribution, i.e. reject the lowest 1%
+    hard_disp_th: 0.05 # Absolute, i.e. reject depth > 5m
+    uncertainty: True # Only use very certain points for intializing Gaussians
+    conf_th: 0.1 # Only take pixels above this confidence (Usually dynamic objects and obvious unuseful pixels like sky are below 0.1) 
+
+# Offline Map Refinement for finetuning
+refinement:
+  iters: 500 # Optimize over this many different batches
+  batch_iters: 1 # Optimize each batch this many times
+  lr_factor: 0.5 # Change the learning rate for refinement since we already close to convergence
+  bs: 20 # Batch size for refinement 
+  prune_densify_every: 50 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densificatio# This has to be an uneven number
+  densify_until: 250 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
+  densify:
+    vanilla:
+      max_grad: 0.0005 # Gaussians with gradients above this are split (smaller -> denser)
+      extent: 20 # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
+      max_screen_size: 20 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
+      min_opacity: 0.05 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
+
+opt_params:
+  position_lr_init: 1e-3 # Default MonoGS: 0.00016 (RGB mode has x10)
+  position_lr_final: 5e-4 # Default MonoGS: 0.0000016
+  position_lr_max_steps: 100 # Default MonoGS: 30000
+
+loss:
+  # Weights
+  alpha1: 0.8 # Size of the mapping loss that the rgb takes up, the rest is depth
+  alpha2: 0.2 # Weight SSIM and L1 loss (default 0.85 is common in monocular depth estimation)
+  beta1: 6.0 # Regularizer on isotropic scale of the Gaussians (bigger -> more isotropic)
+  # Decide which terms to use
+  supervise_with_prior: True # Use the prior for supervision. If not, then use the current filtered map from SLAM (Hint: this is usually better as metrics are computed on all pixels)
+  with_ssim: True # Use SSIM on top of L1 loss (Hint: this is very useful for getting smoother surfaces)
+  with_edge_weight: False # Weight informative pixels with high image gradient higher in loss
+  with_depth_smoothness: True # Similarity loss between depth and image gradients
+  use_ms_ssim: True # Multi-Scale SSIM loss (Hint: This improves mainly PSNR at the cost of slightly worse LPIPS and L1)
+  depth_func: l1 # 'l1', 'log_l1', 'l1_huber', 'pearson' (Hint: We achieved best results simply with l1)
+
+# Parameters for transfer SLAM -> Renderer
+input:
+  pcd_downsample_init: 1 # This is a constant downsampling factor
+  pcd_downsample: 32 # You ideally have ~5-10k points per frame
