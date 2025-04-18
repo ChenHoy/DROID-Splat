@@ -436,7 +436,6 @@ class DepthVideo:
             self.poses[:cur_ix] = (lietorch.SE3(self.poses[:cur_ix]) * lietorch.SE3(self.poses[[0]]).inv()).data
             # Update visualization, etc.
             self.dirty[:cur_ix] = True
-            # TODO should we also use mapping_dirty here?
 
     def reproject(self, ii, jj):
         """project points from ii -> jj"""
@@ -568,6 +567,7 @@ class DepthVideo:
             confidence, idx = self.reduce_confidence(weight, ii)
             # Uncertainties are for [x, y] directions -> Take norm to get single scalar
             self.confidence[idx] = torch.norm(confidence, dim=1)
+
             # [t0, t1] window of bundle adjustment optimization
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
@@ -578,12 +578,11 @@ class DepthVideo:
             else:
                 disps_sens = self.disps_sens
 
-            # Running frontend and backend in parallel can sometimes trigger a malloc error
             droid_backends.ba(
                 self.poses,
                 self.disps,
                 self.intrinsics[intrinsic_common_id],
-                self.disps_sens,
+                disps_sens,
                 target,
                 weight,
                 eta,
@@ -603,10 +602,9 @@ class DepthVideo:
             # Reassigning intrinsics after optimization
             if self.opt_intr:
                 self.intrinsics[: self.counter.value] = self.intrinsics[intrinsic_common_id]
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
 
             self.mapping_dirty[t0:t1] = True
+            torch.cuda.synchronize()
 
     def linear_align_prior(self, min_num_points: int = 300, eps: float = 0.05) -> None:
         """Do a linear alignmnet between the prior and the current map after initialization.
@@ -680,9 +678,11 @@ class DepthVideo:
             confidence, idx = self.reduce_confidence(weight, ii)
             # Uncertainties are for [x, y] directions -> Take norm to get single scalar
             self.confidence[idx] = torch.norm(confidence, dim=1)
+
             # [t0, t1] window of bundle adjustment optimization
             if t1 is None:
                 t1 = max(ii.max().item(), jj.max().item()) + 1
+
             # Precondition
             # NOTE if priors have huge variances (like a generative diffusion model), dont use this!
             if linear_align_prior:
