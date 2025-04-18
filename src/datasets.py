@@ -953,19 +953,18 @@ class Azure(BaseDataset):
 class ScanNet(BaseDataset):
     def __init__(self, cfg: DictConfig, device: str = "cuda:0"):
         super(ScanNet, self).__init__(cfg, device)
-        max_frames = cfg.get("max_frames", -1)
-        if max_frames < 0:
-            max_frames = int(1e5)
         self.color_paths = sorted(
             glob.glob(os.path.join(self.input_folder, "color", "*.jpg")),
             key=lambda x: int(os.path.basename(x)[:-4]),
-        )[:max_frames]
+        )
         self.depth_paths = sorted(
             glob.glob(os.path.join(self.input_folder, "depth", "*.png")),
             key=lambda x: int(os.path.basename(x)[:-4]),
-        )[:max_frames]
-        self.load_poses(os.path.join(self.input_folder, "pose"))
-        self.poses = self.poses[:max_frames]
+        )
+        n_valid = self.load_poses(os.path.join(self.input_folder, "pose"))
+        self.poses = self.poses[:n_valid]
+        self.depth_paths = self.depth_paths[:n_valid]
+        self.color_paths = self.color_paths[:n_valid]
 
         if self.t_stop is not None:
             self.color_paths = self.color_paths[self.t_start : self.t_stop]
@@ -992,7 +991,11 @@ class ScanNet(BaseDataset):
             glob.glob(os.path.join(path, "*.txt")),
             key=lambda x: int(os.path.basename(x)[:-4]),
         )
-        for pose_path in pose_paths:
+        # NOTE For whatever reason, ScanNet has -inf poses on some scenes
+        # this is true for multiple of the last poses in the trajectory
+        # Its easier to filter this on the dataloader level than during evaluation, so we just cut the data for these off
+        last_valid_frame = -1
+        for i, pose_path in enumerate(pose_paths):
             with open(pose_path, "r") as f:
                 lines = f.readlines()
             ls = []
@@ -1000,7 +1003,12 @@ class ScanNet(BaseDataset):
                 l = list(map(float, line.split(" ")))
                 ls.append(l)
             c2w = np.array(ls).reshape(4, 4)
+            if np.isnan(c2w).any() or np.isinf(c2w).any():
+                last_valid_frame = i + 1
+                break
             self.poses.append(c2w)
+
+        return last_valid_frame
 
 
 class TUM_RGBD(BaseDataset):
