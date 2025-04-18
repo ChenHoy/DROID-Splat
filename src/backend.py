@@ -143,7 +143,7 @@ class Backend:
     def perform_ba(self, graph: FactorGraph, t_start: int, t_end: int, steps: int, iters: int, motion_only: bool):
         with self.video.get_lock():
             # NOTE chen: computing the scale of a scene is not straight-forward, we simply take the mean disparity as proxy
-            scales_before = self.video.disps[t_start:t_end].median(dim=[1, 2]).clone()
+            scales_before = self.video.disps[t_start:t_end].mean(dim=[1, 2]).clone()
             poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
 
         # Use t_start + 1 to always fix the first pose!
@@ -151,7 +151,7 @@ class Backend:
 
         with self.video.get_lock():
             poses_after = self.video.poses[t_start + 1 : t_end]  # Memoize pose before optimization
-            scales_after = self.video.disps[t_start:t_end].median(dim=[1, 2]).clone()
+            scales_after = self.video.disps[t_start:t_end].mean(dim=[1, 2]).clone()
             # Memoize pose change in self.video so other Processes can adapt their datastructures
             self.accumulate_pose_change(poses_before, poses_after, t0=t_start + 1, t1=t_end)
             # Memoize scale change in self.video so other Processes can adapt their datastructures
