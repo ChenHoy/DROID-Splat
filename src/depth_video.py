@@ -696,6 +696,12 @@ class DepthVideo:
             self.disps_sens.clamp_(min=1e-3)
             self.disps_sens_up.clamp_(min=1e-3)
 
+            # Dont use the noisy prior for backend in prgbd 
+            if self.optimize_scales:
+                disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
+            else:
+                disps_sens = self.disps_sens
+
             # Safgeguard the CUDA kernel
             with lock:
                 # Motion only Bundle Adjustment (MoBA)
@@ -703,7 +709,7 @@ class DepthVideo:
                     self.poses,
                     self.disps,
                     self.intrinsics[0],
-                    self.disps_sens,
+                    disps_sens,
                     target,
                     weight,
                     eta,

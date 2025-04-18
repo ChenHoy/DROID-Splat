@@ -739,7 +739,7 @@ class SLAM:
                 continue
 
             sema_backend.acquire()  # Aquire the semaphore (If the counter == 0, then this thread will be blocked)
-            sleep(0.1)  # Let multiprocessing cool down a little bit
+            sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
 
             ## Only run backend if we have enough RAM for it
             memoized_backend_count = self.ram_safeguard_backend(

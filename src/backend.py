@@ -245,15 +245,17 @@ class Backend:
         # If you have a large map, then keep this number really high or else the drift could mess up the map
         # NOTE chen: Using only the frontend keeps sometimes a better global scale than mixing frontend + backend if loop closures are missed!
         # (16 for DROID-SLAM), ((int(self.video.stereo) + (self.radius + 2) * 2) for GO-SLAM)
-        max_factors = self.max_factor * self.max_window  # NOTE was n instead of self.max_window in others
+        max_factors = self.max_factor * n  # NOTE was n instead of self.max_window in others
 
         graph = FactorGraph(self.video, self.update_op, self.device, "alt", max_factors, self.upsample)
-        n_edges = graph.add_proximity_factors(rad=self.radius, nms=self.nms, beta=self.beta, thresh=self.thresh)
+        n_edges = graph.add_proximity_factors(
+            rad=self.radius, nms=self.nms, beta=self.beta, thresh=self.thresh, remove=False
+        )
         # FIXME simply del and rebuild the graph in a sliding window fashion in case we have too many factors
         if n_edges > max_factors:
             self.info("Warning. Already going above the max. number of factors from proximity alone")
         # Filter out low confidence edges
-        graph.filter_edges()
+        # graph.filter_edges()
 
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)
