@@ -8,7 +8,7 @@ import ipdb
 import torch
 import torch.multiprocessing as mp
 
-from .utils.loop_utils import TrajectorySegment, TrajectorySegmentManager
+from .utils.loop_utils import TrajectorySegmentManager
 from .factor_graph import FactorGraph
 import lietorch
 
@@ -75,7 +75,6 @@ class BackendWrapper(torch.nn.Module):
             return
 
         # Safeguard: Run over the whole map only if its within hardware bounds
-        # TODO does it make sense to remove the frontend window?
         if cur_t > self.max_window:
             t_start = cur_t - self.max_window
         else:
@@ -198,7 +197,7 @@ class Backend:
 
         with lock:
             # NOTE chen: computing the scale of a scene is not straight-forward, we simply take the mean disparity as proxy
-            scales_before = self.video.disps[t_start:t_end].mean(dim=[1, 2]).clone()
+            scales_before = self.video.disps[t_start:t_end].median(dim=[1, 2]).clone()
             poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
 
         # Use t_start + 1 to always fix the first pose!
@@ -208,7 +207,7 @@ class Backend:
 
         with lock:
             poses_after = self.video.poses[t_start + 1 : t_end]  # Memoize pose before optimization
-            scales_after = self.video.disps[t_start:t_end].mean(dim=[1, 2]).clone()
+            scales_after = self.video.disps[t_start:t_end].median(dim=[1, 2]).clone()
             # Memoize pose change in self.video so other Processes can adapt their datastructures
             self.accumulate_pose_change(poses_before, poses_after, t0=t_start + 1, t1=t_end)
             # Memoize scale change in self.video so other Processes can adapt their datastructures
@@ -258,7 +257,7 @@ class Backend:
 
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)
-            # NOTE we get much better results when also including the neighbors of loop edges for more constraints
+            # NOTE when adding loop edges, we can constrain the map even more by adding the neighbors for each edge
             graph.add_neighbors(add_ii, add_jj, radius=3)
 
         self.perform_ba(graph, t_start, t_end, steps, iters, motion_only, lock=lock)
