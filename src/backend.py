@@ -245,7 +245,7 @@ class Backend:
         # If you have a large map, then keep this number really high or else the drift could mess up the map
         # NOTE chen: Using only the frontend keeps sometimes a better global scale than mixing frontend + backend if loop closures are missed!
         # (16 for DROID-SLAM), ((int(self.video.stereo) + (self.radius + 2) * 2) for GO-SLAM)
-        max_factors = self.max_factor * n  # NOTE was n instead of self.max_window in others
+        max_factors = self.max_factor * self.max_window
 
         graph = FactorGraph(self.video, self.update_op, self.device, "alt", max_factors, self.upsample)
         n_edges = graph.add_proximity_factors(

@@ -71,6 +71,7 @@ class Frontend:
         self.window = cfg.tracking.frontend.get("window", 25)
         self.thresh = cfg.tracking.frontend.get("thresh", 16.0)
         self.radius = cfg.tracking.frontend.get("radius", 2)
+        self.pose_interpolation = cfg.tracking.frontend.get("pose_interpolation", "linear")
 
         self.steps1 = cfg.tracking.frontend.get("steps1", 4)
         self.steps2 = cfg.tracking.frontend.get("steps2", 2)
@@ -235,7 +236,7 @@ class Frontend:
 
         # Update
         elif self.is_initialized and self.t1 < self.video.counter.value:
-            self.__update(lock=lock)
+            self.__update(lock=lock, pose_interpolation=self.pose_interpolation)
 
         else:
             pass

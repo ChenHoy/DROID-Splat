@@ -2,10 +2,11 @@ defaults:
   - /loop_closure/base@_here_
 
 threshold: 0.5 # Feature distance
-max_orientation_difference: 15.0 # Rotation difference in degrees (avg over rpy axis) of the estimated keyframe poses
+max_orientation_difference: 10.0 # Rotation difference in degrees (avg over rpy axis) of the estimated keyframe poses
 
 max_2d_residual: 2.0 # Max. 2D residual [px] for 2d keypoint matching and 3d backprojection
-min_num_inliers: 10 # At least have 10 keypoints for matching
+# FIXME i think this is inconsistent on ScanNet
+min_num_inliers: 7 # At least have 10 keypoints for matching
 # RANSAC
 perc_inliers: 0.3 # Inlier percentage for RANSAC
 # RANSAC uses the 3D distance between points here
@@ -13,3 +14,4 @@ perc_inliers: 0.3 # Inlier percentage for RANSAC
 ransac_thresh: 0.1 # The threshold depends on the scene scale!
 ransac_iters: 500
 max_depth: 15.0 # Only use 3D keypoints < max_depth 
+nms: 20 # Suppression for redundant matches (The smaller, the closer loops are allowed to be)

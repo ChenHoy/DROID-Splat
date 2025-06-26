@@ -1,39 +1,43 @@
 defaults:
  - _self_
  - mapping: tum.yaml
- - tracking: kitti.yaml
- - loop_closure: eigen.yaml
- - data: KITTI/base.yaml
+ - tracking: scannet.yaml
+ - loop_closure: scannet.yaml
+ - data: ScanNet/scene0106.yaml
+#  - data: TUM_RGBD/base.yaml
+#  - data: KITTI/base.yaml
 #  - data: Replica/base.yaml
 #  - data: Custom/hannover.yaml
 
 hydra:
   run:
-    dir: outputs/${hydra.job.name}/${mode}/${now:%Y-%m-%d_%H-%M-%S}_${mode}
+    # dir: outputs/scannet/${mode}/${hydra.job.name}/test_better/naive_${now:%Y-%m-%d_%H-%M-%S}_${mode}
+    dir: outputs/scannet/${mode}/${hydra.job.name}/test_better/loop_edges_plus_3_${now:%Y-%m-%d_%H-%M-%S}_${mode}
+    # dir: outputs/scannet/${mode}/${hydra.job.name}/test_better/lc_w_rgbd_scaling_${now:%Y-%m-%d_%H-%M-%S}_${mode}
   job:
     chdir: False
-    name: test_kitti # Change this to your experiment run name, e.g. the dataset you run on or the run of a configuration
+    name: scannet # Change this to your experiment run name, e.g. the dataset you run on or the run of a configuration
 
 device: "cuda:0"
 sync_method: strict
 
-stride: 1
-mode: "prgbd"  # 'mono', 'prgbd', 'rgbd'
+stride: 2
+mode: "rgbd"  # 'mono', 'prgbd', 'rgbd'
 mono_depth: "metric3d-vit_giant2" # 'lotus_d' 'zoed-nk', 'metric3d-vit_giant2', 'depthany-vitl-outdoor', 'depthany-vitl-indoor'
 with_dyn: False # Filter out dynamic objects if masks are provided in the dataset
 opt_intr: False # Optimizes additional intrinsic parameters
-sleep_delay: 0.45 # Sleep timer to cool off the system sometimes
+sleep_delay: 0.4 # Sleep timer to cool off the system sometimes
 
 ## Components
 run_frontend: True # This should always be True!
 run_backend: True # Global optimization
 # NOTE both loop detection and closure need to be run together
 run_loop_detection: True # Detect loops based on visual similarity
-run_loop_closure: True # Perform a classical loop closure with the candidates
+run_loop_closure: False # Perform a classical loop closure with the candidates
 run_mapping: False # Rendering 
 
 ## Visualizations / GUIs
-run_visualization: True
+run_visualization: False
 run_mapping_gui: False
 show_stream: False
 # plot_uncertainty: True # To show the uncertainty of the pose graph optimization
@@ -50,9 +54,9 @@ save_rendered_predictions: True
 # In an optimal setup, the Frontend would be the bottlenck, which can run at ~20-30FPS
 # Mapping takes ~5-7 iters/s, i.e. with a well tuned system each Render update hits <= 0.4fps
 # NOTE for long-term outdoor SLAM, we dont need this high backend frequency! e.g. on KITTI every 20th is ok
-backend_every: 25 # Run global bundle adjustment only every k Frontend updates
+backend_every: 8 # Run global bundle adjustment only every k Frontend updates
 # NOTE this is a trade-off between accuracy and speed, we can also add more compute to refinement!
 mapper_every: 15 # Run Renderer every k Frontend updates
 
 ## Evaluation
-evaluate: False
+evaluate: True

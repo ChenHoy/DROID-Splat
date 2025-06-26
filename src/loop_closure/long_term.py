@@ -452,28 +452,21 @@ class LongTermLoopClosure:
         """
         safe_i, _ = final_est.shape
         res, s = final_est.tensor().to(self.video.device).split([7, 1], dim=1)
-        cur_t = self.video.counter.value
-
-        # TODO delete in case we dont need the deltas
-        # FIXME Deltas I think are needed for rescaling the Gaussian Mapper
-        s1 = torch.ones(cur_t, device=self.video.device)
-        s1[:safe_i] = s.squeeze()
-
         with self.video.get_lock():
+            cur_t = self.video.counter.value
+            s1 = torch.ones(cur_t, device=self.video.device)
+            s1[:safe_i] = s.squeeze()
+
             self.video.poses[:safe_i] = SE3(res).inv().data
 
-            # HACK Dont ruin the absolute scale in rgbd mode
-            if not self.video.mode == "rgbd":
-                self.video.disps[:safe_i] /= s.view(safe_i, 1, 1)
-                self.video.disps_up[:safe_i] /= s.view(safe_i, 1, 1)
+            self.video.disps[:safe_i] /= s.view(safe_i, 1, 1)
+            self.video.disps_up[:safe_i] /= s.view(safe_i, 1, 1)
+            # TODO get this to work in prgbd mode
             # NOTE I have the feeling, that we are already good even without scaling the prior
             # In case we are in prgbd mode, where the prior is scaled as well -> This works actually better
             # if self.video.optimize_scales:
             #     self.video.disps_sens[:safe_i] /= s.view(safe_i, 1, 1)
             #     self.video.disps_sens_up[:safe_i] /= s.view(safe_i, 1, 1)
-
-            # TODO do we really ever need the deltas?
-            self._rescale_deltas(s1)
 
             # normalize so we always have identity pose for the first frame
             self.video.poses[:cur_t] = (SE3(self.video.poses[:cur_t]) * SE3(self.video.poses[[0]]).inv()).data
@@ -487,25 +480,21 @@ class LongTermLoopClosure:
 
             # self.video.normalize()
             self.video.dirty[:cur_t] = True  # Update visualization
+            self._rescale_deltas(
+                s1
+            )  # Memoize the scale changes in the video buffer for other Processs (Gaussian Splatting)
 
-    # TODO do we really need this?
     def _rescale_deltas(self, s):
-        """Rescale the poses of removed frames by their predicted scales"""
+        """We store the deltas in the video buffer, in case we have multiple loop closures without a reset, we chain the estimated scale changes."""
+        with self.video.get_lock():
+            # TODO is it correct to just multiply?
+            self.video.scale_changes[: len(s)] *= s.squeeze()
 
-        tstamp_2_rescale = {}
+    def _reset_deltas(self, s):
         with self.video.get_lock():
             cur_t = self.video.counter.value
-
-        for i in range(cur_t):
-            tstamp_2_rescale[self.video.timestamp[i]] = s[i]
-
-        # TODO we dont really use the deltas, because our pose interpolation works differently
-        for t, (t0, dP) in self.video.delta.items():
-            t_src = t
-            while t_src in self.video.delta:
-                t_src, _ = self.video.delta[t_src]
-            s1 = tstamp_2_rescale[t_src]
-            self.video.delta[t] = (t0, dP.scale(s1))
+        s1 = torch.ones(cur_t, device=self.video.device)
+        self.video.scale_changes[:cur_t] = s1
 
     def confirm_loop(self, i, j):
         """Record the loop closure so we don't have redundant edges"""

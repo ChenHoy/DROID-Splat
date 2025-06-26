@@ -811,8 +811,7 @@ class SLAM:
         self.all_finished += 1
         self.info("Backend done!")
 
-    # FIXME chen: update with new delta's from the loop closure / video object
-    # FIXME chen: Check if our reanchoring actually works on some problems, where we drift a lot
+    # TODO check if the rescale works properly for Gaussian Splatting as well when doing a loop closure
     def maybe_reanchor_gaussians(
         self, pose_thresh: float = 0.001, scale_thresh: float = 0.1, with_scales: bool = False
     ) -> None:

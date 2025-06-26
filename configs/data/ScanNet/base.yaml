@@ -1,5 +1,5 @@
 dataset: "scannet"
-input_folder: "/media/chen/data/ScanNet/scans/scene0000_00/" 
+input_folder: "/media/data/ScanNet/scans/scene0000_00/" 
 png_depth_scale: 1000.0 #for depth image in png format
 
 ### original camera parameters

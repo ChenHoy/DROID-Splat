@@ -2,5 +2,5 @@ defaults:
   # NOTE we need to use an absolute path here, because otherwise it will not be cfg.data in the Dict
   - /data/ScanNet/base@_here_
 
-gt_mesh_path: /media/chen/data/ScanNet/scans/scene0169_00/scene0169_00_vh_clean.ply
-input_folder: /media/chen/data/ScanNet/scans/scene0169_00
+gt_mesh_path: /media/data/ScanNet/scans/scene0169_00/scene0169_00_vh_clean.ply
+input_folder: /media/data/ScanNet/scans/scene0169_00

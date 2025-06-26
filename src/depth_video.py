@@ -70,15 +70,11 @@ class DepthVideo:
         self.poses = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
         self.poses_gt = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
 
-        # store relative poses for removed frames
-        self.delta = {}  # NOTE we use these for the Pose Graph Optimization (PGO) during loop closures
-
         # Measure the change of poses before and after backend optimization, so we can track large map changes
         self.pose_changes = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
-        # TODO chen: you rarely have large SCALE changes on indoor scenes, which is why we have not previously observed this
-        # Loop closures and large scale changes can happen on outdoor scenes pretty quickly
-        # FIXME once we initialized super large-scale big Gaussians we cannot shrink them to the correct size after closure
-        # Reoptimization is not helpful in these cases as Gaussians cannot travel large distances
+        # Measure scale changes, this gets adressed by recording backend optimizations and loop closures
+        # TODO update the scale_change attribute after a succesful loop closure instead of recording the deltas for a frame
+        # Since we also just multiply disps with scale s, this should be the same procedure
         self.scale_changes = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()  # Float
 
         self.disps = torch.ones(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
@@ -313,13 +309,13 @@ class DepthVideo:
         s = self.scale_factor
         with self.get_lock():
             if self.upsampled:
-                image = self.images[index].clone().float().contiguous().to(device) / 255.0  # [H, W, 3]
+                image = self.images[index].clone()  # [H, W, 3]
                 static_mask = self.static_masks[index].clone().to(device)  # [H, W]
                 intrinsics = self.intrinsics[0].clone().contiguous().to(device) * s  # [4]
                 disp_prior = self.disps_sens_up[index].contiguous().clone().to(device)  # [H, W]
             else:
                 # Color is always stored in the original resolution, downsample here to match
-                image = self.images[index, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].float().clone() / 255.0
+                image = self.images[index, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s].clone()
                 image = image.contiguous().to(device)  # [C, H // s, W // s]
                 static_mask = self.static_masks[index, ..., int(s // 2 - 1) :: s, int(s // 2 - 1) :: s]
                 static_mask = static_mask.contiguous().to(device)  # [H // s, W // s]
@@ -696,7 +692,7 @@ class DepthVideo:
             self.disps_sens.clamp_(min=1e-3)
             self.disps_sens_up.clamp_(min=1e-3)
 
-            # Dont use the noisy prior for backend in prgbd 
+            # Dont use the noisy prior for backend in prgbd
             if self.optimize_scales:
                 disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
             else:

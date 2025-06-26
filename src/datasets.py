@@ -538,7 +538,7 @@ class TotalRecon(BaseDataset):
         self.has_dyn_masks = True
 
         self.load_poses(self.pose_paths)
-        # self.set_intrinsics()
+        self.set_intrinsics()
 
         # Set number of images for loading poses
         self.n_img = len(self.color_paths)
