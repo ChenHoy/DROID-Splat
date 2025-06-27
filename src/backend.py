@@ -6,6 +6,7 @@ from omegaconf import DictConfig
 import ipdb
 
 import torch
+import torch.multiprocessing as mp
 import numpy as np
 
 from .factor_graph import FactorGraph
@@ -52,6 +53,7 @@ class BackendWrapper(torch.nn.Module):
         local_graph: Optional[FactorGraph] = None,
         add_ii: Optional[torch.Tensor] = None,
         add_jj: Optional[torch.Tensor] = None,
+        lock: Optional[mp.Lock] = None,
     ):
         """Run the backend optimization over the whole map."""
 
@@ -67,12 +69,20 @@ class BackendWrapper(torch.nn.Module):
 
         if self.enable_loop:
             _, n_edges = self.optimizer.loop_ba(
-                t_start, t_end, self.steps, self.iters, False, local_graph=local_graph, add_ii=add_ii, add_jj=add_jj
+                t_start,
+                t_end,
+                self.steps,
+                self.iters,
+                False,
+                local_graph=local_graph,
+                add_ii=add_ii,
+                add_jj=add_jj,
+                lock=lock,
             )
             msg = "Loop BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
         else:
             _, n_edges = self.optimizer.dense_ba(
-                t_start, t_end, self.steps, self.iters, motion_only=False, add_ii=add_ii, add_jj=add_jj
+                t_start, t_end, self.steps, self.iters, motion_only=False, add_ii=add_ii, add_jj=add_jj, lock=lock
             )
             msg = "Full BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
         self.info(msg)
@@ -140,18 +150,32 @@ class Backend:
         self.video.scale_changes.clamp_(0.01, 100.0)  # Clamp scale changes to reasonable values
 
     @torch.no_grad()
-    def perform_ba(self, graph: FactorGraph, t_start: int, t_end: int, steps: int, iters: int, motion_only: bool):
-        with self.video.get_lock():
+    def perform_ba(
+        self,
+        graph: FactorGraph,
+        t_start: int,
+        t_end: int,
+        steps: int,
+        iters: int,
+        motion_only: bool,
+        lock: Optional[mp.Lock] = None,
+    ):
+        if lock is None:
+            lock = self.video.get_lock()
+
+        with lock:
             # NOTE chen: computing the scale of a scene is not straight-forward, we simply take the mean disparity as proxy
-            scales_before = self.video.disps[t_start:t_end].mean(dim=[1, 2]).clone()
+            scales_before = self.video.disps[t_start:t_end].flatten(start_dim=1).median(dim=1)[0].clone()
             poses_before = self.video.poses[t_start + 1 : t_end].clone()  # Memoize pose before optimization
 
         # Use t_start + 1 to always fix the first pose!
-        graph.update_lowmem(t0=t_start + 1, t1=t_end, steps=steps, iters=iters, max_t=t_end, motion_only=motion_only)
+        graph.update_lowmem(
+            t0=t_start + 1, t1=t_end, steps=steps, iters=iters, max_t=t_end, motion_only=motion_only, lock=lock
+        )
 
-        with self.video.get_lock():
+        with lock:
             poses_after = self.video.poses[t_start + 1 : t_end]  # Memoize pose before optimization
-            scales_after = self.video.disps[t_start:t_end].mean(dim=[1, 2]).clone()
+            scales_after = self.video.disps[t_start:t_end].flatten(start_dim=1).median(dim=1)[0].clone()
             # Memoize pose change in self.video so other Processes can adapt their datastructures
             self.accumulate_pose_change(poses_before, poses_after, t0=t_start + 1, t1=t_end)
             # Memoize scale change in self.video so other Processes can adapt their datastructures
@@ -167,6 +191,7 @@ class Backend:
         motion_only: bool = False,
         add_ii: Optional[torch.Tensor] = None,
         add_jj: Optional[torch.Tensor] = None,
+        lock: Optional[mp.Lock] = None,
     ):
         """Dense Bundle Adjustment over the whole map. Used for global optimization in the Backend.
 
@@ -178,8 +203,10 @@ class Backend:
         """
 
         with self.video.get_lock():
-            if t_end is None:
-                t_end = self.video.counter.value
+            cur_t = self.video.counter.value
+
+        if t_end is None:
+            t_end = cur_t
         n = t_end - t_start
 
         # NOTE chen: This is one of the most important numbers for loop closures!
@@ -203,7 +230,7 @@ class Backend:
             # NOTE when adding loop edges, we can constrain the map even more by adding the neighbors for each edge
             graph.add_neighbors(add_ii, add_jj, radius=3)
 
-        self.perform_ba(graph, t_start, t_end, steps, iters, motion_only)
+        self.perform_ba(graph, t_start, t_end, steps, iters, motion_only, lock=lock)
         self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
 
         # Free up memory again after optimization
@@ -227,6 +254,7 @@ class Backend:
         local_graph: Optional[FactorGraph] = None,
         add_ii: Optional[torch.Tensor] = None,
         add_jj: Optional[torch.Tensor] = None,
+        lock: Optional[mp.Lock] = None,
     ):
         """Perform an update on the graph with loop closure awareness according to GO-SLAM. This uses a higher step size
         for optimization than the dense bundle adjustment of the backend and rest of frontend.
@@ -280,7 +308,7 @@ class Backend:
 
         # Filter out low confidence edges
         graph.filter_edges()
-        self.perform_ba(graph, t_start, t_end, steps, iters, motion_only)
+        self.perform_ba(graph, t_start, t_end, steps, iters, motion_only, lock=lock)
         self.video.dirty[t_start:t_end] = True  # Mark optimized frames, for updating visualization
 
         # Free up memory again after optimization
