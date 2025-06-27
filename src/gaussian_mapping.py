@@ -1004,7 +1004,7 @@ class GaussianMapper(object):
     def update_gui(self, last_new_cam: Camera) -> None:
         # Get the latest frame we added together with the input
         if len(self.new_cameras) > 0 and last_new_cam is not None:
-            img = last_new_cam.original_image
+            img = last_new_cam.original_image / 255.0  # uint8 -> float [0, 1] for visualization
             if last_new_cam.depth is not None:
                 if not self.loss_params.supervise_with_prior:
                     gtdepth = last_new_cam.depth.detach().clone().cpu().numpy()

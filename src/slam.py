@@ -148,6 +148,7 @@ class SLAM:
         # Objects for communicating between processes
         self.input_pipe = mp.Queue()  # Communicate data from Stream -> main thread
         self.mapping_queue = mp.Queue()  # Communicate data between Mapping <-> main thread
+        self.ba_lock = mp.Lock()  # Block the bundle adjustment optimization explicitly
         self.received_mapping = mp.Event()  # Ensure we have received the mapping state before moving on
         self.loop_queue = mp.Queue()  # Communicate loop candidates between Loop Detection -> Backend thread
 
@@ -274,6 +275,7 @@ class SLAM:
         sema_backend: mp.Semaphore,
         sema_mapping: mp.Semaphore,
         input_queue: mp.Queue,
+        ba_lock: mp.Lock = None,
     ) -> None:
         """Main driver of framework by looping over the input stream"""
 
@@ -324,7 +326,7 @@ class SLAM:
                 with communication_lock:
                     cond_mapping.wait_for(lambda: self.mapping_done > 0)
 
-            self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask)
+            self.frontend(timestamp, image, depth, intrinsic, gt_pose, static_mask=static_mask, lock=ba_lock)
 
             maybe_notify_other_threads_to_start()
             # Check if we actually inserted a new frame and optimized
@@ -422,8 +424,49 @@ class SLAM:
             loop_ii, loop_jj = None, None
         return loop_ii, loop_jj
 
+    def backend_op(
+        self,
+        add_ii: Optional[torch.Tensor] = None,
+        add_jj: Optional[torch.Tensor] = None,
+        lock: Optional[mp.Lock] = None,
+    ) -> None:
+        """Simple wrapper to call backend depending on which method we want to use. Reason being, that we also use the
+        frontend factor graph for GO-SLAM's loop aware Bundle Adjustment.
+        """
+        # Use GO-SLAM's loop closure bundle adjustment (This will also consider edges with very small motion, but only in a loop window)
+        if self.backend.enable_loop:
+            self.backend(local_graph=self.frontend.optimizer.graph, add_ii=add_ii, add_jj=add_jj, lock=lock)
+        else:
+            # Use vanilla DROID Graph for Bundle adjustment
+            self.backend(add_ii=add_ii, add_jj=add_jj, lock=lock)
+
+    def final_backend_op(
+        self,
+        t_start=0,
+        t_end=-1,
+        steps: int = 6,
+        add_ii=None,
+        add_jj=None,
+        n_repeat: int = 2,
+        lock: Optional[mp.Lock] = None,
+    ) -> None:
+        """Make two final refinements over the whole global map. This explicitly calls the optimizer function,
+        so this does not have a backend window limit, i.e. this actually runs over the whole map."""
+        for i in range(n_repeat):
+            # Use vanilla Graph for Bundle adjustment
+            _, n_edges = self.backend.optimizer.dense_ba(
+                t_start=t_start, t_end=t_end, steps=steps, add_ii=add_ii, add_jj=add_jj, lock=lock
+            )
+            msg = "Full BA: [{}, {}]; Using {} edges!".format(t_start, t_end, n_edges)
+            self.backend.info(msg)
+
     def global_ba(
-        self, rank: int, sema_backend: mp.Semaphore, loop_queue: Optional[mp.Queue] = None, run: bool = False
+        self,
+        rank: int,
+        ba_lock: mp.Lock,
+        sema_backend: mp.Semaphore,
+        loop_queue: Optional[mp.Queue] = None,
+        run: bool = False,
     ) -> None:
         self.info("Backend thread started!")
         self.all_trigered += 1
@@ -432,6 +475,7 @@ class SLAM:
         all_lc_candidates = []
         all_loop_ii, all_loop_jj = None, None
 
+        ### Online Loop
         while self.tracking_finished < 1 and run:
             if self.backend_can_start < 1:
                 continue
@@ -443,6 +487,7 @@ class SLAM:
             memoized_backend_count = self.ram_safeguard_backend(
                 max_ram=self.max_ram_usage, count_to_set=memoized_backend_count
             )
+            # Backend got deactivated due to OOM
             if self.backend is None:
                 continue
 
@@ -457,43 +502,32 @@ class SLAM:
                         all_loop_ii, all_loop_jj = merge_candidates(all_lc_candidates)
 
             ### Actual Backend call
-            if self.backend.enable_loop:
-                self.backend(local_graph=self.frontend.optimizer.graph, add_ii=all_loop_ii, add_jj=all_loop_jj)
-            else:
-                self.backend(add_ii=all_loop_ii, add_jj=all_loop_jj)
+            self.backend_op(add_ii=all_loop_ii, add_jj=all_loop_jj, lock=ba_lock)
 
         sleep(self.sleep_time)  # Let other threads finish their last optimization
         # Try to instantiate again if needed
         memoized_backend_count = self.ram_safeguard_backend(
             max_ram=self.max_ram_usage, count_to_set=memoized_backend_count
         )
-
-        if self.backend is not None and run:
-            self.info(f"Ran Backend {self.backend.count} times before refinement!")
-
-        # Run one last time after tracking finished
-        if run and self.backend is not None and self.backend.do_refinement:
-            with self.video.get_lock():
-                t_end = self.video.counter.value
-
-            if self.backend is None:
+        if run:
+            if self.backend is not None:
+                self.info(f"Ran Backend {self.backend.count} times before refinement!")
+            else:
                 self.info(
                     """Backend Refinement does not fit into memory! Please run the system in a 
                     different configuration for this to work. (Maybe use lower resolution)"""
                 )
-            else:
+
+        ### Run one last time after tracking finished
+        if run and self.backend is not None and self.backend.do_refinement:
+            with self.video.get_lock():
+                t_end = self.video.counter.value
+
                 msg = "Optimize full map: [{}, {}]!".format(0, t_end)
                 self.backend.info(msg)
+                self.final_backend_op(t_start=0, t_end=t_end, add_ii=all_loop_ii, add_jj=all_loop_jj, lock=ba_lock)
 
-                ### 2 Refinement calls
-                _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
-                _, _ = self.backend.optimizer.dense_ba(t_start=0, t_end=t_end, steps=6)
-
-                del self.backend
-                torch.cuda.empty_cache()
-                gc.collect()
-
-        elif self.backend is not None:
+        if self.backend is not None:
             del self.backend
             torch.cuda.empty_cache()
             gc.collect()
@@ -502,7 +536,9 @@ class SLAM:
         self.all_finished += 1
         self.info("Backend done!")
 
-    def maybe_reanchor_gaussians(self, pose_thresh: float = 0.001, scale_thresh: float = 0.1) -> None:
+    def maybe_reanchor_gaussians(
+        self, pose_thresh: float = 0.001, scale_thresh: float = 0.1, with_scales: bool = False
+    ) -> None:
         """Reanchor the Gaussians to follow a big map update.
         For this purpose we simply track the pose changes after a backend optimization."""
         with self.video.get_lock():
@@ -522,17 +558,18 @@ class SLAM:
                 self.video.pose_changes[to_update] = unit[to_update]  # Reset the pose update
 
         # Rescale the Gaussians to follow a scale changes (This happens prominently when doing loop closures)
-        # scale_delta = torch.abs(self.video.scale_changes - 1.0)
-        # to_update = (scale_delta > scale_thresh).nonzero().squeeze()  # Check for frames with large updates
-        # if (
-        #     self.gaussian_mapper is not None
-        #     and self.gaussian_mapper.warmup < self.frontend.optimizer.count
-        #     and to_update.numel() > 0
-        # ):
-        #     self.info(f"Rescale Gaussians at {to_update} due to large scale change in map!")
-        #     self.gaussian_mapper.rescale_gaussians(to_update, self.video.pose_changes[to_update])
-        #     with self.video.get_lock():
-        #         self.video.scale_changes[to_update] = 1.0  # Reset the scale update
+        if with_scales:
+            scale_delta = torch.abs(self.video.scale_changes - 1.0)
+            to_update = (scale_delta > scale_thresh).nonzero().squeeze()  # Check for frames with large updates
+            if (
+                self.gaussian_mapper is not None
+                and self.gaussian_mapper.warmup < self.frontend.optimizer.count
+                and to_update.numel() > 0
+            ):
+                self.info(f"Rescale Gaussians at {to_update} due to large scale change in map!")
+                self.gaussian_mapper.rescale_gaussians(to_update, self.video.scale_changes[to_update])
+                with self.video.get_lock():
+                    self.video.scale_changes[to_update] = 1.0  # Reset the scale update
 
     def gaussian_mapping(
         self,
@@ -1029,12 +1066,13 @@ class SLAM:
                     self.sema_backend,
                     self.sema_mapping,
                     self.input_pipe,
+                    self.ba_lock,
                 ),
                 name="Frontend Tracking",
             ),
             mp.Process(
                 target=self.global_ba,
-                args=(2, self.sema_backend, self.loop_queue, self.cfg.run_backend),
+                args=(2, self.ba_lock, self.sema_backend, self.loop_queue, self.cfg.run_backend),
                 name="Backend",
             ),
             mp.Process(

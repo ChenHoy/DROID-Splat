@@ -534,7 +534,7 @@ def eval_rendering(
         # NOTE we detach tensors to the CPU, because for some scenes we have a lot of images and we want to save memory
         cam.image_tensors_to("cuda")  # Make sure everything is on the GPU for Rendering
         _, gt_image, gt_depth, _, _ = dataset[idx]
-        gt_image = gt_image.float().squeeze(0) / 255.0
+        gt_image = gt_image.float().squeeze(0) / 255.0  # Uint8 -> float conversion on demand
         if has_gt_depth:
             gt_depth = gt_depth.squeeze(0)
 

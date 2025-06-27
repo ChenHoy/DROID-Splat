@@ -202,9 +202,7 @@ class BaseDataset(Dataset):
             self.W_out + self.W_edge * 2,
         )
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
-        color_data = (
-            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
-        )  # bgr -> rgb, [0, 1]
+        color_data = torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :]  # bgr -> rgb
         color_data = color_data.unsqueeze(dim=0)  # [1, C, H, W]
 
         # crop image edge, there are invalid value on the edge of the color image

@@ -6,6 +6,7 @@ from copy import deepcopy
 import numpy as np
 
 import torch
+import torch.multiprocessing as mp
 from .modules import CorrBlock, AltCorrBlock
 from .geom import projective_ops as pops
 
@@ -467,7 +468,17 @@ class FactorGraph:
         return weight
 
     @torch.cuda.amp.autocast(enabled=True)
-    def update(self, t0=None, t1=None, iters=4, use_inactive=False, lm=1e-4, ep=0.1, motion_only=False):
+    def update(
+        self,
+        t0=None,
+        t1=None,
+        iters=4,
+        use_inactive=False,
+        lm=1e-4,
+        ep=0.1,
+        motion_only=False,
+        lock: Optional[mp.Lock] = None,
+    ):
         """run update operator on factor graph"""
 
         # motion features
@@ -518,7 +529,7 @@ class FactorGraph:
             weight = weight.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
 
             if motion_only:
-                self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, True)
+                self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, True, lock=lock)
             else:
                 if self.scale_priors:
                     # Use pure Python BA implementation with scale correction for priors
@@ -526,7 +537,7 @@ class FactorGraph:
                     self.video.ba_prior(target, weight, damping, ii, jj, t0=t0, t1=t1, iters=iters + 2, lm=lm, ep=ep)
 
                 else:
-                    self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False)
+                    self.video.ba(target, weight, damping, ii, jj, t0, t1, iters, lm, ep, False, lock=lock)
 
             if self.upsample:
                 self.video.upsample(torch.unique(self.ii, sorted=True), upmask)
@@ -535,9 +546,21 @@ class FactorGraph:
 
     @torch.cuda.amp.autocast(enabled=False)
     def update_lowmem(
-        self, t0=None, t1=None, iters=8, steps=2, max_t=None, lm: float = 5e-5, ep: float = 5e-2, motion_only=False
+        self,
+        t0=None,
+        t1=None,
+        iters=8,
+        steps=2,
+        max_t=None,
+        lm: float = 5e-5,
+        ep: float = 5e-2,
+        motion_only=False,
+        lock: Optional[mp.Lock] = None,
     ):
         """run update operator on factor graph - reduced memory implementation"""
+        if lock is None:
+            lock = self.video.get_lock()
+
         with self.video.get_lock():
             cur_t = self.video.counter.value
 
@@ -575,20 +598,21 @@ class FactorGraph:
                 # edge ii == jj means stereo pair, corr1: [B, N, (2r+1)^2 * num_levels, H, W]
                 corr1 = corr_op(coords1[:, v], rig * iis, rig * jjs + (iis == jjs).long())
 
-                with torch.cuda.amp.autocast(enabled=True):
-                    # [B, N, C, H, W], [B, N, H, W, 2],[B, N, H, W, 2], [B, s, H, W], [B, s, 8*9*9, H, W]
-                    net, delta, weight, damping, upmask = self.update_op(
-                        self.net[:, v], self.video.inps[None, iis], corr1, motion[:, v], iis, jjs
-                    )
-                    # weight = self.remove_dynamic_pixels(weight, iis)
+                with lock:
+                    with torch.cuda.amp.autocast(enabled=True):
+                        # [B, N, C, H, W], [B, N, H, W, 2],[B, N, H, W, 2], [B, s, H, W], [B, s, 8*9*9, H, W]
+                        net, delta, weight, damping, upmask = self.update_op(
+                            self.net[:, v], self.video.inps[None, iis], corr1, motion[:, v], iis, jjs
+                        )
+                        # weight = self.remove_dynamic_pixels(weight, iis)
 
-                    if self.upsample:
-                        self.video.upsample(torch.unique(iis, sorted=True), upmask)
+                        if self.upsample:
+                            self.video.upsample(torch.unique(iis, sorted=True), upmask)
 
-                self.net[:, v] = net
-                self.target[:, v] = coords1[:, v] + delta.float()
-                self.weight[:, v] = weight.float()
-                self.damping[torch.unique(iis, sorted=True)] = damping
+                    self.net[:, v] = net
+                    self.target[:, v] = coords1[:, v] + delta.float()
+                    self.weight[:, v] = weight.float()
+                    self.damping[torch.unique(iis, sorted=True)] = damping
 
             # Free memory manually
             del corr1
@@ -606,5 +630,4 @@ class FactorGraph:
             weight = self.weight.view(-1, ht, wd, 2).permute(0, 3, 1, 2).contiguous()
 
             # dense bundle adjustment, fix the first keyframe, while optimize within [1, t]
-            # FIXME this somehow collides with Frontend
-            self.video.ba(target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep, motion_only)
+            self.video.ba(target, weight, damping, self.ii, self.jj, t0, t1, iters, lm, ep, motion_only, lock=lock)
