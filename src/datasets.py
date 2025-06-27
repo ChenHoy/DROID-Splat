@@ -177,6 +177,7 @@ class BaseDataset(Dataset):
             depth_data /= self.png_depth_scale
         elif ".npy" in depth_path:
             depth_data = np.load(depth_path).astype(np.float32)
+
         elif ".depth" in depth_path:  # NOTE leon: totalrecon depth files
             with open(depth_path, "rb") as depth_fh:
                 raw_bytes = depth_fh.read()
@@ -202,9 +203,7 @@ class BaseDataset(Dataset):
             self.W_out + self.W_edge * 2,
         )
         color_data = cv2.resize(color_data, (W_out_with_edge, H_out_with_edge))
-        color_data = (
-            torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :] / 255.0
-        )  # bgr -> rgb, [0, 1]
+        color_data = torch.from_numpy(color_data).float().permute(2, 0, 1)[[2, 1, 0], :, :]  # bgr -> rgb
         color_data = color_data.unsqueeze(dim=0)  # [1, C, H, W]
 
         # crop image edge, there are invalid value on the edge of the color image
@@ -462,6 +461,7 @@ class DAVIS(BaseDataset):
         super(DAVIS, self).__init__(cfg, device)
         self.sequence = cfg.data.scene
         self.color_paths = sorted(glob.glob(os.path.join(self.input_folder, self.sequence, "*.jpg")))
+        self.n_img = len(self.color_paths)
 
         self.has_dyn_masks = True
         self.mask_path = self.input_folder.replace("JPEGImages", "Annotations")
