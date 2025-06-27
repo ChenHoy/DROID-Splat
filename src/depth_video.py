@@ -691,7 +691,7 @@ class DepthVideo:
                     self.poses,
                     self.disps,
                     self.intrinsics[0],
-                    self.disps_sens,
+                    disps_sens,
                     target,
                     weight,
                     eta,
