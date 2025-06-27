@@ -26,6 +26,7 @@ frontend:
 
   # NOTE: Warning. This can slightly change results as well for some reason
   release_cache: True # Tradeoff: memory vs. speed, This can save up to ~5GB
+  pose_interpolation: linear # linear (linear motion w. const speed), damped (damped linear motion), naive/null (just copy the prev pose)
   
 backend:
   warmup: 15
