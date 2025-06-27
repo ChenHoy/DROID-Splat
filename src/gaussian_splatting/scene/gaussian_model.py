@@ -439,7 +439,7 @@ class GaussianModel:
         mask: torch.Tensor = None,
         downsample_factor: float = None,
     ):
-        image_ab = (torch.exp(cam.exposure_a)) * cam.original_image + cam.exposure_b
+        image_ab = (torch.exp(cam.exposure_a)) * cam.original_image / 255.0 + cam.exposure_b
         image_ab = torch.clamp(image_ab, 0.0, 1.0)
         rgb_raw = (image_ab * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
 
@@ -907,7 +907,7 @@ class GaussianModel:
 
         if kfIdx is not None:
             print(f"Computing scale based on {kfIdx}")
-            select = torch.zeros(points.shape[0], dtype=torch.bool)
+            select = torch.zeros(points.shape[0], dtype=torch.bool, device=self.device)
             for idx in kfIdx:
                 # Sanity check if this index actually exists
                 if not (self.unique_kfIDs == idx).any():

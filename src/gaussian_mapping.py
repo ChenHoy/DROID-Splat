@@ -40,10 +40,6 @@ Since they are initialized with the 3D locations of a VSLAM system, this process
 NOTE this could a be standalone SLAM system itself, but we use it on top of an optical flow based SLAM system.
 """
 
-# FIXME we dont hold images at float precision in our mapper, because for long videos this is prohibitive
-# TODO simply do the same here in the mapper and switch to float precision only during loss computation
-# TODO does this work natively with autograd or do we need to change the precision of a whole batch before running an optimization loop?
-
 
 class GaussianMapper(object):
     """
@@ -60,7 +56,6 @@ class GaussianMapper(object):
         self.output = slam.output
         self.delay = cfg.mapping.delay  # Delay between tracking and mapping
         self.warmup = cfg.mapping.warmup
-        # NOTE this requires to make sure that SLAM and mapper are in synch enough
         self.batch_mode = cfg.mapping.online_opt.batch_mode  # Work in batches of new frames for a fixed compute load
 
         # Given an external mask for dyn. objects, remove these from the optimization
@@ -1009,7 +1004,7 @@ class GaussianMapper(object):
     def update_gui(self, last_new_cam: Camera) -> None:
         # Get the latest frame we added together with the input
         if len(self.new_cameras) > 0 and last_new_cam is not None:
-            img = last_new_cam.original_image
+            img = last_new_cam.original_image / 255.0  # uint8 -> float [0, 1] for visualization
             if last_new_cam.depth is not None:
                 if not self.loss_params.supervise_with_prior:
                     gtdepth = last_new_cam.depth.detach().clone().cpu().numpy()
