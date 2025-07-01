@@ -1,10 +1,12 @@
 import gc
 from copy import deepcopy
+from typing import Optional
 from termcolor import colored
 import ipdb
 from time import gmtime, strftime, time
 
 import torch
+import torch.multiprocessing as mp
 from lietorch import SE3
 
 from .factor_graph import FactorGraph
@@ -31,12 +33,17 @@ class FrontendWrapper(torch.nn.Module):
 
         self.count = 0
 
+    def info(self, msg: str):
+        print(colored("[Frontend] " + msg, "yellow"))
+
     @torch.no_grad()
-    def forward(self, timestamp, image, depth, intrinsic, gt_pose=None, static_mask=None):
+    def forward(
+        self, timestamp, image, depth, intrinsic, gt_pose=None, static_mask=None, lock: Optional[mp.Lock] = None
+    ):
         """Add new keyframes according to apparent motion and run a local bundle adjustment optimization.
         If there is not enough motion between the new frame and the last inserted keyframe, we dont do anything."""
         self.motion_filter.track(timestamp, image, depth, intrinsic, gt_pose=gt_pose, static_mask=static_mask)
-        self.optimizer()  # Local Bundle Adjustment
+        self.optimizer(lock=lock)  # Local Bundle Adjustment
         self.count = self.optimizer.count  # Synchronize counts of wrapper and actual Frontend
 
 
@@ -64,6 +71,7 @@ class Frontend:
         self.window = cfg.tracking.frontend.get("window", 25)
         self.thresh = cfg.tracking.frontend.get("thresh", 16.0)
         self.radius = cfg.tracking.frontend.get("radius", 2)
+        self.pose_interpolation = cfg.tracking.frontend.get("pose_interpolation", "linear")
 
         self.steps1 = cfg.tracking.frontend.get("steps1", 4)
         self.steps2 = cfg.tracking.frontend.get("steps2", 2)
@@ -90,10 +98,12 @@ class Frontend:
         used_mem = 1 - (free_mem / total_mem)
         return used_mem, free_mem
 
-    def __update(self):
+    def __update(self, pose_interpolation: str = "linear", lock: Optional[mp.Lock] = None):
         """add edges, perform update"""
 
         self.t1 += 1
+        if lock is None:
+            lock = self.video.get_lock()
 
         # Remove old factors if we already computed a correlation volume
         if self.graph.corr is not None:
@@ -107,18 +117,19 @@ class Frontend:
 
         # Condition video.disps based on external sensor data if given before optimizing
         # Dont do this with monocular depth, as every new prior has a yet to be determined scale
-        if not self.video.cfg.mode == "prgbd" and not self.video.optimize_scales:
-            self.video.disps[self.t1 - 1] = torch.where(
-                self.video.disps_sens[self.t1 - 1] > 0,
-                self.video.disps_sens[self.t1 - 1],
-                self.video.disps[self.t1 - 1],
-            )
+        with lock:
+            if not self.video.cfg.mode == "prgbd" and not self.video.optimize_scales:
+                self.video.disps[self.t1 - 1] = torch.where(
+                    self.video.disps_sens[self.t1 - 1] > 0,
+                    self.video.disps_sens[self.t1 - 1],
+                    self.video.disps[self.t1 - 1],
+                )
 
         # Frontend Bundle Adjustment to optimize the current local window
         for itr in range(self.steps1):
-            self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True)
+            self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True, lock=lock)
 
-        # set initial pose for next frame
+        # Check distance
         d = self.video.distance([self.t1 - 3], [self.t1 - 2], beta=self.beta, bidirectional=True)
 
         # If the distance is too small, remove the last keyframe
@@ -137,7 +148,7 @@ class Frontend:
 
             ### 2nd update
             for itr in range(self.steps2):
-                self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True)
+                self.graph.update(t0=None, t1=None, iters=self.iters, use_inactive=True, lock=lock)
 
         # Manually free memory here as this builds up over time
         if self.release_cache:
@@ -147,19 +158,27 @@ class Frontend:
                 gc.collect()
 
         ### Set pose & disp for next iteration
-        # Naive strategy for initializing next pose as previous pose in DROID-SLAM
-        # self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
-        # Better: use constant speed assumption and extrapolate
-        # (usually gives a boost of 1-4mm in ATE RMSE)
-        dP = SE3(self.video.poses[self.t1 - 1]) * SE3(self.video.poses[self.t1 - 2]).inv()  # Get relative pose
-        self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
+        with lock:
+            dP = SE3(self.video.poses[self.t1 - 1]) * SE3(self.video.poses[self.t1 - 2]).inv()  # Get relative pose
+            # Vanilla linear interpolation (constant speed assumption and extrapolate)
+            # (usually gives a boost of 1-4mm in ATE RMSE)
+            if pose_interpolation == "linear":
+                self.video.poses[self.t1] = (dP * SE3(self.video.poses[self.t1 - 1])).vec()
+            # Damped Linear from DPVO
+            elif pose_interpolation == "damped":
+                # NOTE this interpolation makes a big change on KITTI/03
+                damping = 0.5  # motion damping
+                self.video.poses[self.t1] = (SE3.exp(damping * dP.log()) * SE3(self.video.poses[self.t1 - 1])).vec()
+            # Naive strategy for initializing next pose as previous pose in DROID-SLAM
+            else:
+                self.video.poses[self.t1] = self.video.poses[self.t1 - 1]
 
-        self.video.disps[self.t1] = self.video.disps[self.t1 - 1].mean()
+            self.video.disps[self.t1] = self.video.disps[self.t1 - 1].mean()
 
-        ### update visualization
-        # NOTE chen: Sanity check, because this was sometimes []
-        if self.graph.ii.numel() > 0:
-            self.video.dirty[self.graph.ii.min() : self.t1] = True
+            ### update visualization
+            # NOTE chen: Sanity check, because this was sometimes []
+            if self.graph.ii.numel() > 0:
+                self.video.dirty[self.graph.ii.min() : self.t1] = True
 
         self.count += 1
 
@@ -197,7 +216,7 @@ class Frontend:
 
         self.graph.rm_factors(self.graph.ii < self.warmup - 4, store=True)
 
-    def __call__(self):
+    def __call__(self, lock: Optional[mp.Lock] = None):
         """main update"""
 
         # Initialize
@@ -217,7 +236,7 @@ class Frontend:
 
         # Update
         elif self.is_initialized and self.t1 < self.video.counter.value:
-            self.__update()
+            self.__update(lock=lock, pose_interpolation=self.pose_interpolation)
 
         else:
             pass

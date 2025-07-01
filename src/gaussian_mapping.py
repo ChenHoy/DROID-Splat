@@ -12,7 +12,6 @@ from tqdm import tqdm
 import torch
 import torch.multiprocessing as mp
 from torch.utils.data import WeightedRandomSampler
-from lietorch import SE3
 
 import numpy as np
 import cv2
@@ -26,7 +25,7 @@ from .gaussian_splatting.camera_utils import Camera
 from .losses import mapping_rgbd_loss, plot_losses
 
 from .gaussian_splatting.pose_utils import update_pose
-from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov, getWorld2View2
+from .gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
 from .utils.multiprocessing_utils import clone_obj
 from .geom import lie_to_matrix
 from .trajectory_filler import PoseTrajectoryFiller
@@ -723,7 +722,6 @@ class GaussianMapper(object):
         loss = 0.0
         for view in frames:
             current_loss, render_pkg = self.render_compare(view)
-
             if render_pkg is None:
                 self.info(f"Skipping view {view.uid} as no gaussians are present ...")
                 continue
@@ -1018,7 +1016,7 @@ class GaussianMapper(object):
     def update_gui(self, last_new_cam: Camera) -> None:
         # Get the latest frame we added together with the input
         if len(self.new_cameras) > 0 and last_new_cam is not None:
-            img = last_new_cam.original_image
+            img = last_new_cam.original_image / 255.0  # uint8 -> float [0, 1] for visualization
             if last_new_cam.depth is not None:
                 if not self.loss_params.supervise_with_prior:
                     gtdepth = last_new_cam.depth.detach().clone().cpu().numpy()
@@ -1148,7 +1146,7 @@ class GaussianMapper(object):
             self.update_params.pruning.covisibility.dont_prune_latest = 0
             self.update_params.pruning.covisibility.last = 0
             # Run another call to catch the last batch of keyframes
-            self._update(iters=self.mapping_iters, delay_to_tracking=False)
+            self._update(iters=self.mapping_iters + 10, delay_to_tracking=False)
             self.count += 1
 
             self._last_call(mapping_queue=mapping_queue, received_item=received_item)

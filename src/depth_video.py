@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import Optional, List
 
 import torch
-from torch.multiprocessing import Value
+import torch.multiprocessing as mp
 import lietorch
 import droid_backends
 
@@ -36,8 +36,8 @@ class DepthVideo:
             raise Exception("Camera model not implemented! Choose either pinhole or mei model.")
         self.opt_intr = cfg.opt_intr
 
-        self.ready = Value("i", 0)
-        self.counter = Value("i", 0)
+        self.ready = mp.Value("i", 0)
+        self.counter = mp.Value("i", 0)
 
         ht = cfg.data.cam.H_out
         self.ht = ht
@@ -49,10 +49,11 @@ class DepthVideo:
         c = 1 if not self.stereo else 2
         self.scale_factor = 8
         s = self.scale_factor
-        buffer = cfg.tracking.buffer
+        self.buffer_size = cfg.tracking.buffer
         # Whether we upsample the predictions or not
         self.upsampled = cfg.tracking.upsample
 
+        buffer = cfg.tracking.buffer
         ### state attributes -> Raw map ###
         self.timestamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
         # List for keeping track of updated frames for visualization
@@ -60,17 +61,14 @@ class DepthVideo:
         # List for keeping track of updated frames for Map Renderer
         self.mapping_dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
 
-        self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.float).share_memory_()
+        # NOTE chen: simply storing images in original uint8 and only normalizing them when needed SAVES a SHITTON of memory
+        self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.uint8).share_memory_()
         self.intrinsics = torch.zeros(buffer, 4, device=device, dtype=torch.float).share_memory_()
         self.poses = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
         self.poses_gt = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
 
-        # Measure the change of poses before and after backend optimization, so we can track large map changes
+        # Measure the change of poses and scene scale before and after backend optimization, so we can track large map changes
         self.pose_changes = torch.zeros(buffer, 7, device=device, dtype=torch.float).share_memory_()  # c2w quaterion
-        # TODO chen: you rarely have large SCALE changes on indoor scenes, which is why we have not previously observed this
-        # Loop closures and large scale changes can happen on outdoor scenes pretty quickly
-        # FIXME once we initialized super large-scale big Gaussians we cannot shrink them to the correct size after closure
-        # Reoptimization is not helpful in these cases as Gaussians cannot travel large distances
         self.scale_changes = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()  # Float
 
         self.disps = torch.ones(buffer, ht // s, wd // s, device=device, dtype=torch.float).share_memory_()
@@ -84,6 +82,7 @@ class DepthVideo:
         # Scale and shift parameters for ambiguous monocular depth
         # Optimze the scales and shifts for Pseudo-RGBD mode
         self.optimize_scales = cfg.mode == "prgbd" and cfg.tracking.frontend.optimize_scales
+        self.mode = cfg.mode
         self.scales = torch.ones(buffer, device=device, dtype=torch.float).share_memory_()
         self.shifts = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
 
@@ -186,7 +185,7 @@ class DepthVideo:
         be a priority.
         """
         self.timestamp[index] = torch.zeros_like(self.timestamp[index], dtype=torch.float, device=self.device)
-        self.images[index] = torch.zeros_like(self.images[index], dtype=torch.float, device=self.device)
+        self.images[index] = torch.zeros_like(self.images[index], dtype=torch.uint8, device=self.device)
         self.intrinsics[index] = torch.zeros_like(self.intrinsics[index], dtype=torch.float, device=self.device)
 
         zero_poses = torch.zeros_like(self.poses[index], dtype=torch.float, device=self.device)
@@ -304,7 +303,7 @@ class DepthVideo:
         s = self.scale_factor
         with self.get_lock():
             if self.upsampled:
-                image = self.images[index].clone().contiguous().to(device)  # [H, W, 3]
+                image = self.images[index].clone()  # [H, W, 3]
                 static_mask = self.static_masks[index].clone().to(device)  # [H, W]
                 intrinsics = self.intrinsics[0].clone().contiguous().to(device) * s  # [4]
                 disp_prior = self.disps_sens_up[index].contiguous().clone().to(device)  # [H, W]
@@ -521,12 +520,30 @@ class DepthVideo:
 
         return d
 
-    def ba(self, target, weight, eta, ii, jj, t0=1, t1=None, iters=2, lm=1e-4, ep=0.1, motion_only=False):
+    def ba(
+        self,
+        target,
+        weight,
+        eta,
+        ii,
+        jj,
+        t0=1,
+        t1=None,
+        iters=2,
+        lm=1e-4,
+        ep=0.1,
+        motion_only=False,
+        lock: Optional[mp.Lock] = None,
+    ):
         """Wrapper for dense bundle adjustment. This is used both in Frontend and Backend."""
-
+        # Use an external lock if wanted
+        if lock is None:
+            lock = self.get_lock()
         intrinsic_common_id = 0  # we assume the intrinsic within one scene is the same
 
-        with self.get_lock():
+        # Use actual mp.Lock for securing BA if given
+        with lock:
+            torch.cuda.synchronize()
 
             # Store the uncertainty maps for source frames, that will get updated
             confidence, idx = self.reduce_confidence(weight, ii)
@@ -543,8 +560,6 @@ class DepthVideo:
             else:
                 disps_sens = self.disps_sens
 
-            # FIXME chen: This sometimes causes a malloc error :/
-            # I am not sure how to fix this
             droid_backends.ba(
                 self.poses,
                 self.disps,
@@ -564,12 +579,14 @@ class DepthVideo:
                 motion_only,
                 self.opt_intr,
             )
+
             self.disps.clamp_(min=1e-3)  # Always make sure that Disparities are non-negative!!!
             # Reassigning intrinsics after optimization
             if self.opt_intr:
                 self.intrinsics[: self.counter.value] = self.intrinsics[intrinsic_common_id]
 
             self.mapping_dirty[t0:t1] = True
+            torch.cuda.synchronize()
 
     def linear_align_prior(self, min_num_points: int = 300, eps: float = 0.05) -> None:
         """Do a linear alignmnet between the prior and the current map after initialization.
@@ -628,12 +645,15 @@ class DepthVideo:
         ep=0.1,
         alpha: float = 5e-3,
         linear_align_prior: bool = True,
+        lock: Optional[mp.Lock] = None,
     ):
         """Bundle adjustment over structure with a scalable prior.
 
         We keep the poses fixed, since this would create an unnecessary ambiguity and can make the system unstable!
         We optimize scale and shift parameters on top of the scene disparity.
         """
+        if lock is None:
+            lock = self.get_lock()
 
         with self.get_lock():
             # Store the uncertainty maps for source frames, that will get updated
@@ -651,19 +671,27 @@ class DepthVideo:
                 # NOTE chen: this gives only slightly improved tracking if the prior scales dont have large variance
                 self.linear_align_prior()  # Align priors to the current (monocular) map with scale and shift from linear optimization
 
-            # Block coordinate descent optimization
-            for i in range(iters):
-                # Sanity check for non-negative disparities
-                self.disps.clamp_(min=1e-3)
-                self.disps_sens.clamp_(min=1e-3)
-                self.disps_sens_up.clamp_(min=1e-3)
+        # Block coordinate descent optimization
+        for i in range(iters):
+            # Sanity check for non-negative disparities
+            self.disps.clamp_(min=1e-3)
+            self.disps_sens.clamp_(min=1e-3)
+            self.disps_sens_up.clamp_(min=1e-3)
 
+            # Dont use the noisy prior for backend in prgbd
+            if self.optimize_scales:
+                disps_sens = torch.zeros_like(self.disps_sens, device=self.device)
+            else:
+                disps_sens = self.disps_sens
+
+            # Safgeguard the CUDA kernel
+            with lock:
                 # Motion only Bundle Adjustment (MoBA)
                 droid_backends.ba(
                     self.poses,
                     self.disps,
                     self.intrinsics[0],
-                    self.disps_sens,
+                    disps_sens,
                     target,
                     weight,
                     eta,
@@ -678,30 +706,30 @@ class DepthVideo:
                     True,
                     False,
                 )
-                # Joint Depth and Scale Adjustment(JDSA)
-                bundle_adjustment(
-                    target,
-                    weight,
-                    eta,
-                    self.poses,
-                    self.disps,
-                    self.intrinsics,
-                    ii,
-                    jj,
-                    t0,
-                    t1,
-                    self.disps_sens,
-                    self.scales,
-                    self.shifts,
-                    iters=1,
-                    lm=lm,
-                    ep=ep,
-                    scale_prior=True,
-                    structure_only=True,
-                    alpha=alpha,
-                )
-                self.mapping_dirty[t0:t1] = True
+            # Joint Depth and Scale Adjustment(JDSA)
+            bundle_adjustment(
+                target,
+                weight,
+                eta,
+                self.poses,
+                self.disps,
+                self.intrinsics,
+                ii,
+                jj,
+                t0,
+                t1,
+                self.disps_sens,
+                self.scales,
+                self.shifts,
+                iters=1,
+                lm=lm,
+                ep=ep,
+                scale_prior=True,
+                structure_only=True,
+                alpha=alpha,
+            )
+            self.mapping_dirty[t0:t1] = True
 
-                # After optimizing the prior, we need to update the disps_sens and reset the scales
-                # only then can we use global BA and intrinsics optimization with the CUDA kernel later in backend
-                self.reset_prior()
+            # After optimizing the prior, we need to update the disps_sens and reset the scales
+            # only then can we use global BA and intrinsics optimization with the CUDA kernel later in backend
+            self.reset_prior()

@@ -34,7 +34,8 @@ from ..scene.gaussian_model import GaussianModel
 
 
 class SLAM_GUI:
-    def __init__(self, params_gui=None):
+    # TODO adapt max_depth_viz for outdoor and indoor scenes
+    def __init__(self, params_gui=None, max_depth_viz: float = 10.0):
         self.step = 0
         self.process_finished = False
         self.device = "cuda"
@@ -47,6 +48,7 @@ class SLAM_GUI:
         self.q_main2vis = None
         self.gaussian_cur = None
         self.pipe = None
+        self.max_depth_viz = max_depth_viz
         self.background = None
 
         self.init = False
@@ -424,8 +426,7 @@ class SLAM_GUI:
 
         if gaussian_packet.gtdepth is not None:
             depth = gaussian_packet.gtdepth
-            # TODO make this adaptable for outdoor scenes?
-            depth = imgviz.depth2rgb(depth, min_value=0.1, max_value=5.0, colormap="Spectral")
+            depth = imgviz.depth2rgb(depth, min_value=0.1, max_value=self.max_depth_viz, colormap="Spectral")
             depth = torch.from_numpy(depth)
             depth = torch.permute(depth, (2, 0, 1)).float()
             depth = (depth).byte().permute(1, 2, 0).contiguous().cpu().numpy()

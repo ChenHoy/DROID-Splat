@@ -41,8 +41,8 @@ def mapping_rgbd_loss(
         has_depth = False
 
     # Transform with exposure (done in other papers)
-    # image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
-    image_gt = cam.original_image
+    # image = (torch.exp(cam.exposure_a)) * image / 255.0 + cam.exposure_b
+    image_gt = cam.original_image / 255.0  # uint8 -> float
 
     # Mask out pixels with little information (from MonoGS) NOTE chen: this is conflicting, e.g. on Replica this breaks supervision with a completely black wall
     rgb_pixel_mask = (image_gt.sum(dim=0) >= rgb_boundary_threshold).view(*depth.shape)

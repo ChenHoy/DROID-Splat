@@ -111,7 +111,7 @@ class MotionFilter:
         wd = imw // scale_factor
 
         # normalize images, [b, 3, imh, imw] -> [1, b, 3, imh, imw], b=1 for mono, b=2 for stereo
-        inputs = image.unsqueeze(dim=0).to(self.device)
+        inputs = image.float().unsqueeze(dim=0).to(self.device) / 255.0
         inputs = inputs.sub_(self.MEAN).div_(self.STDV)
 
         # extract features
