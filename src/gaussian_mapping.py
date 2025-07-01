@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 
 from .gaussian_splatting.gui import gui_utils
 from .gaussian_splatting.eval_utils import EvaluatePacket
-from .gaussian_splatting.utils.general_utils import random_subsample_mask
 from .gaussian_splatting.gaussian_renderer import render
 from .gaussian_splatting.scene.gaussian_model import GaussianModel
 from .gaussian_splatting.camera_utils import Camera
@@ -536,7 +535,7 @@ class GaussianMapper(object):
             for iter2 in tqdm(
                 range(self.refine_params.batch_iters), desc=colored("Batch Optimization", "magenta"), colour="magenta"
             ):
-                # Use the global iteration for annedaling the learning rate!
+                # Use the global iteration for decaying the learning rate!
                 loss = self.mapping_step(
                     total_iter, batch, prune_densify=do_densify, optimize_poses=self.refine_params.optimize_poses
                 )
