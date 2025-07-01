@@ -34,6 +34,7 @@ from ..scene.gaussian_model import GaussianModel
 
 
 class SLAM_GUI:
+    # TODO adapt max_depth_viz for outdoor and indoor scenes
     def __init__(self, params_gui=None, max_depth_viz: float = 10.0):
         self.step = 0
         self.process_finished = False

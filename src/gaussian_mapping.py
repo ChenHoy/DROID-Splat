@@ -56,7 +56,7 @@ class GaussianMapper(object):
         self.output = slam.output
         self.delay = cfg.mapping.delay  # Delay between tracking and mapping
         self.warmup = cfg.mapping.warmup
-        self.batch_mode = cfg.mapping.online_opt.batch_mode  # Work in batches of new frames for a fixed compute load
+        self.batch_mode = cfg.mapping.online_opt.batch_mode  # Take a batch of all unupdated frames at once
 
         # Given an external mask for dyn. objects, remove these from the optimization
         self.filter_dyn = cfg.get("with_dyn", False)
@@ -830,6 +830,25 @@ class GaussianMapper(object):
         end = time.time()
         self.info(f"({mode}) Covisibility pruning took {(end - start):.2f}s, pruned: {to_prune.sum()} Gaussians")
 
+    def draw_random_frames(
+        self, cams: List[Camera], weights: Optional[str] = None, n_frames: int = 10
+    ) -> Tuple[List[Camera], np.ndarray]:
+        # Just return all of them in case we have less than n_frames
+        if len(cams) <= n_frames:
+            return cams, np.arange(len(cams))
+
+        if weights is not None:
+            assert len(weights) == len(
+                cams
+            ), f"Weights need to be the same length ({len(weights)}) as the number of frames ({len(cams)})"
+            to_draw = np.arange(len(cams))  # Indices we can draw from
+            random_idx = list(WeightedRandomSampler(weights, n_frames, replacement=False))
+            random_idx = to_draw[random_idx]
+        else:
+            random_idx = np.random.choice(len(cams), n_frames, replace=False)
+        random_frames = [cams[i] for i in random_idx]
+        return random_frames, random_idx
+
     def select_keyframes(self, weights: Optional[str] = None):
         """Select the last n1 frames and n2 other random frames from all.
         If with_random_weights is set, we assign a higher sampling probability to keyframes, that have not yet been
@@ -837,29 +856,24 @@ class GaussianMapper(object):
 
         NOTE this method assumes self.cameras to contain sorted keyframes with increasing uid order.
 
-        random_weights:
-            If set to "visited", we assign higher probability to frames that have been visited less often.
-            If set
+        weights: Optional weight tensors for selecting frames with higher probability
         """
+        # If the batch size is too big, we can just select all frames
         if len(self.cameras) <= self.n_last_frames + self.n_rand_frames:
             keyframes = self.cameras
             keyframes_idx = np.arange(len(self.cameras))
         else:
+            # Get the last n1 frames and their indices
             last_window = self.cameras[-self.n_last_frames :]
             window_idx = np.arange(len(self.cameras))[-self.n_last_frames :]
-            if self.n_rand_frames > 0:
-                # NOTE chen: weights should also only go from [0:-n_last_frames] !!!
-                if weights is not None:
-                    to_draw = np.arange(len(self.cameras) - self.n_last_frames)  # Indices we can draw from
-                    random_idx = list(WeightedRandomSampler(weights, self.n_rand_frames, replacement=False))
-                    random_idx = to_draw[random_idx]
-                else:
-                    random_idx = np.random.choice(
-                        len(self.cameras) - self.n_last_frames, self.n_rand_frames, replace=False
-                    )
-                random_frames = [self.cameras[i] for i in random_idx]
+
+            rest = self.cameras[: -self.n_last_frames]
+            rest_idx = np.arange(len(self.cameras))[: -self.n_last_frames]
+            # Take additional random frames on top
+            if self.n_rand_frames > 0 and len(rest) > 0:
+                random_frames, random_idx = self.draw_random_frames(rest, weights=weights, n_frames=self.n_rand_frames)
                 keyframes = last_window + random_frames
-                keyframes_idx = np.concatenate([window_idx, random_idx])
+                keyframes_idx = np.concatenate([window_idx, rest_idx[random_idx]])
             else:
                 keyframes = last_window
                 keyframes_idx = window_idx

@@ -90,7 +90,7 @@ class FactorGraph:
             msg += f" {e[0]:05d}, {e[1]:05d}, {e[2]:.4f}\n"
         print(msg)
 
-    def filter_edges(self, conf_thresh=1e-3):
+    def filter_edges(self, conf_thresh: float = 1e-3):
         """remove bad edges"""
         conf = torch.mean(self.weight, dim=[0, 2, 3, 4], keepdim=False)
         mask = (torch.abs(self.ii - self.jj) > 2) & (conf < conf_thresh)

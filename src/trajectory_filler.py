@@ -110,10 +110,8 @@ class PoseTrajectoryFiller:
 
         return [Gs]
 
-    # TODO handle corner cases!
-    # ii) self.mode == "prgbd" and self.frontend.optimize_scales = True -> We have unscaled priors at non-keyframes!
     @torch.no_grad()
-    def __call__(self, image_stream, batch_size: int = 12, return_tstamps: bool = False):
+    def __call__(self, image_stream, batch_size: int = 8, return_tstamps: bool = False):
         """fill in poses of non-keyframe images in batch mode. This works by first linear interpolating the
         poses in between the keyframes, then computing the optical flow between these frames and doing a
         motion only BA refinement.
@@ -171,7 +169,7 @@ class PoseTrajectoryFiller:
             if len(timestamps) == batch_size:
 
                 depths = depths if len(depths) > 0 else None
-                # We do not have scale-accurate depth for interpolated non-keyframes, just simply use none
+                # We do not have scale-accurate depth for interpolated non-keyframes, just simply use none here
                 if self.cfg.mode == "prgbd" and self.cfg.tracking.frontend.optimize_scales:
                     depths = None
 
