@@ -390,6 +390,8 @@ class Replica(BaseDataset):
     def switch_to_rgbd_gt(self):
         """When evaluating, we want to use the ground truth depth maps."""
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/depth*.png")))
+        if self.t_stop is not None:
+            self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
         self.depth_paths = self.depth_paths[:: self.stride]
 
     def load_poses(self, path):
@@ -440,6 +442,8 @@ class TartanAir(BaseDataset):
     def switch_to_rgbd_gt(self):
         """When evaluating, we want to use the ground truth depth maps."""
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth_left", "*.png")))
+        if self.t_stop is not None:
+            self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
         self.depth_paths = self.depth_paths[:: self.stride]
 
     def load_poses(self, path):
@@ -546,6 +550,8 @@ class TotalRecon(BaseDataset):
     def switch_to_rgbd_gt(self):
         """When evaluating, we want to use the ground truth depth maps."""
         self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depths", "*.depth")))
+        if self.t_stop is not None:
+            self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
         self.depth_paths = self.depth_paths[:: self.stride]
 
     def load_poses(self, paths):
@@ -961,10 +967,10 @@ class ScanNet(BaseDataset):
             glob.glob(os.path.join(self.input_folder, "depth", "*.png")),
             key=lambda x: int(os.path.basename(x)[:-4]),
         )
-        n_valid = self.load_poses(os.path.join(self.input_folder, "pose"))
-        self.poses = self.poses[:n_valid]
-        self.depth_paths = self.depth_paths[:n_valid]
-        self.color_paths = self.color_paths[:n_valid]
+        self.n_valid = self.load_poses(os.path.join(self.input_folder, "pose"))
+        self.poses = self.poses[: self.n_valid]
+        self.depth_paths = self.depth_paths[: self.n_valid]
+        self.color_paths = self.color_paths[: self.n_valid]
 
         if self.t_stop is not None:
             self.color_paths = self.color_paths[self.t_start : self.t_stop]
@@ -983,7 +989,11 @@ class ScanNet(BaseDataset):
         self.depth_paths = sorted(
             glob.glob(os.path.join(self.input_folder, "depth_gt", "*.png")),
             key=lambda x: int(os.path.basename(x)[:-4]),
-        )[:: self.stride]
+        )
+        self.depth_paths = self.depth_paths[: self.n_valid]
+        if self.t_stop is not None:
+            self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
+        self.depth_paths = self.depth_paths[:: self.stride]
 
     def load_poses(self, path):
         self.poses = []
@@ -1041,10 +1051,17 @@ class TUM_RGBD(BaseDataset):
         self.color_paths, self.depth_paths, self.poses = self.loadtum(
             self.input_folder, self.cfg, frame_rate=32, mode="rgbd"
         )
+        if self.t_stop is not None:
+            self.color_paths = self.color_paths[self.t_start : self.t_stop]
+            self.depth_paths = self.depth_paths[self.t_start : self.t_stop]
+            self.poses = None if self.poses is None else self.poses[self.t_start : self.t_stop]
+            self.indices = None if self.indices is None else self.indices[self.t_start : self.t_stop]
+
         self.color_paths = self.color_paths[:: self.stride]
         self.depth_paths = self.depth_paths[:: self.stride]
         self.indices = self.indices[:: self.stride]
         self.poses = None if self.poses is None else self.poses[:: self.stride]
+
         self.n_img = len(self.color_paths)
 
     def parse_list(self, filepath, skiprows=0):
@@ -1495,6 +1512,7 @@ class Sintel(BaseDataset):
 
         self.has_dyn_masks = True
         self.background_value = 255
+        self.cfg = cfg
 
         # Check for endianness, based on Daniel Scharstein's optical flow code.
         # Using little-endian architecture, these two should be equal.
@@ -1544,8 +1562,9 @@ class Sintel(BaseDataset):
 
     def switch_to_rgbd_gt(self):
         """When evaluating, we want to use the ground truth depth maps."""
-        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "results/depth*.png")))
-        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", cfg.data.scene, "*.dpt")))[:-1]
+        self.depth_paths = sorted(glob.glob(os.path.join(self.input_folder, "depth", self.cfg.data.scene, "*.dpt")))[
+            :-1
+        ]
         self.depth_paths = self.depth_paths[:: self.stride]
 
     def load_poses(self, paths: List[str]):
