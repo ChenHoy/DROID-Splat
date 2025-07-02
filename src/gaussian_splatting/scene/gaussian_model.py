@@ -291,7 +291,6 @@ class GaussianModel:
             project_valid_depth_only=True,
         )
         if with_normals:
-            # FIXME should we tune these parameters since they depend on the scene scale?
             pcd_tmp.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
 
         pcd_tmp = pcd_tmp.random_down_sample(1.0 / downsample_factor)
