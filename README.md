@@ -16,6 +16,11 @@
 
 <p align="center"> SotA results for monocular video by integrating depth of an unknown scale! </p>
 
+## Update
+This is the MCMC branch, using [MCMC Densification and Pruning](https://arxiv.org/abs/2404.09591) for cloning and pruning of Gaussian Primitives. We could achieve better results with this than the naive 3DGS densification strategy out of the gate (usually ~0.5 PSNR better). What is even better: You can control (in theory) the total number of primitives used in a scene in advance. 
+- Use ```mapping.mcmc.cap_max``` to set an upper bound on the number of Gaussians in the scene. If this bound is reached, then densification will not lead to more Gaussians. Note: However in case new Gaussians are still initialized due to discovering new frames after reaching 'cap_max', then the bound will be overshot. Therefore, this should be tuned together with ```mapping.input.pcd_downsample_init```, so that not too many Gaussians are initialized every frame.
+- You can play with ```mapping.mcmc.noise_lr``` to influence the flexibility of Gaussians to be around their initial 3D location. 
+
 ## :clapper: Introduction
 This is a deep-learning-based dense visual SLAM framework that achieves **real-time global optimization of poses and 3D reconstruction**.   
 - SotA Tracking from [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM)
