@@ -454,8 +454,6 @@ class GaussianModel:
         else:
             pcd = BasicPointCloud(points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3)))
 
-        pcd = BasicPointCloud(points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3)))
-
         if pcd.points.shape[0] <= 5:
             return
 
