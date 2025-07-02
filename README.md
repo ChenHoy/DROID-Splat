@@ -14,6 +14,12 @@
 
 <p align="center"> SotA results for monocular video by integrating depth of an unknown scale! </p>
 
+## Update
+This is the 2DGS branch, using [2DGS](https://github.com/hbb1/2d-gaussian-splatting) as hyperprimitives for Rendering. 
+- 2D Gaussians are better at approximating surfaces similar to Surfels and in theory give better geometry reconstruction than naive 3D Gaussian Splatting. However, they usually lag a little behind in visual quality 
+- We found that for our SLAM setting, due to how well hyperprimitives are already initialized and the rather sparse supervision on SLAM datasets compared to 360° NeRF Datasets, the geometry reconstruction is not as good as for vanilla 3D Gaussian Splatting. We notice, that 2D Gaussians converge much quicker to correct geometry, but this advantage is nullified if you simply optimize 3D Gaussians long enough. We therefore reach slightly better geometry without refinement of the scene, but worse results after refinement
+- The loss supervision of 2DGS is different than 3DGS since we have an additional distortion term and potentially normal supervision. We tried many configurations to get better results, but eventually gave up with the current setting. See ```mapping.loss``` for hyperparameters.
+- 2DGS can be improved using [2DGS++](https://github.com/hugoycj/2d-gaussian-splatting-great-again/tree/main), which leverages multiple additional tricks. The authors also have a work that can leverage off-the-shelf predicted normals along monocular depth. We did not achieve strong improvements based on their hyperprimitives
 ## :clapper: Introduction
 This is a deep-learning-based dense visual SLAM framework that achieves **real-time global optimization of poses and 3D reconstruction**.   
 - SotA Tracking from [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM)
