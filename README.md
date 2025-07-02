@@ -16,6 +16,10 @@
 
 <p align="center"> SotA results for monocular video by integrating depth of an unknown scale! </p>
 
+##
+Update: Our latest version now consumes considerably less memory than before by simply storing all images in uint8 precision in our buffer. We only switch to float32 on demand. This new implementation 
+scales well to thousands of frames using a modern consumer GPU.
+
 ## :clapper: Introduction
 This is a deep-learning-based dense visual SLAM framework that achieves **real-time global optimization of poses and 3D reconstruction**.   
 - SotA Tracking from [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM)
