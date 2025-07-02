@@ -415,7 +415,7 @@ class GaussianModel:
         return optimizable_tensors
 
     def create_pcd_from_image_and_depth(
-        self, cam, rgb, depth, init=False, downsample_factor=None, with_normals: bool = False
+        self, cam, rgb, depth, init=False, downsample_factor=None, with_normals: bool = True
     ):
         if downsample_factor is None:
             if init:
