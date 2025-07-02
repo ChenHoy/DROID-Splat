@@ -627,6 +627,13 @@ class KITTI(BaseDataset):
         else:
             self.poses = None
 
+    def switch_to_rgbd_gt(self):
+        raise NotImplementedError(
+            """KITTI has lidar data in a different format, this requires running a script beforehand. 
+        Due to how sparse the LIDAR is, the depth supervision in RGBD SLAM is not working well in DROID-SLAM.
+        We do not support this for now ..."""
+        )
+
     def read_point_cloud(self, scan_file: str):
         points = np.fromfile(scan_file, dtype=np.float32).reshape((-1, 4))[:, :4].astype(np.float32)
         return points  # N, 4
