@@ -12,7 +12,6 @@ from tqdm import tqdm
 import torch
 import torch.multiprocessing as mp
 from torch.utils.data import WeightedRandomSampler
-from lietorch import SE3
 
 import numpy as np
 import cv2
@@ -316,16 +315,34 @@ class GaussianMapper(object):
                 )
             )
 
-    def plot_masked_image(self, img: torch.Tensor, mask: torch.Tensor, title: str = "Masked Image"):
-        import matplotlib.pyplot as plt
+    def rescale_gaussians(self, indices: torch.Tensor | List[int], delta_scale: torch.Tensor):
+        """After a large map change, we need to rescale the Gaussians. For this purpose we simply measure the
+        rel. mean disparity change for indidividual frames and check for large updates.
+        We can then simply multiply the respective Gaussians with the factor.
 
-        img = img.squeeze().detach().cpu().numpy().transpose(1, 2, 0)
-        mask = mask.squeeze().detach().cpu().numpy()
-        img[mask] = 0
-        plt.imshow(img)
-        plt.axis("off")
-        plt.title(title)
-        plt.show()
+        NOTE indices are positions in the video buffer since we reanchor after updates from video.ba()
+        """
+        updated_cams = []
+
+        for idx, scale in zip(indices, delta_scale):
+            # We have never mapped this frame before
+
+            if int(idx) not in self.buffer2cam:
+                continue
+            else:
+                self.gaussians.rescale(self.buffer2cam[int(idx)], scale)
+                # NOTE chen: We append to our camera list in consecutive order, i.e. this should normally be sorted!
+                # this is not a given though! be cautious, e.g. during refinement the list changes due to insertion of non-keyframes
+                cam = self.cameras[self.buffer2cam[int(idx)]]
+                updated_cams.append(cam)
+
+        # Add the kf from self.cameras[idx] to updated cameras for GUI
+        if self.use_gui:
+            self.q_main2vis.put_nowait(
+                gui_utils.GaussianPacket(
+                    gaussians=clone_obj(self.gaussians), keyframes=[cam.detached() for cam in updated_cams]
+                )
+            )
 
     def get_ram_usage(self) -> Tuple[float, float]:
         free_mem, total_mem = torch.cuda.mem_get_info(device=self.device)
@@ -435,7 +452,6 @@ class GaussianMapper(object):
                 )
             )
 
-        ### Refinement loop
         # Reset scheduler and optimizer for refinement
         self.opt_params.position_lr_max_steps = self.refine_params.batch_iters * self.refine_params.iters
         # Reduce the learning rate by wanted factor for refinement since we already have a good map
@@ -443,6 +459,7 @@ class GaussianMapper(object):
         self.opt_params.position_lr_final *= self.refine_params.lr_factor
         self.gaussians.training_setup(self.opt_params)
 
+        ### Refinement loop
         total_iter = 0
         for iter1 in tqdm(
             range(self.refine_params.iters), desc=colored("Gaussian Refinement", "magenta"), colour="magenta"
@@ -478,12 +495,8 @@ class GaussianMapper(object):
             for iter2 in tqdm(
                 range(self.refine_params.batch_iters), desc=colored("Batch Optimization", "magenta"), colour="magenta"
             ):
-                loss = self.mapping_step(
-                    total_iter,  # Use the globa iteration for annedaling the learning rate!
-                    batch,
-                    self.refine_params.densify.vanilla,
-                    prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
-                )
+                # Use the global iteration for decaying the learning rate!
+                loss = self.mapping_step(total_iter, batch, prune_densify=do_densify)
                 do_densify = False
                 print(colored("[Gaussian Mapper] ", "magenta"), colored(f"Refinement loss: {loss}", "cyan"))
                 self.loss_list.append(loss)
@@ -528,9 +541,7 @@ class GaussianMapper(object):
 
         return total_loss, render_pkg
 
-    def mapping_step(
-        self, iter: int, frames: List[Camera], vanilla_densify_params: Dict, prune_densify: bool = False
-    ) -> float:
+    def mapping_step(self, iter: int, frames: List[Camera], prune_densify: bool = False) -> float:
         """Takes the list of selected keyframes to optimize and performs one step of the mapping optimization."""
         # Sanity check when we dont have anything to optimize
         if len(self.gaussians) == 0:
@@ -587,7 +598,7 @@ class GaussianMapper(object):
             # Prune and Densify
             if self.last_idx > self.n_last_frames and prune_densify:
                 # General pruning based on opacity and size + densification (from original 3DGS)
-                self.gaussians.densify_and_prune(**vanilla_densify_params)
+                self.gaussians.densify_and_prune(**self.update_params.densify.vanilla)
 
         ### Update states
         self.gaussians.optimizer.step()
@@ -652,42 +663,50 @@ class GaussianMapper(object):
         end = time.time()
         self.info(f"({mode}) Covisibility pruning took {(end - start):.2f}s, pruned: {to_prune.sum()} Gaussians")
 
-    def select_keyframes(self, random_weights: Optional[str] = None):
+    def draw_random_frames(
+        self, cams: List[Camera], weights: Optional[str] = None, n_frames: int = 10
+    ) -> Tuple[List[Camera], np.ndarray]:
+        # Just return all of them in case we have less than n_frames
+        if len(cams) <= n_frames:
+            return cams, np.arange(len(cams))
+
+        if weights is not None:
+            assert len(weights) == len(
+                cams
+            ), f"Weights need to be the same length ({len(weights)}) as the number of frames ({len(cams)})"
+            to_draw = np.arange(len(cams))  # Indices we can draw from
+            random_idx = list(WeightedRandomSampler(weights, n_frames, replacement=False))
+            random_idx = to_draw[random_idx]
+        else:
+            random_idx = np.random.choice(len(cams), n_frames, replace=False)
+        random_frames = [cams[i] for i in random_idx]
+        return random_frames, random_idx
+
+    def select_keyframes(self, weights: Optional[str] = None):
         """Select the last n1 frames and n2 other random frames from all.
         If with_random_weights is set, we assign a higher sampling probability to keyframes, that have not yet been
         optimized a lot. This is measured by self.n_optimized.
 
         NOTE this method assumes self.cameras to contain sorted keyframes with increasing uid order.
 
-        random_weights:
-            If set to "visited", we assign higher probability to frames that have been visited less often.
-            If set
+        weights: Optional weight tensors for selecting frames with higher probability
         """
+        # If the batch size is too big, we can just select all frames
         if len(self.cameras) <= self.n_last_frames + self.n_rand_frames:
             keyframes = self.cameras
             keyframes_idx = np.arange(len(self.cameras))
         else:
+            # Get the last n1 frames and their indices
             last_window = self.cameras[-self.n_last_frames :]
             window_idx = np.arange(len(self.cameras))[-self.n_last_frames :]
-            if self.n_rand_frames > 0:
-                if random_weights == "visited":
-                    to_draw = np.arange(len(self.cameras) - self.n_last_frames)  # Indices we can draw from
-                    weights = [self.n_optimized[idx] / self.mapping_iters + 1 for idx in to_draw]
-                    weights = [1 / w for w in weights]  # Invert to get higher probability for less visited frames
-                    random_idx = list(WeightedRandomSampler(weights, self.n_rand_frames, replacement=False))
-                    random_idx = to_draw[random_idx]
-                elif random_weights == "loss":
-                    to_draw = np.arange(len(self.cameras) - self.n_last_frames)  # Indices we can draw from
-                    weights = [self.last_frame_loss[idx] for idx in to_draw]
-                    random_idx = list(WeightedRandomSampler(weights, self.n_rand_frames, replacement=False))
-                    random_idx = to_draw[random_idx]
-                else:
-                    random_idx = np.random.choice(
-                        len(self.cameras) - self.n_last_frames, self.n_rand_frames, replace=False
-                    )
-                random_frames = [self.cameras[i] for i in random_idx]
+
+            rest = self.cameras[: -self.n_last_frames]
+            rest_idx = np.arange(len(self.cameras))[: -self.n_last_frames]
+            # Take additional random frames on top
+            if self.n_rand_frames > 0 and len(rest) > 0:
+                random_frames, random_idx = self.draw_random_frames(rest, weights=weights, n_frames=self.n_rand_frames)
                 keyframes = last_window + random_frames
-                keyframes_idx = np.concatenate([window_idx, random_idx])
+                keyframes_idx = np.concatenate([window_idx, rest_idx[random_idx]])
             else:
                 keyframes = last_window
                 keyframes_idx = window_idx
@@ -815,7 +834,7 @@ class GaussianMapper(object):
     def update_gui(self, last_new_cam: Camera) -> None:
         # Get the latest frame we added together with the input
         if len(self.new_cameras) > 0 and last_new_cam is not None:
-            img = last_new_cam.original_image
+            img = last_new_cam.original_image / 255.0  # uint8 -> float [0, 1] for visualization
             if last_new_cam.depth is not None:
                 if not self.loss_params.supervise_with_prior:
                     gtdepth = last_new_cam.depth.detach().clone().cpu().numpy()
@@ -877,15 +896,8 @@ class GaussianMapper(object):
             do_densify = (
                 iter % self.update_params.prune_densify_every == 0 and iter < self.update_params.prune_densify_until
             )
-            frames = (
-                self.select_keyframes(random_weights=self.update_params.random_selection_weights)[0] + self.new_cameras
-            )
-            loss = self.mapping_step(
-                iter,
-                frames,
-                self.update_params.densify.vanilla,
-                prune_densify=do_densify,  # Prune and densify with vanilla 3DGS strategy
-            )
+            frames = self.select_keyframes()[0] + self.new_cameras
+            loss = self.mapping_step(iter, frames, prune_densify=do_densify)
             self.loss_list.append(loss)
 
         # Keep track of how well the Rendering is doing

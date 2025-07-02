@@ -38,20 +38,11 @@ class Camera(nn.Module):
         self.T_gt = pose_w2c[:3, 3]
         self.update_RT(self.R_gt, self.T_gt)
 
-        self.original_image = color.clamp(0.0, 1.0)
+        self.original_image = color
         self.depth = depth_est
         self.depth_prior = depth_gt
 
-        self.grad_mask = None
         self.mask = mask  # NOTE chen: this is used for dynamic objects if we know that info
-        if mask is not None:
-            # FIXME chen: so this is not really used? Why do I need this mask?
-            # self.original_image *= mask.to(self.data_device)
-            self.mask = mask.to(self.device)
-        else:
-            self.original_image *= torch.ones((1, self.image_height, self.image_width), device=color.device)
-            self.mask = None
-
         self.trans, self.scale = trans, scale
 
         self.exposure_a = nn.Parameter(torch.tensor([0.0], requires_grad=True, device=device))
@@ -76,9 +67,6 @@ class Camera(nn.Module):
         self.T = self.T.to(device=device)
 
         self.projection_matrix = self.projection_matrix.to(device=device)
-
-        if self.grad_mask is not None:
-            self.grad_mask = self.grad_mask.to(device=device)
 
     def detach(self):
         """Clone and detach all tensors from the camera object"""
@@ -168,4 +156,3 @@ class Camera(nn.Module):
         self.original_image = None
         self.depth = None
         self.depth_prior = None
-        self.grad_mask = None

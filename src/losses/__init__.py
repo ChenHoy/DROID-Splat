@@ -6,7 +6,6 @@ import torch.nn.functional as F
 
 from ..gaussian_splatting.camera_utils import Camera
 
-from ..utils import gradient_map
 from .depth import depth_loss
 from .image import color_loss
 
@@ -43,11 +42,11 @@ def mapping_rgbd_loss(
         has_depth = False
 
     # Transform with exposure (done in other papers)
-    # image = (torch.exp(cam.exposure_a)) * image + cam.exposure_b
-    image_gt = cam.original_image
+    # image = (torch.exp(cam.exposure_a)) * image / 255.0 + cam.exposure_b
+    image_gt = cam.original_image / 255.0  # uint8 -> float
 
     # Mask out pixels with little information and invalid depth pixels
-    rgb_pixel_mask = (image_gt.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
+    rgb_pixel_mask = (image_gt.sum(dim=0) >= rgb_boundary_threshold).view(*depth.shape)
     # Include additional attached masks if they exist
     if cam.mask is not None:
         rgb_pixel_mask = rgb_pixel_mask & cam.mask
@@ -75,7 +74,6 @@ def mapping_rgbd_loss(
             depth_pixel_mask.squeeze(),
             depth_func,
         )
-
         # loss = alpha1 * loss_rgb + (1 - alpha1) * loss_depth
         loss = loss_rgb + alpha1 * loss_depth
 

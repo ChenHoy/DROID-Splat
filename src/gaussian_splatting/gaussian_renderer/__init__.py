@@ -195,7 +195,7 @@ def render(
 
     rets.update(
         {
-            "rend_alpha": render_alpha,  # TODO chen: is this just the opacity?
+            "rend_alpha": render_alpha,
             "rend_normal": render_normal,  # Normal map
             "rend_dist": render_dist,  # Distortion map
             "depth": surf_depth,  # Proper surface depth
