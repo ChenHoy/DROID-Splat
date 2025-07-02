@@ -16,10 +16,6 @@
 
 <p align="center"> SotA results for monocular video by integrating depth of an unknown scale! </p>
 
-## Update
-Our latest version now consumes considerably less memory than before by simply storing all images in uint8 precision in our buffer. We only switch to float32 on demand. This new implementation 
-scales well to thousands of frames using a modern consumer GPU.
-
 ## :clapper: Introduction
 This is a deep-learning-based dense visual SLAM framework that achieves **real-time global optimization of poses and 3D reconstruction**.   
 - SotA Tracking from [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM)
@@ -28,10 +24,13 @@ This is a deep-learning-based dense visual SLAM framework that achieves **real-t
 - We also support the optimization kernel from [DroidCalib](https://github.com/boschresearch/DroidCalib), which supports arbitrary camera models and optimizes the camera intrinsics on top of the map and pose graph.
 
 ## :loudspeaker: Update 
-We added the **mcmc** branch, which treats Gaussian Splatting as [Markov Chain Monte Carlo](https://github.com/ubc-vision/3dgs-mcmc) and therefore has an improved densification & pruning strategy. In order to use this, simply clone the mcmc-branch and proceed with the install as usual (Our install now features one additional submodule). The rasterizer still supports pose gradient computation. We observed consistent gains in our experiments over vanilla 3D Gaussian Splatting. We will add the [2D Gaussian Splatting](https://github.com/hbb1/2d-gaussian-splatting) branch in the upcoming weeks.
+- We added the **mcmc** branch, which treats Gaussian Splatting as [Markov Chain Monte Carlo](https://github.com/ubc-vision/3dgs-mcmc) and therefore has an improved densification & pruning strategy. In order to use this, simply clone the mcmc-branch and proceed with the install as usual (Our install now features one additional submodule). The rasterizer still supports pose gradient computation. We observed consistent gains in our experiments over vanilla 3D Gaussian Splatting.
+- We added the [2D Gaussian Splatting](https://github.com/hbb1/2d-gaussian-splatting) branch. 2D Gaussian Splatting allows faster convergence to good surface geometry, however with refinement, we did not achieve better results than naive 3DGS.
+- We added a traditional Loop Closure mechanism similar to [Loop Closure](https://github.com/princeton-vl/DPVO). This makes the Tracker more robust for outdoor scenes and allows correct loop closures on more challenging datasets like KITTI VO or ScanNet. We can report numbers that make a direct comparison between the dense DROID-SLAM and sparse DPVO-SLAM++ possible.
+- Our latest version now consumes considerably less memory than before by simply storing all images in uint8 precision in our buffer. We only switch to float32 on demand. This new implementation 
+scales well to thousands of frames using a modern consumer GPU and is implemented on all branches.
 
 ## :memo: Code
-
 You can create an anaconda environment called `droidsplat`. For linux, you need to install **libopenexr-dev** before creating the environment.
 ```bash
 
