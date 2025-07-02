@@ -16,6 +16,14 @@
 
 <p align="center"> SotA results for monocular video by integrating depth of an unknown scale! </p>
 
+## Update
+This is the loop branch, which uses a traditional Loop Closure mechanism similar to [DPVSLAM](https://arxiv.org/pdf/2408.01654), but based on our loop detector.
+- We could reduce the memory footprint significantly by storing images in uint8 at all times and only converting to float32 when needed
+- We added a sparse Segment Bundle Adjustment optimization, which only operates on adjacent segments determined by the loop detector
+- We can close loops by solving a rel. PGO (Pose Graph Optimization), which can resolve loop closures better than naively adding edges to the Optimization and hoping for the best
+- We show comparable numbers to how the denser DROID-SLAM would perform similar to DPVSLAM++
+- We support the KITTI VO and ScanNet dataset and can solve SLAM problems with thousands of frames
+
 ## :clapper: Introduction
 This is a deep-learning-based dense visual SLAM framework that achieves **real-time global optimization of poses and 3D reconstruction**.   
 - SotA Tracking from [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM)
