@@ -10,6 +10,8 @@ from lietorch import SE3
 from .factor_graph import FactorGraph
 
 
+# FIXME there is something wrong with the last frames sometimes
+# Is this because of the interpolation or because of the evaluation code?
 class PoseTrajectoryFiller:
     """This class is used to fill in non-keyframe poses"""
 
@@ -55,19 +57,49 @@ class PoseTrajectoryFiller:
         ### linear pose interpolation ###
         N = self.video.counter.value
         M = len(timestamps)
-        ts = self.video.timestamp[:N]
-        Ps = SE3(self.video.poses[:N])
+        ts = self.video.timestamp[:N]  # Keyframe timestamps
+        Ps = SE3(self.video.poses[:N])  # Keyframe poses
 
-        # found the location of current timestamp in keyframe queue
-        t0 = torch.tensor([ts[ts <= t].shape[0] - 1 for t in timestamps])
+        # 1. Initial Calculation for all timestamps
+        t0 = torch.tensor([ts[ts <= t].shape[0] - 1 for t in timestamps], device=self.device)
         t1 = torch.where(t0 < N - 1, t0 + 1, t0)
-
-        dt = ts[t1] - ts[t0] + 1e-5  # time interval between nearby keyframes
+        # Calculate initial dt, dP, v, w, and Gs for all frames.
+        # For extrapolation frames, dt will be ~0, dP will be identity, v and w will be ~0.
+        dt = ts[t1] - ts[t0] + 1e-5  # Time interval between nearby frames
         dP = Ps[t1] * Ps[t0].inv()  # Get relative pose
-        # Do Linear Interpolation in between segments
-        v = dP.log() / dt.unsqueeze(dim=-1)
-        w = v * (tt - ts[t0]).unsqueeze(dim=-1)
-        Gs = SE3.exp(w) * Ps[t0]
+        v = dP.log() / dt.unsqueeze(dim=-1)  # Compute velocity
+        w = v * (tt - ts[t0]).unsqueeze(dim=-1)  # Compute angular twist vector
+        Gs = SE3.exp(w) * Ps[t0]  # Linear interpolation between segments
+
+        # NOTE the naive DROID-SLAM implementation does not consider the case where the last keyframe is not the last frame of the video and we have a batch of extrapolated frames.
+        # 2. Identify Frames Requiring Extrapolation
+        # These are the frames where t0 (and thus t1) points to the last keyframe (N-1)
+        # AND their timestamp is beyond ts[N-1].
+        # We only need to adjust if N >= 2 to compute a meaningful velocity for extrapolation.
+        extrapolation_mask = (t0 == N - 1) & (tt > ts[N - 1])  # True for frames that need extrapolation
+        # Ensure we have at least 2 keyframes to compute a valid extrapolation velocity
+        if N >= 2 and torch.any(extrapolation_mask):
+            # Calculate the velocity from the LAST valid segment (Ps[N-2] to Ps[N-1])
+            P_prev_kf, P_last_kf = Ps[N - 2], Ps[N - 1]
+            ts_prev_kf, ts_last_kf = ts[N - 2], ts[N - 1]
+
+            dt_extrap_segment = ts_last_kf - ts_prev_kf + 1e-5
+            dP_extrap_segment = P_last_kf * P_prev_kf.inv()
+            v_extrap_constant = dP_extrap_segment.log() / dt_extrap_segment.unsqueeze(dim=-1)
+
+            # Apply this constant velocity for extrapolation
+            delta_t_extrap = tt[extrapolation_mask] - ts_last_kf
+            w_extrap = v_extrap_constant * delta_t_extrap.unsqueeze(dim=-1)
+
+            # Overwrite the clamped Gs for the extrapolation frames with the new extrapolated poses
+            Gs_extrapolated = SE3.exp(w_extrap) * P_last_kf[None]
+            Gs[extrapolation_mask] = Gs_extrapolated
+
+        elif N < 2 and torch.any(extrapolation_mask):
+            # Handle case where we need to extrapolate but don't have enough keyframes
+            # In this case, simply clamping to the last keyframe is the only reasonable option
+            # Your current calculation already does this effectively (Gs[extrapolation_mask] remains Ps[N-1])
+            print(f"Warning: Not enough keyframes ({N}) to compute extrapolation velocity. Clamping to Ps[N-1].")
 
         # extract features (no need for context features)
         inputs = inputs.float() / 255.0  # Normalize to [0, 1]
@@ -111,7 +143,7 @@ class PoseTrajectoryFiller:
         return [Gs]
 
     @torch.no_grad()
-    def __call__(self, image_stream, batch_size: int = 8, return_tstamps: bool = False):
+    def __call__(self, image_stream, batch_size: int = 12, return_tstamps: bool = False):
         """fill in poses of non-keyframe images in batch mode. This works by first linear interpolating the
         poses in between the keyframes, then computing the optical flow between these frames and doing a
         motion only BA refinement.
