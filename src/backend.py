@@ -50,7 +50,14 @@ class BackendWrapper(torch.nn.Module):
         self.last_t = -1
 
         self.count = 0
-        self.optimizer = Backend(self.net, self.video, self.cfg, self.max_window, self.frontend_window)
+        self.optimizer = Backend(
+            self.net,
+            self.video,
+            self.cfg,
+            self.max_window,
+            self.frontend_window,
+            filter_edges=cfg.tracking.backend.get("filter_edges", False),
+        )
         self.empty_cache = empty_cache
 
     def info(self, msg: str) -> None:
@@ -135,10 +142,11 @@ class Backend:
     NOTE: main difference to frontend is initializing a new factor graph each time we call
     """
 
-    def __init__(self, net, video, cfg, max_window: int = 200, frontend_window: int = 20):
+    def __init__(self, net, video, cfg, max_window: int = 200, frontend_window: int = 20, filter_edges: bool = False):
         self.video = video
         self.device = cfg.device
         self.update_op = net.update
+        self.filter_edges = filter_edges
 
         self.upsample = cfg.tracking.get("upsample", False)
         self.beta = cfg.tracking.get("beta", 0.7)  # Balance rotation and translation for distance computation
@@ -255,7 +263,8 @@ class Backend:
         if n_edges > max_factors:
             self.info("Warning. Already going above the max. number of factors from proximity alone")
         # Filter out low confidence edges
-        # graph.filter_edges()
+        if self.filter_edges:
+            graph.filter_edges()
 
         if add_ii is not None and add_jj is not None:
             graph.add_factors(add_ii, add_jj)
