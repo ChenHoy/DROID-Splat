@@ -253,7 +253,7 @@ def perform_updates(
     lmbda: float = 1e-6,
     fix_opt_window: bool = False,
     segments_to_fix: Optional[List[TrajectorySegment]] = None,
-    segment_padding: int = 2,
+    segment_padding: int = 2,  # TODO Delete this since no padding works better
 ):
     """Run Levenberg-Marquardt optimization on a PGO problem. We additionally allow to fix certain segments of the trajectory, i.e. we
     augment the Hessian matrix for these poses, so that they are not updated.

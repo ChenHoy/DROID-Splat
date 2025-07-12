@@ -88,6 +88,9 @@ class LongTermLoopClosure:
         self.max_depth = self.cfg.get("max_depth", 20.0)
         self.device = device
 
+        self.fix_segments = self.cfg.get("fix_segments", True)
+        self.free_segments = self.cfg.get("free_segments", 2)
+
         # Patch graph + loop edges
         self.video = video_buffer
         self.loop_ii = torch.zeros(0, dtype=torch.long)
@@ -246,7 +249,7 @@ class LongTermLoopClosure:
 
         start = time.time()
         lc_in_progress += 1  # Mark that we are currently running a loop closure
-        result = self.close_loop(i, j)  # Try to close the loop
+        result = self.close_loop(i, j, self.fix_segments, self.free_segments)  # Try to close the loop
         if result is not None:
             self.lc_count += 1
 
@@ -480,9 +483,8 @@ class LongTermLoopClosure:
 
             # self.video.normalize()
             self.video.dirty[:cur_t] = True  # Update visualization
-            self._rescale_deltas(
-                s1
-            )  # Memoize the scale changes in the video buffer for other Processs (Gaussian Splatting)
+            # Memoize the scale changes in the video buffer for other Processs (Gaussian Splatting)
+            self._rescale_deltas(s1)
 
     def _rescale_deltas(self, s):
         """We store the deltas in the video buffer, in case we have multiple loop closures without a reset, we chain the estimated scale changes."""
