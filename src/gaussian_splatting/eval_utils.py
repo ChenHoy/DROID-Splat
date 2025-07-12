@@ -202,7 +202,6 @@ def evaluate_evo(
         plot_start_end_markers=True,
     )
     ax.legend()
-    # plt.show()  # TODO delete after tests
     plt.savefig(os.path.join(plot_dir, "evo_2dplot_{}.png".format(str(label))), dpi=90)
 
     return ape_stats
