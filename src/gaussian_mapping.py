@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 from .gaussian_splatting.gui import gui_utils
 from .gaussian_splatting.eval_utils import EvaluatePacket
 from .gaussian_splatting.gaussian_renderer import render
-from .gaussian_splatting.scene.gaussian_model import GaussianModel
+from .gaussian_splatting.scene.gaussian_model import GaussianModel, build_scaling_rotation
 from .gaussian_splatting.camera_utils import Camera
 from .losses import mapping_rgbd_loss, plot_losses
 
@@ -37,6 +37,13 @@ We create new Gaussians based on incoming new views and optimize them for dense 
 Since they are initialized with the 3D locations of a VSLAM system, this process converges really fast. 
 
 NOTE this could a be standalone SLAM system itself, but we use it on top of an optical flow based SLAM system.
+
+This branch uses Monte-Carlo Markov Chain sampling for the optimization. This was introduced in the paper https://arxiv.org/abs/2404.09591
+What this means is that we treat the Gaussians as a propability distribution and the different strategies for densification, pruning and cloning 
+are moves in a markov model. 
+Cool features that are possible from this view: 
+    - Improved densification and better scene representation. This beats vanilla 3DGS in pure performance
+    - Controllable scene representation. We can control the total number of Gaussians and their spread in the scene with only a single hyperparameter
 """
 
 
@@ -62,6 +69,7 @@ class GaussianMapper(object):
 
         self.opt_params = cfg.mapping.opt_params  # Optimizer
         self.loss_params = cfg.mapping.loss  # Losses
+        self.mcmc_params = cfg.mapping.mcmc  # MCMC Sampling
 
         self.pipeline_params = cfg.mapping.pipeline_params
         self.sh_degree = 3 if cfg.mapping.use_spherical_harmonics else 0
@@ -673,10 +681,22 @@ class GaussianMapper(object):
                 view.cam_rot_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
                 view.cam_trans_delta = torch.nn.Parameter(torch.zeros(3, device=self.device))
 
+    @torch.no_grad()
+    def apply_noise(self, xyz_lr: float) -> None:
+        def op_sigmoid(x, k=100, x0=0.995):
+            return 1 / (1 + torch.exp(-k * (x - x0)))
+
+        L = build_scaling_rotation(self.gaussians.get_scaling, self.gaussians.get_rotation)
+        actual_covariance = L @ L.transpose(1, 2)
+        rnd_xyz = torch.randn_like(self.gaussians._xyz)
+        noise = rnd_xyz * (op_sigmoid(1 - self.gaussians.get_opacity)) * self.mcmc_params.noise_lr * xyz_lr
+        noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
+        self.gaussians._xyz.add_(noise)
+
     def render_compare(self, view: Camera) -> Tuple[float, Dict, Dict]:
         """Render current view and compute loss by comparing with groundtruth"""
         render_pkg = render(view, self.gaussians, self.pipeline_params, self.background, device=self.device)
-        # NOTE chen: this can be None when self.gaussians is 0. This can happen in some cases
+        # NOTE chen: this can be None when len(self.gaussians) is 0. This can happen in some cases
         if render_pkg is None:
             return 0.0
 
@@ -692,16 +712,14 @@ class GaussianMapper(object):
         if len(self.gaussians) == 0:
             return 0.0
 
-        # NOTE chen: this can happen we have zero depth and an inconvenient pose
+        # NOTE chen: this can happen if we have zero depth and an inconvenient pose
         self.gaussians.check_nans()
 
         if optimize_poses:
             pose_optimizer = self.get_pose_optimizer(frames)
 
+        xyz_lr = self.gaussians.update_learning_rate(iter)
         loss = 0.0
-        # Collect for densification and pruning
-        radii_acm, touched_acm = [], []
-        visibility_filter_acm, viewspace_point_tensor_acm = [], []
         for view in frames:
             current_loss, render_pkg = self.render_compare(view)
             if render_pkg is None:
@@ -711,21 +729,19 @@ class GaussianMapper(object):
             # Keep track of how often the Gaussians were already optimized
             self.gaussians.increment_n_opt_counter(visibility=render_pkg["visibility_filter"])
             self.n_optimized[view.uid] += 1
-
-            # Accumulate for after loss backpropagation
-            visibility_filter_acm.append(render_pkg["visibility_filter"])
-            viewspace_point_tensor_acm.append(render_pkg["viewspace_points"])
-            radii_acm.append(render_pkg["radii"])
-            touched_acm.append(render_pkg["n_touched"])
-
             self.last_frame_loss[view.uid] = current_loss.item()
+
             loss += current_loss
 
         # NOTE we could scale the loss so our learning rate is independent of the batch size
         # However, we could get better results and tune it as it is
         avg_loss = loss / len(frames)  # Average over batch
 
-        # Regularizor: Punish anisotropic Gaussians
+        # Regularizer: Scale and opacity
+        # FIXME chen: This is somehow used in the original, I am not sure if it helps that much
+        loss = loss + self.mcmc_params.opacity_reg * torch.abs(self.gaussians.get_opacity).mean()
+        loss = loss + self.mcmc_params.scale_reg * torch.abs(self.gaussians.get_scaling).mean()
+        # Regularizer: Punish anisotropic Gaussians
         scaling = self.gaussians.get_scaling
         isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
         loss += self.loss_params.beta1 * isotropic_loss.mean()
@@ -735,42 +751,25 @@ class GaussianMapper(object):
         loss.backward()
 
         ### Maybe Densify and Prune before update
-        with torch.no_grad():
-            for idx in range(len(viewspace_point_tensor_acm)):
-                # Dont let Gaussians grow too much by forcing radius to not change
-                self.gaussians.max_radii2D[visibility_filter_acm[idx]] = torch.max(
-                    self.gaussians.max_radii2D[visibility_filter_acm[idx]],
-                    radii_acm[idx][visibility_filter_acm[idx]],
-                )
-                # FIXME this should be passed as arg to function, so it can also be set for refinement
-                if self.update_params.densify.accumulate_pixels:
-                    pixels = touched_acm[idx]
-                else:
-                    pixels = None
-                # NOTE chen: we dont necessarily get better results when using the gradient averaging techique from Abs GS
-                self.gaussians.add_densification_stats(
-                    viewspace_point_tensor_acm[idx], visibility_filter_acm[idx], pixels=pixels
-                )
-
-            # Prune and Densify
-            if self.last_idx > self.n_last_frames and prune_densify:
-                # General pruning based on opacity and size + densification (from original 3DGS)
-                self.gaussians.densify_and_prune(**self.update_params.densify.vanilla)
+        # NOTE chen: MCMC samplings needs the optimizer to be run at least once
+        if self.last_idx > self.n_last_frames and prune_densify and self.count > 0:
+            dead_mask = (self.gaussians.get_opacity <= self.mcmc_params.min_opacity).squeeze(-1)
+            self.gaussians.relocate_gs(dead_mask=dead_mask)
+            self.gaussians.add_new_gs(cap_max=self.mcmc_params.cap_max)
 
         ### Update states
         self.gaussians.optimizer.step()
-        self.gaussians.optimizer.zero_grad()
-        self.gaussians.update_learning_rate(iter)
+        self.gaussians.optimizer.zero_grad(set_to_none=True)
 
-        # Delete lists of tensors
-        del radii_acm
-        del visibility_filter_acm
-        del viewspace_point_tensor_acm
+        ### Add noise to the Gaussians
+        self.apply_noise(xyz_lr)
+
+        torch.cuda.empty_cache()  # Free up memory
 
         if optimize_poses:
             pose_optimizer.step()
             self.maybe_clean_pose_update(frames)  # Sanitize in case of nan's
-            pose_optimizer.zero_grad()
+            pose_optimizer.zero_grad(set_to_none=True)
             # Actually make optimizer step
             for view in frames:
                 if view.uid == 0:  # Keep first pose always fixed!
@@ -809,7 +808,7 @@ class GaussianMapper(object):
         self.gaussians.n_obs.fill_(0)  # Reset observation count
         for view in frames:
             render_pkg = render(view, self.gaussians, self.pipeline_params, self.background)
-            visibility = (render_pkg["n_touched"] > 0).long()
+            visibility = (render_pkg["is_used"] > 0).long()
             occ_aware_visibility[view.uid] = visibility
             # Count when at least one pixel was touched by the Gaussian
             self.gaussians.n_obs += visibility  # Increase observation count
@@ -1089,9 +1088,11 @@ class GaussianMapper(object):
         print(colored("\n[Gaussian Mapper] ", "magenta"), colored(f"Loss: {self.loss_list[-1]}", "cyan"))
 
         ### Prune unreliable Gaussians
+        # TODO chen: Since we now dont have the vanilla densify_and_split strategy, we dont get rid of big gaussians
+        # TODO do manual big point removal as is done in other works?
         if len(self.iteration_info) % self.update_params.prune_every == 0 and delay_to_tracking:
+            # Gaussians should be visible in multiple frames
             if self.update_params.pruning.use_covisibility:
-                # Gaussians should be visible in multiple frames
                 self.covisibility_pruning(**self.update_params.pruning.covisibility)
 
         ### Feedback new state of map to Tracker

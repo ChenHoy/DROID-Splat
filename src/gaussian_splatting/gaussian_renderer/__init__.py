@@ -15,8 +15,7 @@ from typing import List
 
 import torch
 import math
-from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
-
+from diff_gaussian_rasterization_mcmc import GaussianRasterizationSettings, GaussianRasterizer
 from ..scene.gaussian_model import GaussianModel
 from ..utils.sh_utils import eval_sh
 
@@ -54,11 +53,10 @@ def render(
 
     Background tensor (bg_color) must be on GPU!
     """
-
-    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     if len(pc.get_xyz) == 0:
         return None
 
+    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device=device) + 0
     try:
         screenspace_points.retain_grad()
@@ -99,18 +97,14 @@ def render(
     if pipe.compute_cov3D_python:
         cov3D_precomp = pc.get_covariance(scaling_modifier)
     else:
-        # check if the covariance is isotropic
-        if pc.get_scaling.shape[-1] == 1:
-            scales = pc.get_scaling.repeat(1, 3)
-        else:
-            scales = pc.get_scaling
+        scales = pc.get_scaling
         rotations = pc.get_rotation
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
     shs = None
     colors_precomp = None
-    if colors_precomp is None:
+    if override_color is None:
         if pipe.convert_SHs_python:
             shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree + 1) ** 2)
             dir_pp = pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1)
@@ -124,7 +118,7 @@ def render(
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
     if mask is not None:
-        rendered_image, radii, depth, opacity = rasterizer(
+        rendered_image, radii, depth, opacity, n_touched = rasterizer(
             means3D=means3D[mask],
             means2D=means2D[mask],
             shs=shs[mask],
@@ -154,10 +148,10 @@ def render(
     # They will be excluded from value updates used in the splitting criteria.
     return {
         "render": rendered_image,
+        "depth": depth,
         "viewspace_points": screenspace_points,
         "visibility_filter": radii > 0,
         "radii": radii,
-        "depth": depth,
         "opacity": opacity,
-        "n_touched": n_touched,
+        "is_used": n_touched,
     }

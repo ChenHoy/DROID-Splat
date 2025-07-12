@@ -10,9 +10,10 @@
 
 import os
 import ipdb
+import time
 import math
 from termcolor import colored
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import numpy as np
 import open3d as o3d
@@ -33,7 +34,13 @@ from ..utils.general_utils import (
 )
 from ..camera_utils import Camera
 from ..utils.graphics_utils import BasicPointCloud, getWorld2View2
+from ..utils.reloc_utils import compute_relocation_cuda
 from ..utils.sh_utils import RGB2SH
+
+
+"""
+3D Gaussian Splatting together with MCMC sampling for densification and pruning of Gaussians.
+"""
 
 
 def normal2rotation(n: torch.Tensor):
@@ -74,90 +81,6 @@ def rotmat2quaternion(R: torch.Tensor, normalize: bool = False) -> torch.Tensor:
     if normalize:
         q = torch.nn.functional.normalize(q, dim=-1)
     return q
-
-
-class GradientScaler(object):
-    """
-    Tracks the number of times each variable has been optimized and scales gradients with diminishing effect.
-    We use an exponential decay schedule here.
-    """
-
-    def __init__(self, min_scale: float = 0.1, decay_rate: float = 0.01, counts: torch.Tensor = None):
-        self.min_scale = min_scale  # Dont lower gradients below 1/10, so we never stop optimizing some old gaussians
-        self.decay_rate = decay_rate
-        self.counts = counts if counts is not None else torch.ones(1)
-
-    def get_scale(self, counts: torch.Tensor) -> torch.Tensor:
-        """
-        Scales the gradients of a variable based on its optimization count with diminishing effect.
-
-        Args:
-            variable: The torch.Tensor variable for which to scale gradients.
-
-        Returns:
-            The scaling factor as a Tensor of floats.
-        """
-        decay = torch.exp(-self.decay_rate * counts)
-        scale = self.min_scale + (1 - self.min_scale) * decay
-        return scale
-
-    def __call__(self, grad: torch.Tensor) -> torch.Tensor:
-        # Apply scaling factor to gradients during backward pass
-        assert len(grad) == len(
-            self.counts
-        ), f"Gradient and count shape mismatch! Expected shape {grad.shape}, got {self.counts.shape}"
-        scaling = self.get_scale(self.counts)
-
-        if grad.ndim == 1:
-            return grad * scaling
-        elif grad.ndim == 2:
-            return grad * scaling[:, None]
-        elif grad.ndim == 3:
-            return grad * scaling[:, None, None]
-        else:
-            raise Exception(f"Gradient shape {grad.shape} not supported! Use either 1D, 2D or 3D tensors.")
-
-
-class InverseScaler(GradientScaler):
-    def __init__(self, min_scale: float = 0.1, decay_rate: float = 0.01, counts: torch.Tensor = None):
-        super().__init__(min_scale, decay_rate, counts)
-
-    def __call__(self, grad: torch.Tensor) -> torch.Tensor:
-        # Apply scaling factor to gradients during backward pass
-        assert len(grad) == len(
-            self.counts
-        ), f"Gradient and count shape mismatch! Expected shape {grad.shape}, got {self.counts.shape}"
-        scaling = self.get_scale(self.counts)
-
-        if grad.ndim == 1:
-            return grad / scaling
-        elif grad.ndim == 2:
-            return grad / scaling[:, None]
-        elif grad.ndim == 3:
-            return grad / scaling[:, None, None]
-        else:
-            raise Exception(f"Gradient shape {grad.shape} not supported! Use either 1D, 2D or 3D tensors.")
-
-
-def scale_gradients(variable: torch.nn.Parameter, scale_fn):
-    """Attach a hook, so the gradients are automatically scaled by the GradientScaler for each backward pass."""
-
-    def hook(parameter):
-        parameter.grad = scale_fn(parameter.grad)
-
-    h = variable.register_post_accumulate_grad_hook(hook)
-    return h
-
-
-def unscale_gradients(variable: torch.nn.Parameter, inverse_fn) -> torch.Tensor:
-    """Because we use the gradients when densifying and pruning Gaussians, we might want to use the
-    original gradients, else we easily get stuck with a fixed number of Gaussians and dont densify anymore.
-
-    The densification call lies between loss.backward() and optimizer.step()! Therefore we need to unscale the gradients
-    after computation in backward(), but leave them in place for the following optimizer.step() scall.
-    For this reason we dont change the gradient in place, but return the unscaled value for the densification function.
-    """
-    return inverse_fn(variable.grad)
 
 
 class GaussianModel:
@@ -231,6 +154,19 @@ class GaussianModel:
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
 
+    def get_3d_bounding_box(self, return_volume: bool = False):
+        """Return a bounding box of the 3D Gaussians in the scene.
+        This is in format [min_x, min_y, min_z, max_x, max_y, max_z]
+        """
+        min_point = torch.min(self.get_xyz, dim=0)[0]
+        max_point = torch.max(self.get_xyz, dim=0)[0]
+        box3d = [min_point[0], min_point[1], min_point[2], max_point[0], max_point[1], max_point[2]]
+        volume3d = (max_point[0] - min_point[0]) * (max_point[1] - min_point[1]) * (max_point[2] - min_point[2])
+        if return_volume:
+            return box3d, volume3d
+        else:
+            return box3d
+
     def get_covariance(self, scaling_modifier=1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
@@ -275,6 +211,7 @@ class GaussianModel:
                 )
 
                 param_group["lr"] = lr
+                return lr
 
     def construct_list_of_attributes(self):
         l = ["x", "y", "z", "nx", "ny", "nz"]
@@ -303,6 +240,45 @@ class GaussianModel:
                 self.optimizer.state[group["params"][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
+        return optimizable_tensors
+
+    def replace_tensors_to_optimizer(self, inds=None):
+        tensors_dict = {
+            "xyz": self._xyz,
+            "f_dc": self._features_dc,
+            "f_rest": self._features_rest,
+            "opacity": self._opacity,
+            "scaling": self._scaling,
+            "rotation": self._rotation,
+        }
+
+        optimizable_tensors = {}
+        for group in self.optimizer.param_groups:
+            assert len(group["params"]) == 1
+            tensor = tensors_dict[group["name"]]
+            stored_state = self.optimizer.state.get(group["params"][0], None)
+
+            # NOTE chen: if we call this on the first optimizer call, we dont have these attributes yet
+            if inds is not None and stored_state:
+                stored_state["exp_avg"][inds] = 0
+                stored_state["exp_avg_sq"][inds] = 0
+            else:
+                stored_state["exp_avg"] = torch.zeros_like(tensor)
+                stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+
+            del self.optimizer.state[group["params"][0]]
+            group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
+            self.optimizer.state[group["params"][0]] = stored_state
+
+            optimizable_tensors[group["name"]] = group["params"][0]
+
+        self._xyz = optimizable_tensors["xyz"]
+        self._features_dc = optimizable_tensors["f_dc"]
+        self._features_rest = optimizable_tensors["f_rest"]
+        self._opacity = optimizable_tensors["opacity"]
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+
         return optimizable_tensors
 
     def _prune_optimizer(self, mask):
@@ -355,7 +331,7 @@ class GaussianModel:
         return optimizable_tensors
 
     def create_pcd_from_image_and_depth(
-        self, cam, rgb, depth, init=False, downsample_factor=None, with_normals: bool = False
+        self, cam, rgb, depth, init=False, downsample_factor=None, with_normals: bool = True
     ):
         if downsample_factor is None:
             if init:
@@ -536,24 +512,10 @@ class GaussianModel:
         self.denom = self.denom[valid_points_mask]
 
         self.max_radii2D = self.max_radii2D[valid_points_mask]
-        # FIXME highly suspect of creating memory bug
         # raises sometimes RuntimeError: out_ptr == out_accessor[thread_count_nonzero[tid + 1]].data()
         self.unique_kfIDs = self.unique_kfIDs[valid_points_mask]
         self.n_obs = self.n_obs[valid_points_mask]
         self.n_optimized = self.n_optimized[valid_points_mask]
-
-    # def prune_floaters(
-    #     self, search_radius: float = 0.1, min_nn_distance: float = 0.05, return_mask: bool = True
-    # ) -> None:
-    #     """Prune isolated outlier points which are floaters without any neighbors"""
-    #     pcd_temp = self._xyz.unsqueeze(0)
-    #     # NOTE since we search within the same point cloud, we will always get the original point as the closest neighbor with distance 0.0
-    #     all_dists, idxs, _, _ = frnn.frnn_grid_points(pcd_temp, pcd_temp, K=2, r=search_radius)
-    #     nn_dists = all_dists[..., 1]  # Get the actual nearest neighbor distance
-    #     floaters = nn_dists > min_nn_distance  # Points without a nearest neighbor in this radius are likely floaters
-    #     self.prune_points(floaters.squeeze())
-    #     if return_mask:
-    #         return floaters
 
     def densification_postfix(
         self,
@@ -566,6 +528,7 @@ class GaussianModel:
         new_kf_ids=None,
         new_n_obs=None,
         new_n_opt=None,
+        reset_params: bool = True,
     ):
         d = {
             "xyz": new_xyz,
@@ -585,9 +548,10 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
         # Reset attributes for thresholding
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
+        if reset_params:
+            self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
+            self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
+            self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
 
         # Add new keyframe ID and observation/optimized count
         if new_kf_ids is not None:
@@ -645,64 +609,13 @@ class GaussianModel:
 
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent):
-        # Extract points that satisfy the gradient condition
-        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
-        selected_pts_mask = torch.logical_and(
-            selected_pts_mask,
-            torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent,
-        )
-
-        new_xyz = self._xyz[selected_pts_mask]
-        new_features_dc = self._features_dc[selected_pts_mask]
-        new_features_rest = self._features_rest[selected_pts_mask]
-        new_opacities = self._opacity[selected_pts_mask]
-        new_scaling = self._scaling[selected_pts_mask]
-        new_rotation = self._rotation[selected_pts_mask]
-
-        # NOTE these operations create a malloc error with wrong pytorch version
-        new_kf_id = self.unique_kfIDs[selected_pts_mask]
-        new_n_obs = self.n_obs[selected_pts_mask]
-        new_n_opt = self.n_optimized[selected_pts_mask]
-
-        self.densification_postfix(
-            new_xyz,
-            new_features_dc,
-            new_features_rest,
-            new_opacities,
-            new_scaling,
-            new_rotation,
-            new_kf_ids=new_kf_id,
-            new_n_obs=new_n_obs,
-            new_n_opt=new_n_opt,
-        )
-
     def densify_from_mask(self, cam, mask, downsample_factor=1, depthmap=None):
         features = self.create_pcd_from_image(cam, mask=mask, downsample_factor=downsample_factor, depthmap=depthmap)
         if features is not None:
             fused_point_cloud, features, scales, rots, opacities = features
             self.extend_from_pcd(fused_point_cloud, features, scales, rots, opacities, cam.uid)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, scale_std=1.0):
-        grads = self.xyz_gradient_accum / self.denom
-        grads[grads.isnan()] = 0.0
-
-        n_g = self.get_xyz.shape[0]
-
-        self.densify_and_clone(grads, max_grad, extent)
-        # New points are seeded within normal deviation with mean and std=scale, i.e. around the current point
-        # We allow to manually change the standard deviation to have many more points lie with high chance very close to old Gaussian!
-        self.densify_and_split(grads, max_grad, extent, scale_std=scale_std)
-
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
-        if max_screen_size:
-            big_points_vs = self.max_radii2D > max_screen_size  # Size
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
-            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-
-        self.prune_points(prune_mask)
-        self.info(f"Pruning & densification added {self.get_xyz.shape[0] - n_g} gaussians")
-
+    # FIXME chen: ABS GS has a slightly different CUDA kernel, we need to add this on top for correctness
     def add_densification_stats(
         self, viewspace_point_tensor: torch.Tensor, update_filter: torch.Tensor, pixels: Optional[torch.Tensor] = None
     ):
@@ -923,16 +836,172 @@ class GaussianModel:
         print(f"Using average scale: {avg_scale}")
         return avg_scale.item()
 
-    def set_scale_grads(self, min_scale: float = 0.1, decay_rate: float = 0.01) -> None:
-        """Attach a hook with the scaling factor to scale the gradients during the backward pass dependent on self.n_optimized."""
-        scale_fn = GradientScaler(min_scale=min_scale, decay_rate=decay_rate, counts=self.n_optimized.to(self.device))
-        h_xyz = scale_gradients(self._xyz, scale_fn)
-        h_features_dc = scale_gradients(self._features_dc, scale_fn)
-        h_features_rest = scale_gradients(self._features_rest, scale_fn)
-        h_opacity = scale_gradients(self._opacity, scale_fn)
-        h_scaling = scale_gradients(self._scaling, scale_fn)
-        h_rot = scale_gradients(self._rotation, scale_fn)
-        return [h_xyz, h_features_dc, h_features_rest, h_opacity, h_scaling, h_rot]
+    def densify_and_clone(self, grads: torch.Tensor, grad_threshold: float, scene_extent: float):
+        # Extract points that satisfy the gradient condition
+        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask,
+            torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent,
+        )
+
+        new_xyz = self._xyz[selected_pts_mask]
+        new_features_dc = self._features_dc[selected_pts_mask]
+        new_features_rest = self._features_rest[selected_pts_mask]
+        new_opacities = self._opacity[selected_pts_mask]
+        new_scaling = self._scaling[selected_pts_mask]
+        new_rotation = self._rotation[selected_pts_mask]
+
+        # NOTE these operations create a malloc error with wrong pytorch version
+        new_kf_id = self.unique_kfIDs[selected_pts_mask]
+        new_n_obs = self.n_obs[selected_pts_mask]
+        new_n_opt = self.n_optimized[selected_pts_mask]
+
+        self.densification_postfix(
+            new_xyz,
+            new_features_dc,
+            new_features_rest,
+            new_opacities,
+            new_scaling,
+            new_rotation,
+            new_kf_ids=new_kf_id,
+            new_n_obs=new_n_obs,
+            new_n_opt=new_n_opt,
+        )
+
+    def densify_and_prune(
+        self, max_grad: float, min_opacity: float, extent: float, max_screen_size: float, scale_std: float = 1.0
+    ):
+        """Densify and prune"""
+        grads = self.xyz_gradient_accum / self.denom
+        grads[grads.isnan()] = 0.0
+        n_g = self.get_xyz.shape[0]  # Memoize number of Gaussians before operations
+
+        # Densify in carved out 3D regions of high 2D projected image losses
+        self.densify_and_clone(grads, max_grad, extent)
+        # Vanilla Densify and Split based on gradients and extent
+        self.densify_and_split(grads, max_grad, extent, scale_std=scale_std)
+
+        # Prune based on Opacity
+        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if max_screen_size:
+            big_points_vs = self.max_radii2D > max_screen_size
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+        self.prune_points(prune_mask)
+        self.info(f"Pruning & densification added {self.get_xyz.shape[0] - n_g} gaussians")
+
+        torch.cuda.empty_cache()
+
+    #####
+    # Monte-Carlo Markov Chain model methods
+    #####
+
+    def _update_params(self, idxs, ratio):
+        new_opacity, new_scaling = compute_relocation_cuda(
+            opacity_old=self.get_opacity[idxs, 0], scale_old=self.get_scaling[idxs], N=ratio[idxs, 0] + 1
+        )
+        new_opacity = torch.clamp(new_opacity.unsqueeze(-1), max=1.0 - torch.finfo(torch.float32).eps, min=0.005)
+        new_opacity = self.inverse_opacity_activation(new_opacity)
+        new_scaling = self.scaling_inverse_activation(new_scaling.reshape(-1, 3))
+
+        return (
+            self._xyz[idxs],
+            self._features_dc[idxs],
+            self._features_rest[idxs],
+            new_opacity,
+            new_scaling,
+            self._rotation[idxs],
+        )
+
+    def _sample_alives(self, probs, num, alive_indices=None):
+        probs = probs / (probs.sum() + torch.finfo(torch.float32).eps)
+        sampled_idxs = torch.multinomial(probs, num, replacement=True)
+        if alive_indices is not None:
+            sampled_idxs = alive_indices[sampled_idxs]
+        ratio = torch.bincount(sampled_idxs).unsqueeze(-1)
+        return sampled_idxs, ratio
+
+    @torch.no_grad()
+    def relocate_gs(self, dead_mask=None):
+
+        if dead_mask.sum() == 0:
+            return
+
+        alive_mask = ~dead_mask
+        dead_indices = dead_mask.nonzero(as_tuple=True)[0]
+        alive_indices = alive_mask.nonzero(as_tuple=True)[0]
+
+        if alive_indices.shape[0] <= 0:
+            return
+
+        # sample from alive ones based on opacity
+        probs = self.get_opacity[alive_indices, 0]
+        reinit_idx, ratio = self._sample_alives(alive_indices=alive_indices, probs=probs, num=dead_indices.shape[0])
+
+        (
+            self._xyz[dead_indices],
+            self._features_dc[dead_indices],
+            self._features_rest[dead_indices],
+            self._opacity[dead_indices],
+            self._scaling[dead_indices],
+            self._rotation[dead_indices],
+        ) = self._update_params(reinit_idx, ratio=ratio)
+
+        self._opacity[reinit_idx] = self._opacity[dead_indices]
+        self._scaling[reinit_idx] = self._scaling[dead_indices]
+
+        self.replace_tensors_to_optimizer(inds=reinit_idx)
+
+    @torch.no_grad()
+    def add_new_gs(self, cap_max):
+        current_num_points = self._opacity.shape[0]
+        target_num = min(cap_max, int(1.05 * current_num_points))
+        num_gs = max(0, target_num - current_num_points)
+
+        if num_gs <= 0:
+            return 0
+
+        probs = self.get_opacity.squeeze(-1)
+        add_idx, ratio = self._sample_alives(probs=probs, num=num_gs)
+
+        (new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation) = self._update_params(
+            add_idx, ratio=ratio
+        )
+        # Update opacity and scaling of the existing Gaussians
+        self._opacity[add_idx] = new_opacity
+        self._scaling[add_idx] = new_scaling
+
+        new_unique_kfIDs = self.unique_kfIDs[add_idx]
+        new_n_obs = self.n_obs[add_idx]  # FIXME should this be reinitialized to zero, as the Gaussian is newly born?
+        new_n_opt = self.n_optimized[add_idx]
+
+        # NOTE due to reset_params = False the size of xyz_gradient_accum and denom will not have the correct shape
+        # -> this is problematic for covisibility pruning
+        # HACK manually concatenate these attributes and see how this works
+        # -> This does not have any effect on the MCMC strategy
+        new_xyz_gradient_accum = self.xyz_gradient_accum[add_idx]
+        new_denom = self.denom[add_idx]
+        new_max_radii2D = self.max_radii2D[add_idx]
+        # Concatenate
+        self.xyz_gradient_accum = torch.cat((self.xyz_gradient_accum, new_xyz_gradient_accum))
+        self.denom = torch.cat((self.denom, new_denom))
+        self.max_radii2D = torch.cat((self.max_radii2D, new_max_radii2D))
+
+        self.densification_postfix(
+            new_xyz,
+            new_features_dc,
+            new_features_rest,
+            new_opacity,
+            new_scaling,
+            new_rotation,
+            new_kf_ids=new_unique_kfIDs,
+            new_n_obs=new_n_obs,
+            new_n_opt=new_n_opt,
+            reset_params=False,
+        )
+        self.replace_tensors_to_optimizer(inds=add_idx)
+
+        return num_gs
 
     def info(self, msg: str) -> None:
         print(colored(f"[Gaussian Mapping] {msg}", "magenta"))
