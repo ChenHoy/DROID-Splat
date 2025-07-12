@@ -420,11 +420,10 @@ class SLAM:
         self.all_trigered += 1
         delay = 1  # Delay for the loop detector and closure to avoid bad disps around loop edges
         if self.cfg.run_loop_closure:
-            loop_queue = loop_kwargs[
-                "queue_in"
-            ]  # This is the proper way, i.e. we get from in and loop closer puts into out
+            # This is the proper way, i.e. we get from in and loop closer puts into out
+            loop_queue = loop_kwargs["queue_in"]
         else:
-            loop_queue = loop_kwargs["queue_out"]  # HACK there is no loop closre, so we directly source from out
+            loop_queue = loop_kwargs["queue_out"]  # HACK there is no loop closure, so we directly source from out
 
         # Run as long as Frontend tracking gives use new frames
         while self.tracking_finished < 1 and run:
@@ -536,7 +535,7 @@ class SLAM:
                     all_ii, all_jj = tuple_to_tensor(all_loop_edges)
                     all_ii, all_jj = all_ii.to(self.device), all_jj.to(self.device)
                     # Refine inconsistencies in the map after a loop closure
-                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=all_ii, all_jj=all_jj)
+                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=None, all_jj=None)
                 else:
                     with mp_kwargs["lock"]:
                         mp_kwargs["in_progress"] -= 1  # Loop Closure + Refinement is done
@@ -566,7 +565,7 @@ class SLAM:
                     all_ii, all_jj = tuple_to_tensor(all_loop_edges)
                     all_ii, all_jj = all_ii.to(self.device), all_jj.to(self.device)
                     # Refine inconsistencies in the map after a loop closure
-                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=all_ii, all_jj=all_jj)
+                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=None, all_jj=None)
 
             ### Check for some rest edge candidates in the LoopCloser in case we have a delay
             self.loop_closer.info("Checking for rest loop in loop_closer.found list ...")
@@ -586,7 +585,7 @@ class SLAM:
                     all_ii, all_jj = tuple_to_tensor(all_loop_edges)
                     all_ii, all_jj = all_ii.to(self.device), all_jj.to(self.device)
                     # Refine inconsistencies in the map after a loop closure
-                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=all_ii, all_jj=all_jj)
+                    refine_map_w_backend(self.backend_op, backend_free, mp_kwargs, all_ii=None, all_jj=None)
                     break
 
             self.loop_closer.info(f"Closed {len(self.loop_closer.prev_loop_closes)} loops!")
@@ -739,7 +738,7 @@ class SLAM:
                 continue
 
             sema_backend.acquire()  # Aquire the semaphore (If the counter == 0, then this thread will be blocked)
-            sleep(self.sleep_time)  # Let multiprocessing cool down a little bit
+            sleep(0.1)  # Let multiprocessing cool down a little bit
 
             ## Only run backend if we have enough RAM for it
             memoized_backend_count = self.ram_safeguard_backend(
@@ -811,7 +810,6 @@ class SLAM:
         self.all_finished += 1
         self.info("Backend done!")
 
-    # TODO check if the rescale works properly for Gaussian Splatting as well when doing a loop closure
     def maybe_reanchor_gaussians(
         self, pose_thresh: float = 0.001, scale_thresh: float = 0.1, with_scales: bool = False
     ) -> None:
@@ -1423,10 +1421,10 @@ class SLAM:
 
         # Wait for all processes to have finished before terminating and for final mapping update to be transmitted
         if self.cfg.run_mapping:
-            while self.mapping_queue.empty():
+            while self.mp_mapping_kwargs["queue_out"].empty():
                 pass
             # Receive the final update, so we can do something with it ...
-            a = self.mapping_queue.get()
+            a = self.mp_mapping_kwargs["queue_out"].get()
             self.info("Received final mapping update!", logger=log)
             if a == "None":
                 a = deepcopy(a)
@@ -1438,7 +1436,7 @@ class SLAM:
             del a  # NOTE Always delete receive object from a multiprocessing Queue!
             torch.cuda.empty_cache()
             gc.collect()
-            self.received_mapping.set()
+            self.mp_mapping_kwargs["received"].set()
 
         # Let the processes run until they are finished (When using GUI's these need to be closed manually)
         else:
