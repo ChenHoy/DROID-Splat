@@ -33,7 +33,7 @@ online_opt:
     multiview: True # Only initialize Gaussians that are consistent in multiple views
     mv_count_th: 2 # Pixels need to be consistent within bin_thresh distance across these k views
     # NOTE these are in relation to the mean of the distribution
-    bin_th: 0.05 # Distance between points for binning, this depends on the scene scale, so be careful!
+    bin_th: 0.01 # Distance between points for binning, this depends on the scene scale, so be careful!
     uncertainty: False # Only use very certain points for intializing Gaussians
 
 opt_params:
@@ -51,6 +51,6 @@ loss:
 
 # Parameters for transfer SLAM -> Renderer
 input:
-  pcd_downsample_init: 64 # This is a constant downsampling factor
-  pcd_downsample: 64 # You ideally have ~5-10k points per frame
+  pcd_downsample_init: 128 # This is a constant downsampling factor
+  pcd_downsample: 96 # You ideally have ~5-10k points per frame
   point_size: 0.02

@@ -10,7 +10,7 @@ online_opt:
   n_last_frames: 10 # Always optimize the last n frames
   n_rand_frames: 20 # Optimize random global frames on top
 
-  prune_every: 2 # Prune every k Render passes
+  prune_every: 4 # Prune every k Render passes
   pruning:
     use_covisibility: True
     covisibility:
@@ -61,6 +61,6 @@ loss:
 
 # Parameters for transfer SLAM -> Renderer
 input:
-  pcd_downsample_init: 16 # This is a constant downsampling factor
+  pcd_downsample_init: 32 # This is a constant downsampling factor
   pcd_downsample: 128 # You ideally have ~5-10k points per frame
   point_size: 0.02

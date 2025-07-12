@@ -1,6 +1,5 @@
 dataset: "davis"
 input_folder: "/media/data/DAVIS/JPEGImages/Full-Resolution/" # base path
-mono_depth: "zoed-nk"
 scene: "parkour" # Switch over scenes
 png_depth_scale: 1.0
 

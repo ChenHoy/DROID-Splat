@@ -19,13 +19,15 @@ frontend:
   keyframe_thresh: 6.0  # remove keyframe if avg flow < 
   thresh: 20.0  # only consider edge with avg flow < 
   window: 40  # local ba window size
-  release_cache: alse 
-  max_age: 30 # (default: 25) Max age of a factor, we remove these after optimizing them for so long in the current window
+  release_cache: True 
+  max_age: 25 # (default: 25) Max age of a factor, we remove these after optimizing them for so long in the current window
+  pose_interpolation: damped # linear (linear motion w. const speed), damped (damped linear motion), naive/null (just copy the prev pose)
 
 backend:
   warmup: 15
   thresh: 60.0  # only consider edge with avg flow < 
   window: 600 # Dont optimize more keyframes to avoid OOM
+  filter_edges: True # Filter out low confidence edges
   radius: 1
   max_factor_mult: 3
   nms: 1 # The higher this is, the fewer factors are build

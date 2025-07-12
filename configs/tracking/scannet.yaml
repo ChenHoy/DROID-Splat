@@ -1,7 +1,7 @@
 defaults:
   - /tracking/base@_here_
 
-buffer: 512
+buffer: 1024
 warmup: 8
 beta: 0.5  # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel 
 # Running mapping and higher resolutions requires either more Memory or other tricks
@@ -13,7 +13,7 @@ motion_filter:
 backend:
   warmup: 25
   thresh: 60.0  # only consider edge with avg flow < 
-  window: 300 # Dont optimize more keyframes to avoid OOM
+  window: 400 # Dont optimize more keyframes to avoid OOM
   radius: 3
   max_factor_mult: 6
   nms: 2 

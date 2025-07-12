@@ -1,6 +1,6 @@
 dataset: "folder"
+input_folder: /media/data/Hannover/static/plant
 # input_folder: /media/data/Hannover/static/horse
-input_folder: /media/data/Hannover/static/trash
 # input_folder: /media/data/Hannover/static/trash
 
 ### original camera parameters

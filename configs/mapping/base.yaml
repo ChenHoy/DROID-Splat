@@ -1,6 +1,15 @@
 warmup: 10 # Wait until tracking gets to this frame
 delay: 5 # Delay between tracking and mapping (This should be >= 2, because else )
 
+# Hyperparameters for the Monte Carlo Markov Chain model
+# (Hint): the cap_max should be different each scene, i.e. we could match this to the averages from previous experiments so its comparable
+mcmc:
+  cap_max: 60000 # Maximum number of Gaussians in the map
+  noise_lr: 1e4 # original: 5e5
+  min_opacity: 0.005 # Gaussians below are defined as dead Gaussians
+  opacity_reg: 0.1
+  scale_reg: 0.1
+
 # Online Optimization
 online_opt:
   ## Local sliding optimization window
@@ -21,24 +30,13 @@ online_opt:
       # -> Use 'new' for faster performance
       mode: "new" # ["abs", "new"] How to prune: either check for covisible frames everywhere or just in the last n frames
       last: 10 # Prune only Gaussians added during the last k frames (Hint: this needs to be <= n_last_frames)
-      dont_prune_latest: 0 # Never prune the latest Gaussians as this leads to unnecessary add / delete
+      dont_prune_latest: 0 # never prune the most recent k frames (Hint: avoids to always prune and densify needlessly)
       visibility_th: 2 # Gaussians not visible by at least this many frames are pruned
 
   # How often to prune and densify gaussians during optimization
   prune_densify_every: 5 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densification
   prune_densify_until: 20 # dont do this after this iteration
 
-  ## Densification parameters
-  densify:
-    # FIXME this was not correctly implemented! We need to recompile the CUDA kernels with some changes added
-    accumulate_pixels: False # Abs GS / Pixel GS averaging over gradients of contributing gaussians
-    # Vanilla 3DGS splitting and densification strategy
-    vanilla:
-      max_grad: 0.001 # Gaussians with gradients above this are split (smaller -> denser)
-      extent: 6  # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
-      min_opacity: 0.01 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
-      max_screen_size: 10 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
-    
   # How to Filter the Tracking Map before feeding into Mapper
   filter: # Parameter for filtering incoming points from the SLAM system
     multiview: True # Only initialize Gaussians that are consistent in multiple views
@@ -92,7 +90,7 @@ loss:
 refinement:
   optimize_poses: False
 
-  iters: 0 # Optimize over this many different batches
+  iters: 2000 # Optimize over this many different batches
   batch_iters: 1 # Optimize each batch this many times
   lr_factor: 0.1 # Change the learning rate for refinement
   bs: 40 # Batch size for refinement 
@@ -101,20 +99,11 @@ refinement:
   sampling:
     use_non_keyframes: False # Use RGB non-keyframes as well during map refinement
     kf_at_least: 0.5 # Always make sure to have > x% keyframes in a batch
-    weighted: False # Sample frames according to their loss, i.e. frames with higher loss have a higher probability
     use_neighborhood: False # Use neighborhoods around random frames to have more spatial overlap
     neighborhood_size: 5 # How many frames to include in the neighborhood
 
-  prune_densify_every: 50 # This uses i) vanilla split and clone from 3DGS and ii) opacity based densificatio# This has to be an uneven number
-  densify_until: 250 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
-
-  densify:
-    # Vanilla 3DGS splitting and densification strategy
-    vanilla:
-      max_grad: 0.005 # Gaussians with gradients above this are split (smaller -> denser)
-      extent: 5 # Gaussians with scale smaller than self.percent_dense * extent get cloned (bigger -> denser)
-      min_opacity: 0.05 # Gaussians with opacity lower than this get pruned (bigger -> more pruning)
-      max_screen_size: 10 # Gaussians with radius bigger than this get pruned (smaller -> more pruning)
+  prune_densify_every: 100 
+  densify_until: 1000 # Dont densify/prune after this many iterations, ALL gaussians are well optimized
 
 
 # Backpropagate the Render updates into Tracking system
@@ -135,7 +124,7 @@ feedback:
 # Parameters for transfer SLAM -> Renderer
 input:
   sensor_type: 'depth'
-  pcd_downsample_init: 1 # This is a constant downsampling factor
+  pcd_downsample_init: 32 # This is a constant downsampling factor
   pcd_downsample: 16 # You ideally have ~5-10k points per frame
   adaptive_pointsize: False
   point_size: 0.02
