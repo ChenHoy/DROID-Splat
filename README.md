@@ -170,7 +170,7 @@ This will return converged intrinsics. When using the [Metric3D](https://github.
 - We did not experiment with calibration of other models, so you might need to tweak the code
 
 ### Replica
-Download the data from [Google Drive](https://drive.google.com/drive/folders/1RJr38jvmuIV717PCEcBkzV2qkqUua-Fx?usp=sharing) and adjust the input in the ```configs/Replica.base.yaml```
+Download the data from [Google Drive](https://drive.google.com/file/d/1JvmugGepIPHc7syoFTjSGNxhEqj4OkaV/view?usp=drive_link) and adjust the input in the ```configs/Replica.base.yaml```
 
 ### TUM-RGBD
 Download the data from [TUM](https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download) and adjust the input path in the ```configs/TUM_RGBD/base.yaml```. 
